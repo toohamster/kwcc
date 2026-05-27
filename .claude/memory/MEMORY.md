@@ -49,6 +49,13 @@
 - Bridge API 开发模式：参数提取模板
 - NanoVG 渲染技巧：字体、矩形、描边、裁剪
 - 调试检查清单
+- JS 文件模块化：load() 函数、模块状态持久化
+
+### [GitHub 发布流程](deploy_workflow.md)
+- GitHub Token 提取方法
+- 功能分支 → main 的完整发布流程（PR、合并、打标签、Release）
+- 版本号自动递增规则（vX.Y.Z）
+- 保留远程分支、留在当前分支等注意事项
 
 ## 快速命令
 ```bash
