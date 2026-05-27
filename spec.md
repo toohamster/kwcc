@@ -25,7 +25,7 @@
   - 构建工具 (2 个 .c，仅在 make 时运行): `mquickjs_build.c`, `mqjs_stdlib.c`
   - 来源: `https://github.com/bellard/mquickjs`
   - 目录: `deps/mquickjs/`
-- **Assets**: 需下载一个开源 `.ttf` 字体（如 Roboto）至 `./assets/`。
+- **Assets**: 开源 `.ttf` 字体（Roboto）存放于 `./assets/`。
 
 ---
 
@@ -40,10 +40,15 @@
 ├── src/             # 项目 C 源码
 │   ├── main.m       # Sokol 窗口生命周期与渲染主循环 (Objective-C)
 │   ├── bridge.c     # mquickjs 与 microui 的 API 绑定
-│   └── bridge.h     # Bridge 公共接口
+│   ├── bridge.h     # Bridge 公共接口
+│   ├── llog.h       # 日志包装器 (解决 macOS syslog.h 宏冲突)
+│   ├── mquickjs_stubs.c  # mquickjs stdlib stub 函数
+│   └── mquickjs_stubs.h  # stub 函数声明
 ├── app/             # 脚本层
-│   └── main.js      # UI 解析逻辑与业务代码
+│   ├── main.js      # UI 入口文件（布局、事件绑定）
+│   └── calc_logic.js # 业务逻辑模块（状态、计算函数）
 ├── assets/          # 字体与静态资源
+├── .claude/memory/  # 开发经验与记忆文件
 ├── setup.sh         # 依赖下载脚本
 └── Makefile         # 两阶段编译配置 (macOS)
 ```
@@ -59,18 +64,31 @@
    - 调用 mquickjs 执行 JS 脚本。
    - JS 通过 `ui.button()` 等调用触发 microui 逻辑。
    - 遍历 microui 指令队列 (`mu_next_command`)，调用 NanoVG 函数绘图。
-4. **Retina 适配**: 使用 `sapp_width()` / `sapp_height()` 获取窗口像素尺寸。
+4. **坐标系**: `high_dpi=false`（默认），所有组件统一在逻辑像素坐标系中工作，无需 DPI 转换。
 
 ### 4.2 脚本桥接 API
 通过 `kwcc_ui()` 全局函数 + JS 包装注入 `ui` 对象:
 - `ui.label(text)`
 - `ui.button(text)` → 返回布尔值表示是否被点击
-- `ui.beginWindow(title, x, y, w, h)` / `ui.endWindow()`
-- `ui.layoutRow(height)`
+- `ui.beginWindow(title, x, y, w, h, opt)` / `ui.endWindow()`
+- `ui.beginPanel(name, opt)` / `ui.endPanel()` — 无标题栏的面板容器
+- `ui.layoutRow(height, w1, w2, ...)` — `-1` 表示充满剩余空间
 - `ui.slider(text, value, min, max)` → 返回当前值
+- `ui.setNext(x, y, w, h)` — 绝对定位下一个控件
+- `ui.rect(x, y, w, h, r, g, b)` — 绘制自定义颜色矩形
+- `ui.display(text)` — 计算器显示区（深色背景 + 右对齐白色文字）
+- `ui.textCentered(text)` — 水平居中文字
+
+全局函数:
+- `load(filename)` — 读取并执行 JS 文件，实现模块化
+- `print()`, `console.log()` — 日志输出
+- `gc()` — 垃圾回收
 
 ### 4.3 microui 渲染管线
-microui 的 draw hooks 被替换为命令列表 (`mu_Command`)。在 Sokol frame 回调中遍历该列表，将 `MU_COMMAND_RECT` / `MU_COMMAND_TEXT` 转换为 NanoVG 调用。
+microui 的 draw hooks 被替换为命令列表 (`mu_Command`)。在 Sokol frame 回调中遍历该列表，将 `MU_COMMAND_RECT` / `MU_COMMAND_TEXT` / `MU_COMMAND_ICON` 转换为 NanoVG 调用。
+
+### 4.4 JS 文件模块化
+通过 `load("app/calc_logic.js")` 将业务逻辑拆分到独立文件。模块内使用 `typeof _initDone == "undefined"` 模式保持跨帧状态持久化，防止每帧重新初始化。
 
 ---
 
@@ -100,5 +118,24 @@ microui 的 draw hooks 被替换为命令列表 (`mu_Command`)。在 Sokol frame
 ### 第三步：集成 microui 与 mquickjs ✅
 实现 `bridge.c`。在 JS 中写一个简单的循环，点击按钮时控制台能打印 "Hello"。
 
-### 第四步：极简标签渲染
-在 `main.js` 中实现一个解析器，能解析 `<button text="提交" />` 字符串并映射到 `ui.button` 调用。
+### 第四步：完整计算器示例 ✅
+实现了一个完整的计算器 demo：
+- 4x4 按钮网格布局，无错位
+- 深色显示区 + 右对齐白色文字
+- 完整的四则运算、小数点、清除逻辑
+- `MU_OPT_NOCLOSE` 隐藏关闭按钮，标题栏无多余图标
+- JS 拆分为 `main.js`（UI）+ `calc_logic.js`（业务逻辑）
+
+### 第五步：库源码分析与记忆系统 ✅
+对 microui、sokol、nanovg 三个库进行了源码级分析，总结出：
+- 布局系统工作机制（layoutRow/-1 含义/状态切换）
+- Widget ID 生成规则（fnv-1a 哈希）
+- 立即模式状态持久化机制
+- 真实字体测量（nvgTextBounds 替代硬编码）
+- 坐标系统一方案（high_dpi=false）
+- 调试检查清单
+
+所有经验保存到 `.claude/memory/` 目录下的 6 个专题文件中。
+
+### 第六步：GitHub 发布流程 ✅
+项目已部署到 GitHub，主分支为 `main`。发布流程文档保存在 `.claude/memory/deploy_workflow.md`。
