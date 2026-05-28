@@ -8,9 +8,13 @@
 #include "microui/microui.h"
 #include "nanovg/nanovg.h"
 #include "llog.h"
+#include "kwcc.h"
 
 #include "jsapi.h"
 #include "mquickjs/mqjs_stdlib.h"
+
+#define NANOSVG_IMPLEMENTATION
+#include "nanosvg/nanosvg.h"
 
 /* Extern: NVG context set in main.m */
 extern NVGcontext *vg;
@@ -21,7 +25,122 @@ static mu_Context g_mu;
 static mu_Real    g_slider_val = 0.5f;  /* persistent slider state (microui uses ptr as ID) */
 static const char *g_current_font = NULL; /* current active font name */
 
-/* Forward declaration */
+/* ── SVG rendering ──────────────────────────────────────────── */
+
+/* ── Extract NVG color from nanosvg color (stored as R|(G<<8)|(B<<16)) ── */
+static NVGcolor nsvg_color(unsigned int c) {
+    unsigned char r = (c >>  0) & 0xFF;
+    unsigned char g = (c >>  8) & 0xFF;
+    unsigned char b = (c >> 16) & 0xFF;
+    return nvgRGBA(r, g, b, 0xFF);
+}
+
+/* ── SVG command queue (filled during JS execution, rendered after nvgBeginFrame) ── */
+#define MAX_SVG_QUEUE 8
+typedef struct {
+    char path[256];
+    float x, y, w, h;
+    mu_Rect clip;  /* container clip rect for absolute positioning */
+} svg_cmd_t;
+
+static svg_cmd_t g_svg_queue[MAX_SVG_QUEUE];
+static int g_svg_count = 0;
+
+static void kwcc_queue_svg(const char *path, float x, float y, float w, float h) {
+    if (g_svg_count >= MAX_SVG_QUEUE) return;
+    svg_cmd_t *cmd = &g_svg_queue[g_svg_count++];
+    strncpy(cmd->path, path, sizeof(cmd->path) - 1);
+    cmd->path[sizeof(cmd->path) - 1] = '\0';
+    cmd->x = x; cmd->y = y; cmd->w = w; cmd->h = h;
+    /* Capture current container clip rect for absolute positioning */
+    cmd->clip = mu_get_clip_rect(&g_mu);
+}
+
+/* ── Draw one parsed SVG shape ── */
+static void draw_svg_image(NSVGimage *image, float ox, float oy, float scale) {
+    nvgSave(vg);
+    nvgTranslate(vg, ox, oy);
+    nvgScale(vg, scale, scale);
+
+    for (NSVGshape *shape = image->shapes; shape; shape = shape->next) {
+        if (!(shape->flags & NSVG_FLAGS_VISIBLE)) continue;
+
+        for (NSVGpath *p = shape->paths; p; p = p->next) {
+            if (!p || p->npts < 2) continue;
+
+            float *pts = p->pts;
+            int n = p->npts;
+
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, pts[0], pts[1]);
+            for (int i = 1; i + 2 < n; i += 3) {
+                nvgBezierTo(vg,
+                    pts[i*2],     pts[i*2+1],
+                    pts[i*2+2],   pts[i*2+3],
+                    pts[i*2+4],   pts[i*2+5]);
+            }
+            if (p->closed) nvgClosePath(vg);
+
+            /* Fill */
+            if (shape->fill.type == NSVG_PAINT_COLOR) {
+                nvgFillColor(vg, nsvg_color(shape->fill.color));
+                nvgFill(vg);
+            }
+
+            /* Stroke */
+            if (shape->stroke.type == NSVG_PAINT_COLOR && shape->strokeWidth > 0) {
+                nvgStrokeColor(vg, nsvg_color(shape->stroke.color));
+                nvgStrokeWidth(vg, shape->strokeWidth);
+                nvgLineCap(vg, shape->strokeLineCap);
+                nvgLineJoin(vg, shape->strokeLineJoin);
+                nvgStroke(vg);
+            }
+        }
+    }
+
+    nvgRestore(vg);
+}
+
+void kwcc_render_svg(void) {
+    if (!vg) return;
+
+    for (int i = 0; i < g_svg_count; i++) {
+        svg_cmd_t *cmd = &g_svg_queue[i];
+
+        NSVGimage *image = nsvgParseFromFile(cmd->path, "px", 96.0f);
+        if (!image) {
+            log_error("svg: cannot parse '%s'", cmd->path);
+            continue;
+        }
+
+        float svg_w = image->width > 0 ? image->width : 1;
+        float svg_h = image->height > 0 ? image->height : 1;
+
+        float sx = cmd->w / svg_w;
+        float sy = cmd->h / svg_h;
+        float scale = (sx < sy) ? sx : sy;
+
+        float sw = svg_w * scale;
+        float sh = svg_h * scale;
+        /* cmd.x/cmd.y are relative to layout body; offset by clip rect for screen space */
+        float ox = cmd->clip.x + cmd->x + (cmd->w - sw) / 2.0f;
+        float oy = cmd->clip.y + cmd->y + (cmd->h - sh) / 2.0f;
+
+        /* Set clip to container body area */
+        nvgSave(vg);
+        nvgScissor(vg, cmd->clip.x, cmd->clip.y, cmd->clip.w, cmd->clip.h);
+
+        draw_svg_image(image, ox, oy, scale);
+
+        nvgRestore(vg);
+        nsvgDelete(image);
+    }
+
+    /* Clear queue for next frame */
+    g_svg_count = 0;
+}
+
+/* ── Forward declaration ──────────────────────────────────── */
 void kwcc_load_font_dir(const char *dir_path);
 
 /* ── microui text measurement callbacks (real font metrics) ── */
@@ -198,6 +317,24 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         }
         return JS_UNDEFINED;
     }
+    if (strcmp(method, "svg") == 0) {
+        JSCStringBuf path_buf;
+        JSValue arg = argc > 0 ? argv[0] : JS_UNDEFINED;
+        if (JS_IsUndefined(arg)) return JS_UNDEFINED;
+        const char *js_path = JS_ToCString(ctx, arg, &path_buf);
+        if (!js_path) return JS_UNDEFINED;
+        /* Copy to local buffer since JS_ToCString pointer may be unstable */
+        char path[256];
+        strncpy(path, js_path, sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+        int ix = 0, iy = 0, iw = 100, ih = 100;
+        if (argc > 1) JS_ToInt32(ctx, &ix, argv[1]);
+        if (argc > 2) JS_ToInt32(ctx, &iy, argv[2]);
+        if (argc > 3) JS_ToInt32(ctx, &iw, argv[3]);
+        if (argc > 4) JS_ToInt32(ctx, &ih, argv[4]);
+        kwcc_queue_svg(path, (float)ix, (float)iy, (float)iw, (float)ih);
+        return JS_UNDEFINED;
+    }
     return JS_UNDEFINED;
 }
 
@@ -311,7 +448,8 @@ JSContext *kwcc_create_js(void) {
         "ui.textCentered = function(t) { kwcc_ui('textCentered',t); };\n"
         "ui.loadFont = function(n,p) { kwcc_ui('loadFont',n,p); };\n"
         "ui.setFont = function(n) { kwcc_ui('setFont',n); };\n"
-        "ui.loadFontDir = function(d) { kwcc_ui('loadFontDir',d); };\n";
+        "ui.loadFontDir = function(d) { kwcc_ui('loadFontDir',d); };\n"
+        "ui.svg = function(p,x,y,w,h) { kwcc_ui('svg',p,x||0,y||0,w||100,h||100); };\n";
     JSValue meth_result = JS_Eval(ctx, methods_js, strlen(methods_js), "<kwcc>", 0);
     if (JS_IsException(meth_result)) {
         JSValue exc = JS_GetException(ctx);

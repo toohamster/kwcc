@@ -18,5 +18,6 @@ void          kwcc_input_mousedown(int x, int y, int btn);
 void          kwcc_input_mouseup(int x, int y, int btn);
 void          kwcc_input_scroll(int x, int y);
 void          kwcc_input_text(const char *text);
+void          kwcc_render_svg(void);
 
 #endif

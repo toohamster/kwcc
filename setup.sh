@@ -3,7 +3,7 @@
 set -euo pipefail
 
 DEPS_DIR="$(cd "$(dirname "$0")" && pwd)/deps"
-mkdir -p "$DEPS_DIR/sokol" "$DEPS_DIR/nanovg" "$DEPS_DIR/microui" "$DEPS_DIR/mquickjs"
+mkdir -p "$DEPS_DIR/sokol" "$DEPS_DIR/nanovg" "$DEPS_DIR/microui" "$DEPS_DIR/mquickjs" "$DEPS_DIR/nanosvg"
 mkdir -p "$(dirname "$0")/assets"
 
 download() {
@@ -61,8 +61,13 @@ if [ -n "$FOUND_DIR" ]; then
 fi
 rm -rf "$MQJS_TMP"
 
+# --- nanosvg (SVG 解析) ---
+echo "[5/6] Downloading nanosvg..."
+NANOSVG_BASE="https://raw.githubusercontent.com/memononen/nanosvg/master/src"
+download "$NANOSVG_BASE/nanosvg.h"  "$DEPS_DIR/nanosvg/nanosvg.h"
+
 # --- 字体 (Roboto) ---
-echo "[5/5] Downloading font..."
+echo "[6/6] Downloading font..."
 FONT_URL="https://fonts.gstatic.com/s/roboto/v30/KFOmCnqEu92Fr1Me5Q.ttf"
 download "$FONT_URL" "$(dirname "$0")/assets/Roboto-Regular.ttf"
 

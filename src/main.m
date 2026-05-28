@@ -137,6 +137,7 @@ static void frame(void) {
 
     nvgBeginFrame(vg, (float)w, (float)h, 1.0f);
     render_mu_commands();
+    kwcc_render_svg();
     nvgEndFrame(vg);
 
     sg_end_pass();
