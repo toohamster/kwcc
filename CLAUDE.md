@@ -8,6 +8,7 @@ Before starting work, read `.claude/memory/MEMORY.md` for a summary of key proje
 Detailed documents in `.claude/memory/` cover:
 - **mquickjs ES5 syntax support** — see `.claude/memory/mquickjs_es5.md`
 - **Build pitfalls & resolved issues** — see `.claude/memory/build_pitfalls.md`
+- **nanosvg SVG analysis** — see `.claude/memory/nanosvg_analysis.md` (includes SVG cache enhancement docs)
 
 ## Project Overview
 
@@ -44,7 +45,8 @@ make run
 │   ├── nanovg/     #   Vector rendering
 │   ├── microui/    #   IMGUI layout engine
 │   ├── mquickjs/   #   JS engine + build tool (two-stage)
-│   └── log/        #   rxi/log.c logging library
+│   ├── log/        #   rxi/log.c logging library
+│   └── nanosvg/    #   rxi/nanosvg SVG parser (single-header)
 ├── src/
 │   ├── main.m          # Sokol lifecycle, NanoVG rendering, input routing
 │   ├── kwcc.c          # UI engine core: JS ↔ microui ↔ NanoVG bridge
@@ -55,14 +57,18 @@ make run
 ├── app/
 │   ├── main.js         # JS entry point (via load() switches examples)
 │   └── examples/       # Example projects
-│       └── calculator/
-│           ├── main.js      # Calculator UI layout
-│           └── calc_logic.js # Calculator business logic
+│       ├── calculator/
+│       │   ├── main.js      # Calculator UI layout
+│       │   └── calc_logic.js # Calculator business logic
+│       └── svg/
+│           ├── main.js      # SVG rendering example (inline + file)
+│           ├── star.svg     # Star test graphic
+│           └── test.svg     # Original test graphic
 ├── assets/         # Static resources (Roboto font)
 ├── setup.sh        # Dependency download script
 ├── Makefile        # Two-stage build configuration
 ├── spec.md         # Project specification
-└── output.log      # Runtime log file
+└── kwcc.log      # Runtime log file
 ```
 
 ## Architecture
@@ -80,6 +86,7 @@ The `ui` object is injected via `kwcc_ui()` global function + JS wrapper in `kwc
 - `ui.label(text)`
 - `ui.slider(text, value, min, max)` -> returns current value
 - `ui.layoutRow(height)`
+- `ui.svg(path_or_svg, x, y, w, h)` — render SVG from file path or inline string (`data[0] == '<'`)
 
 Global functions available in JS: `print()`, `console.log()`, `kwcc_ui()`, `gc()`, `load()`
 
@@ -118,9 +125,11 @@ mquickjs is a stripped-down QuickJS with mostly ES5 support. Key findings from s
 
 ## Known Issues
 
-1. **JS not executing** — `kwcc_create_js()` fails to create the `ui` object via `JS_Eval` with `SyntaxError: expecting ';'`. The fix is to use mquickjs-compatible syntax (see mquickjs ES5 Support section above). `app/main.js` then fails with `ReferenceError: variable 'ui' is not defined` as a consequence.
+1. **Logging** — `log_add_fp()` is called in `init()` to write to `kwcc.log`. File is opened with `"w"` mode (truncated each run).
 
-2. **Logging** — `log_add_fp()` is called in `init()` to write to `output.log`. File is opened with `"w"` mode (truncated each run).
+## SVG Caching
+
+SVG rendering uses a 128-slot FNV-1a hash cache with frame-safe eviction. Cache types and externs are exposed via `kwcc.h` (`svg_cache_t`, `g_svg_cache`, `g_svg_cache_next`, `g_frame_counter`). `main.m` reads images directly from the cache during rendering. Inline SVG detection: `data[0] == '<'` → `nsvgParse`, otherwise `nsvgParseFromFile`.
 
 ## Input Handling
 

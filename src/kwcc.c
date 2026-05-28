@@ -24,18 +24,88 @@ static mu_Context g_mu;
 static mu_Real    g_slider_val = 0.5f;  /* persistent slider state (microui uses ptr as ID) */
 static const char *g_current_font = NULL; /* current active font name */
 
+/* ── SVG cache ──────────────────────────────────────────────── */
+
+svg_cache_t g_svg_cache[SVG_CACHE_SIZE];
+int         g_svg_cache_next = 0;
+int         g_frame_counter  = 0;
+
+static uint32_t fnv1a(const char *s) {
+    uint32_t h = 2166136261;
+    while (*s) { h ^= *s++; h *= 16777619; }
+    return h;
+}
+
+static int svg_resolve(const char *data, int is_inline) {
+    uint32_t hash = fnv1a(data);
+    size_t   len  = strlen(data);
+
+    /* 1. linear scan for hash + content_len match */
+    for (int i = 0; i < SVG_CACHE_SIZE; i++) {
+        if (g_svg_cache[i].in_use &&
+            g_svg_cache[i].hash == hash &&
+            g_svg_cache[i].content_len == len) {
+            g_svg_cache[i].frame_id = g_frame_counter;
+            return i;
+        }
+    }
+
+    /* 2. cache miss → parse */
+    NSVGimage *img = NULL;
+    if (is_inline) {
+        char *buf = strdup(data);
+        img = nsvgParse(buf, "px", 96.0f);
+        free(buf);
+    } else {
+        img = nsvgParseFromFile(data, "px", 96.0f);
+    }
+    if (!img) { log_warn("svg: parse failed (is_inline=%d)", is_inline); return -1; }
+
+    /* 3. evict + store */
+    int slot = g_svg_cache_next;
+
+    /* safety: skip eviction if slot is used this frame */
+    if (g_svg_cache[slot].in_use && g_svg_cache[slot].frame_id >= g_frame_counter) {
+        int found = -1;
+        for (int i = 0; i < SVG_CACHE_SIZE; i++) {
+            if (g_svg_cache[i].in_use && g_svg_cache[i].frame_id < g_frame_counter) {
+                found = i;
+                break;
+            }
+        }
+        if (found >= 0) {
+            slot = found;
+        } else {
+            nsvgDelete(img);
+            return -1;
+        }
+    }
+
+    if (g_svg_cache[slot].in_use && g_svg_cache[slot].image) {
+        nsvgDelete(g_svg_cache[slot].image);
+    }
+
+    g_svg_cache[slot].hash = hash;
+    g_svg_cache[slot].content_len = len;
+    g_svg_cache[slot].image = img;
+    g_svg_cache[slot].frame_id = g_frame_counter;
+    g_svg_cache[slot].in_use = 1;
+
+    g_svg_cache_next = (slot + 1) % SVG_CACHE_SIZE;
+    return slot;
+}
+
 /* ── SVG rendering ──────────────────────────────────────────── */
 
-static void kwcc_queue_svg(const char *path, float x, float y, float w, float h) {
+static void kwcc_queue_svg(const char *data, int is_inline, float x, float y, float w, float h) {
     mu_Rect clip = mu_get_clip_rect(&g_mu);
-    /* Compute screen-space position now (clip + relative offset) */
-    float sx = clip.x + x;
-    float sy = clip.y + y;
-    /* Store SVG command in microui command list (type=32, after MU_COMMAND_MAX) */
-    mu_SvgCommand *cmd = (mu_SvgCommand *)mu_push_command(&g_mu, MU_COMMAND_SVG, sizeof(mu_SvgCommand) + strlen(path));
-    cmd->rect.x = (int)sx; cmd->rect.y = (int)sy;
-    cmd->rect.w = (int)w;  cmd->rect.h = (int)h;
-    memcpy(cmd->path, path, strlen(path) + 1);
+    int cache_idx = svg_resolve(data, is_inline);
+    mu_SvgCommand *cmd = (mu_SvgCommand *)mu_push_command(&g_mu, MU_COMMAND_SVG, sizeof(mu_SvgCommand));
+    cmd->rect.x = (int)(clip.x + x);
+    cmd->rect.y = (int)(clip.y + y);
+    cmd->rect.w = (int)w;
+    cmd->rect.h = (int)h;
+    cmd->cache_idx = cache_idx;
 }
 
 /* ── Forward declaration ──────────────────────────────────── */
@@ -216,21 +286,24 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         return JS_UNDEFINED;
     }
     if (strcmp(method, "svg") == 0) {
-        JSCStringBuf path_buf;
+        JSCStringBuf buf;
         JSValue arg = argc > 0 ? argv[0] : JS_UNDEFINED;
         if (JS_IsUndefined(arg)) return JS_UNDEFINED;
-        const char *js_path = JS_ToCString(ctx, arg, &path_buf);
-        if (!js_path) return JS_UNDEFINED;
-        /* Copy to local buffer since JS_ToCString pointer may be unstable */
-        char path[256];
-        strncpy(path, js_path, sizeof(path) - 1);
-        path[sizeof(path) - 1] = '\0';
+        const char *js_data = JS_ToCString(ctx, arg, &buf);
+        if (!js_data) return JS_UNDEFINED;
+
+        char data[4096];
+        strncpy(data, js_data, sizeof(data) - 1);
+        data[sizeof(data) - 1] = '\0';
+
         int ix = 0, iy = 0, iw = 100, ih = 100;
         if (argc > 1) JS_ToInt32(ctx, &ix, argv[1]);
         if (argc > 2) JS_ToInt32(ctx, &iy, argv[2]);
         if (argc > 3) JS_ToInt32(ctx, &iw, argv[3]);
         if (argc > 4) JS_ToInt32(ctx, &ih, argv[4]);
-        kwcc_queue_svg(path, (float)ix, (float)iy, (float)iw, (float)ih);
+
+        int is_inline = (data[0] == '<');
+        kwcc_queue_svg(data, is_inline, (float)ix, (float)iy, (float)iw, (float)ih);
         return JS_UNDEFINED;
     }
     return JS_UNDEFINED;
@@ -367,6 +440,7 @@ void kwcc_destroy_js(JSContext *ctx) {
 
 void kwcc_process_js(JSContext *ctx, const char *js_text) {
     if (!js_text) return;
+    g_frame_counter++;
 
     mu_begin(&g_mu);
 

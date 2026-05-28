@@ -89,8 +89,14 @@ static void render_mu_commands(void) {
         case MU_COMMAND_SVG:
             {
                 mu_SvgCommand *c = (mu_SvgCommand *)cmd;
-                NSVGimage *image = nsvgParseFromFile(c->path, "px", 96.0f);
-                if (!image) { log_error("svg: cannot parse '%s'", c->path); break; }
+                if (c->cache_idx < 0 || c->cache_idx >= SVG_CACHE_SIZE) {
+                    break;
+                }
+                NSVGimage *image = g_svg_cache[c->cache_idx].image;
+                if (!image) break;
+
+                /* mark active this frame */
+                g_svg_cache[c->cache_idx].frame_id = g_frame_counter;
 
                 float svg_w = image->width > 0 ? image->width : 1;
                 float svg_h = image->height > 0 ? image->height : 1;
@@ -134,7 +140,6 @@ static void render_mu_commands(void) {
                     }
                 }
                 nvgRestore(vg);
-                nsvgDelete(image);
             }
             break;
         }

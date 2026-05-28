@@ -55,8 +55,10 @@
 │       │   ├── main.js      # 计算器 UI 布局
 │       │   └── calc_logic.js # 计算器业务逻辑
 │       └── svg/
-│           └── main.js      # SVG 渲染示例
-├── assets/          # 字体与静态资源 (test.svg 等)
+│           ├── main.js      # SVG 渲染示例
+│           ├── star.svg     # 五角星测试
+│           └── test.svg     # 原始测试图形
+├── assets/          # 字体与静态资源（Roboto.ttf 等）
 ├── .claude/memory/  # 开发经验与记忆文件
 ├── setup.sh         # 依赖下载脚本
 └── Makefile         # 两阶段编译配置 (macOS)
@@ -87,7 +89,7 @@
 - `ui.rect(x, y, w, h, r, g, b)` — 绘制自定义颜色矩形
 - `ui.display(text)` — 计算器显示区（深色背景 + 右对齐白色文字）
 - `ui.textCentered(text)` — 水平居中文字
-- `ui.svg(path, x, y, w, h)` — 渲染 SVG 文件到指定位置
+- `ui.svg(path_or_svg, x, y, w, h)` — 渲染 SVG。参数以 `<` 开头时作为内联 SVG 字符串解析，否则作为文件路径
 
 全局函数:
 - `load(filename)` — 读取并执行 JS 文件，实现模块化
@@ -159,4 +161,13 @@ microui 的 draw hooks 被替换为命令列表 (`mu_Command`)。在 Sokol frame
 - SVG 作为 `MU_COMMAND_SVG`（type=32）插入 microui 命令队列，通过 zindex 排序确保正确窗口层级
 - nanosvg 解析的 SVG 元素通过 NanoVG bezier 路径渲染
 - 独立示例：`app/examples/svg/main.js`
-- `NANOSVG_IMPLEMENTATION` 只在 `main.m` 中定义一次（避免链接重复符号）
+### 第八步：SVG 缓存增强（内联字符串 + 帧安全 128 槽缓存）✅
+
+将 SVG 渲染从每帧重复解析升级为 128 槽 FNV-1a 哈希缓存：
+
+- `mu_SvgCommand` 从变长结构体（`char path[1]`）改为固定大小（`int cache_idx`），~20 字节
+- 内联 SVG 检测：`data[0] == '<'` → 调用 `nsvgParse`，否则 `nsvgParseFromFile`
+- **帧安全淘汰机制**：跳过 `frame_id >= 当前帧` 的槽位，禁止淘汰当前帧正在使用的缓存
+- 缓存结构体 (`svg_cache_t`) 通过 `kwcc.h` 的 extern 声明共享给 `main.m`，由渲染端从缓存取 image，生命周期完全由缓存管理
+- `nsvgParse` 会修改输入字符串，使用 `strdup` 后 `free` 避免副作用
+- 文件移动到 `app/examples/svg/` 目录，与示例代码内聚

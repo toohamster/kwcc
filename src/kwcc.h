@@ -2,8 +2,27 @@
 #ifndef KWCC_H
 #define KWCC_H
 
+#include <stdint.h>
 #include "mquickjs/mquickjs.h"
 #include "microui/microui.h"
+
+/* ── SVG cache (shared with main.m for rendering) ── */
+#define SVG_CACHE_SIZE 128
+
+/* Forward declare — NSVGimage defined in nanosvg.h (included in main.m) */
+typedef struct NSVGimage NSVGimage;
+
+typedef struct {
+    uint32_t     hash;
+    size_t       content_len;
+    NSVGimage   *image;
+    int          frame_id;
+    int          in_use;
+} svg_cache_t;
+
+extern svg_cache_t g_svg_cache[SVG_CACHE_SIZE];
+extern int         g_svg_cache_next;
+extern int         g_frame_counter;
 
 void          kwcc_init(void);
 void          kwcc_free(void);

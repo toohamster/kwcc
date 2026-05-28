@@ -99,15 +99,16 @@ if (path->closed) nvgClosePath(vg);
 ## 渲染流程
 
 ```
-1. nsvgParseFromFile() → NSVGimage
-2. 遍历 shapes 链表
-3. 对每个 shape: 检查 flags & NSVG_FLAGS_VISIBLE
-4. 遍历 shape->paths 链表
-5. 对每个 path: 用 NanoVG 绘制 bezier 曲线
+1. svg_resolve() → cache_idx (命中缓存或解析后存入)
+2. kwcc_queue_svg() → MU_COMMAND_SVG (只存 cache_idx)
+3. 渲染端从 g_svg_cache[cache_idx].image 取 NSVGimage
+4. 遍历 shapes 链表
+5. 对每个 shape: 检查 flags & NSVG_FLAGS_VISIBLE
+6. 遍历 shape->paths 链表
+7. 对每个 path: 用 NanoVG 绘制 bezier 曲线
    - nvgBeginPath → nvgMoveTo → nvgBezierTo
    - Fill (如果 fill.type == NSVG_PAINT_COLOR)
    - Stroke (如果 stroke.type == NSVG_PAINT_COLOR && strokeWidth > 0)
-6. nsvgDelete() 释放
 ```
 
 ## 与 NanoVG 的对应关系
@@ -131,6 +132,82 @@ if (path->closed) nvgClosePath(vg);
 4. **SVG 命名空间不影响解析**: `xmlns` 属性被忽略
 5. **文件路径**: `nsvgParseFromFile` 使用 `fopen("rb")`，需要正确的相对或绝对路径
 6. **闭合路径**: `path->closed` 为 1 时需要在绘制后调用 `nvgClosePath`
+7. **`nsvgParse` 会修改输入字符串**: 必须 `strdup` 后再传入，否则原始 buffer 会被破坏
+
+## SVG 缓存增强（内联字符串 + 帧安全 128 槽缓存）
+
+### 架构设计
+
+**问题**：原版每帧都调用 `nsvgParseFromFile` 重复解析 SVG，性能浪费。内联 SVG 字符串无法从文件加载。
+
+**解决方案**：128 槽 FNV-1a 哈希缓存，按帧标记活跃，帧安全淘汰。
+
+### 缓存结构体
+
+```c
+typedef struct {
+    uint32_t     hash;           // FNV-1a 哈希值
+    size_t       content_len;    // 内容长度（区分同哈希不同内容）
+    NSVGimage   *image;          // 解析后的图像
+    int          frame_id;       // 最后使用帧号
+    int          in_use;         // 槽位是否已使用
+} svg_cache_t;
+```
+
+通过 `kwcc.h` 的 extern 声明共享：
+```c
+#define SVG_CACHE_SIZE 128
+extern svg_cache_t g_svg_cache[SVG_CACHE_SIZE];
+extern int         g_svg_cache_next;
+extern int         g_frame_counter;
+```
+
+`main.m` include `kwcc.h` 后可直接访问，无需额外 extern。
+
+### mu_SvgCommand 结构体变更
+
+**旧版**（变长）：
+```c
+typedef struct { mu_BaseCommand base; mu_Rect rect; char path[1]; } mu_SvgCommand;
+// 实际大小 = sizeof(mu_BaseCommand) + sizeof(mu_Rect) + strlen(path) + 1
+```
+
+**新版**（固定 ~20 字节）：
+```c
+typedef struct { mu_BaseCommand base; mu_Rect rect; int cache_idx; } mu_SvgCommand;
+```
+
+### 缓存解析流程 (`svg_resolve`)
+
+1. 计算 `fnv1a(data)` 哈希，记录 `content_len`
+2. 线性扫描缓存，匹配 `hash + content_len` → 命中则更新 `frame_id` 返回
+3. 未命中 → 解析：
+   - `is_inline`（`data[0] == '<'`）→ `nsvgParse(strdup(data), ...)` + `free`
+   - 否则 → `nsvgParseFromFile(data, ...)`
+4. 淘汰策略：
+   - 首选 `g_svg_cache_next`（轮转）
+   - 如果槽位 `frame_id >= 当前帧`，扫描其他槽位找可淘汰的
+   - 全部不可淘汰 → 删除新解析的 image 并返回 `-1`
+5. 存入槽位，`g_svg_cache_next = (slot + 1) % SVG_CACHE_SIZE`
+
+### 渲染端（main.m）
+
+```c
+case MU_COMMAND_SVG:
+    mu_SvgCommand *c = (mu_SvgCommand *)cmd;
+    if (c->cache_idx < 0 || c->cache_idx >= SVG_CACHE_SIZE) break;
+    NSVGimage *image = g_svg_cache[c->cache_idx].image;
+    if (!image) break;
+    g_svg_cache[c->cache_idx].frame_id = g_frame_counter;
+    // ... 原有渲染逻辑不变，移除 nsvgParseFromFile 和 nsvgDelete
+```
+
+### 关键陷阱
+
+1. **`mu_get_clip_rect` 必须在 `svg_resolve` 之前调用**：SVG 解析可能干扰 microui 状态导致 clip stack 断言失败
+2. **`nsvgParse` 会修改输入字符串**：必须 `strdup` 后传入，解析完 `free`
+3. **内联检测规则简单但有效**：`data[0] == '<'` 区分字符串 vs 文件路径
+4. **文件位置**：SVG 示例文件存放在 `app/examples/svg/` 目录，与代码内聚
 
 ## kwcc 集成架构
 
@@ -140,24 +217,25 @@ SVG 渲染不使用独立队列，而是通过 `mu_push_command` 插入 microui 
 
 ```c
 // microui.h — kwcc 扩展命令类型（type=32，给官方留 31 个空间）
+// 新版：固定大小结构体，通过 cache_idx 引用缓存
 enum {
   MU_COMMAND_MAX,
   MU_COMMAND_SVG = 32,
 };
 
-typedef struct { mu_BaseCommand base; mu_Rect rect; char path[1]; } mu_SvgCommand;
+typedef struct { mu_BaseCommand base; mu_Rect rect; int cache_idx; } mu_SvgCommand;
 ```
 
 **入队（kwcc.c）**：
 ```c
-static void kwcc_queue_svg(const char *path, float x, float y, float w, float h) {
-    mu_Rect clip = mu_get_clip_rect(&g_mu);
-    float sx = clip.x + x;  // 布局相对坐标 → 屏幕坐标
-    float sy = clip.y + y;
-    mu_SvgCommand *cmd = (mu_SvgCommand *)mu_push_command(&g_mu, MU_COMMAND_SVG, sizeof(mu_SvgCommand) + strlen(path));
-    cmd->rect.x = (int)sx; cmd->rect.y = (int)sy;
+static void kwcc_queue_svg(const char *data, int is_inline, float x, float y, float w, float h) {
+    mu_Rect clip = mu_get_clip_rect(&g_mu);  // 必须在 svg_resolve 之前调用！
+    int cache_idx = svg_resolve(data, is_inline);
+    mu_SvgCommand *cmd = (mu_SvgCommand *)mu_push_command(&g_mu, MU_COMMAND_SVG, sizeof(mu_SvgCommand));
+    cmd->rect.x = (int)(clip.x + x);
+    cmd->rect.y = (int)(clip.y + y);
     cmd->rect.w = (int)w;  cmd->rect.h = (int)h;
-    memcpy(cmd->path, path, strlen(path) + 1);
+    cmd->cache_idx = cache_idx;
 }
 ```
 
@@ -173,3 +251,7 @@ static void kwcc_queue_svg(const char *path, float x, float y, float w, float h)
 2. **NANOSVG_IMPLEMENTATION 重复定义**：在 `main.m` 和 `kwcc.c` 中都定义了 `NANOSVG_IMPLEMENTATION`，链接时 6 个重复符号。**修复**：只在 `main.m` 中定义。
 
 3. **JS_ToNumber vs JS_ToInt32**：mquickjs 中 `JS_ToNumber` 对 JS 整数参数可能返回 0，改用 `JS_ToInt32`。
+
+4. **mu_get_clip_rect 在 svg_resolve 之后调用导致断言失败**：SVG 解析可能干扰 microui 上下文状态。**修复**：先调用 `mu_get_clip_rect` 获取裁剪矩形，再调用 `svg_resolve`。
+
+5. **`mu_SvgCommand` 加入 `mu_Command` 联合体**：原版未将 `mu_SvgCommand` 加入 `mu_Command` union，可能导致内存对齐问题。**修复**：添加 `mu_SvgCommand svg` 到联合体。
