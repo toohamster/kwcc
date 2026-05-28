@@ -45,8 +45,11 @@
 │   ├── mquickjs_stubs.c  # mquickjs stdlib stub 函数
 │   └── mquickjs_stubs.h  # stub 函数声明
 ├── app/             # 脚本层
-│   ├── main.js      # UI 入口文件（布局、事件绑定）
-│   └── calc_logic.js # 业务逻辑模块（状态、计算函数）
+│   ├── main.js      # UI 入口文件（通过 load() 指向当前示例）
+│   └── examples/    # 示例集合
+│       └── calculator/
+│           ├── main.js      # 计算器 UI 布局
+│           └── calc_logic.js # 计算器业务逻辑
 ├── assets/          # 字体与静态资源
 ├── .claude/memory/  # 开发经验与记忆文件
 ├── setup.sh         # 依赖下载脚本
@@ -87,8 +90,8 @@
 ### 4.3 microui 渲染管线
 microui 的 draw hooks 被替换为命令列表 (`mu_Command`)。在 Sokol frame 回调中遍历该列表，将 `MU_COMMAND_RECT` / `MU_COMMAND_TEXT` / `MU_COMMAND_ICON` 转换为 NanoVG 调用。
 
-### 4.4 JS 文件模块化
-通过 `load("app/calc_logic.js")` 将业务逻辑拆分到独立文件。模块内使用 `typeof _initDone == "undefined"` 模式保持跨帧状态持久化，防止每帧重新初始化。
+### 4.4 JS 文件模块化与示例管理
+通过 `load("app/examples/calculator/main.js")` 加载示例。`app/main.js` 作为入口开关，只需修改一行 `load()` 路径即可切换不同示例。模块内使用 `typeof _initDone == "undefined"` 模式保持跨帧状态持久化，防止每帧重新初始化。
 
 ---
 
@@ -124,7 +127,7 @@ microui 的 draw hooks 被替换为命令列表 (`mu_Command`)。在 Sokol frame
 - 深色显示区 + 右对齐白色文字
 - 完整的四则运算、小数点、清除逻辑
 - `MU_OPT_NOCLOSE` 隐藏关闭按钮，标题栏无多余图标
-- JS 拆分为 `main.js`（UI）+ `calc_logic.js`（业务逻辑）
+- JS 拆分为 `main.js`（UI）+ `calc_logic.js`（业务逻辑），归档至 `app/examples/calculator/`
 
 ### 第五步：库源码分析与记忆系统 ✅
 对 microui、sokol、nanovg 三个库进行了源码级分析，总结出：

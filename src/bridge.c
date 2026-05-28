@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include "mquickjs/mquickjs.h"
 #include "microui/microui.h"
 #include "nanovg/nanovg.h"
@@ -17,6 +19,10 @@ extern NVGcontext *vg;
 
 static mu_Context g_mu;
 static mu_Real    g_slider_val = 0.5f;  /* persistent slider state (microui uses ptr as ID) */
+static const char *g_current_font = NULL; /* current active font name */
+
+/* Forward declaration */
+void bridge_load_font_dir(const char *dir_path);
 
 /* ── microui text measurement callbacks (real font metrics) ── */
 
@@ -25,7 +31,8 @@ static int mu_text_width(mu_Font font, const char *str, int len) {
     if (!str || !vg) return len > 0 ? len * 7 : 0;
     if (len < 0) len = (int)strlen(str);
     float bounds[4];
-    nvgFontFace(vg, "sans");
+    const char *fname = g_current_font ? g_current_font : "sans";
+    nvgFontFace(vg, fname);
     nvgFontSize(vg, 14);
     nvgTextBounds(vg, 0, 0, str, str + len, bounds);
     return (int)(bounds[2] - bounds[0]);
@@ -35,7 +42,8 @@ static int mu_text_height(mu_Font font) {
     (void)font;
     if (!vg) return 14;
     float bounds[4];
-    nvgFontFace(vg, "sans");
+    const char *fname = g_current_font ? g_current_font : "sans";
+    nvgFontFace(vg, fname);
     nvgFontSize(vg, 14);
     nvgTextBounds(vg, 0, 0, "Hy", NULL, bounds);
     return (int)(bounds[3] - bounds[1]);
@@ -156,7 +164,109 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         mu_draw_control_text(&g_mu, text ? text : "", r, MU_COLOR_TEXT, MU_OPT_ALIGNCENTER);
         return JS_UNDEFINED;
     }
+    if (strcmp(method, "loadFont") == 0) {
+        JSCStringBuf name_buf, path_buf;
+        const char *name = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &name_buf);
+        const char *path = JS_ToCString(ctx, argc > 1 ? argv[1] : JS_UNDEFINED, &path_buf);
+        if (name && path) {
+            if (nvgCreateFont(vg, name, path) >= 0) {
+                g_current_font = strdup(name);
+                log_info("font loaded: %s (%s)", name, path);
+            } else {
+                log_error("nvgCreateFont failed: %s (%s)", name, path);
+            }
+        }
+        return JS_UNDEFINED;
+    }
+    if (strcmp(method, "setFont") == 0) {
+        JSCStringBuf name_buf;
+        const char *name = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &name_buf);
+        if (name) {
+            if (g_current_font && g_current_font != name) {
+                free((void *)g_current_font);
+            }
+            g_current_font = strdup(name);
+            log_info("font set to: %s", name);
+        }
+        return JS_UNDEFINED;
+    }
+    if (strcmp(method, "loadFontDir") == 0) {
+        JSCStringBuf path_buf;
+        const char *dir = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &path_buf);
+        if (dir) {
+            bridge_load_font_dir(dir);
+        }
+        return JS_UNDEFINED;
+    }
     return JS_UNDEFINED;
+}
+
+/* ── Load all .ttf/.otf fonts from a directory ──────────────── */
+
+/* Keywords for Simplified Chinese CJK fonts */
+static int is_cjk_hint(const char *name) {
+    const char *hints[] = {
+        "noto sans sc", "noto serif sc", "pingfang sc",
+        "heiti sc", "songti sc", "hiragino sans gb",
+        "simhei", "simsun", "microsoft yahei", "fangsong",
+        "kaiti sc", "思源黑体", "思源宋体", "苹方",
+        "微软雅黑", "宋体", "黑体", "仿宋", "楷体",
+        "wqy", "wenquanyi",
+    };
+    char lower[256];
+    int len = (int)strlen(name);
+    if (len >= 256) len = 255;
+    for (int i = 0; i < len; i++) lower[i] = (name[i] >= 'A' && name[i] <= 'Z') ? name[i] + 32 : name[i];
+    lower[len] = '\0';
+    for (size_t i = 0; i < sizeof(hints) / sizeof(hints[0]); i++) {
+        if (strstr(lower, hints[i])) return 1;
+    }
+    return 0;
+}
+
+void bridge_load_font_dir(const char *dir_path) {
+    DIR *dir = opendir(dir_path);
+    if (!dir) { log_error("font dir: cannot open %s", dir_path); return; }
+
+    struct dirent *ent;
+    int loaded = 0, cjk_set = 0;
+
+    while ((ent = readdir(dir)) != NULL) {
+        char *ext = strrchr(ent->d_name, '.');
+        if (!ext) continue;
+        if (strcmp(ext, ".ttf") != 0 && strcmp(ext, ".otf") != 0 &&
+            strcmp(ext, ".TTF") != 0 && strcmp(ext, ".OTF") != 0) continue;
+
+        /* Build font name: strip extension, lowercase */
+        char font_name[256];
+        strncpy(font_name, ent->d_name, sizeof(font_name) - 1);
+        font_name[sizeof(font_name) - 1] = '\0';
+        char *dot = strrchr(font_name, '.');
+        if (dot) *dot = '\0';
+
+        /* Build full path */
+        char full_path[512];
+        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, ent->d_name);
+
+        if (nvgCreateFont(vg, font_name, full_path) >= 0) {
+            log_info("font loaded: %s (%s)", font_name, full_path);
+            loaded++;
+            /* Auto-pick CJK font as default */
+            if (!cjk_set && is_cjk_hint(font_name)) {
+                if (g_current_font) free((void *)g_current_font);
+                g_current_font = strdup(font_name);
+                cjk_set = 1;
+                log_info("auto-selected CJK font: %s", font_name);
+            }
+        }
+    }
+    closedir(dir);
+    if (loaded == 0) {
+        log_warn("font dir %s: no fonts loaded", dir_path);
+    } else {
+        log_info("loaded %d fonts from %s%s", loaded, dir_path,
+            cjk_set ? " (CJK auto-selected)" : "");
+    }
 }
 
 /* ── Public API ───────────────────────────────────────────────── */
@@ -198,7 +308,10 @@ JSContext *bridge_create_js(void) {
         "ui.setNext = function(x,y,w,h) { kwcc_ui('setNext',x,y,w,h); };\n"
         "ui.rect = function(x,y,w,h,r,g,b) { kwcc_ui('rect',x,y,w,h,r,g,b); };\n"
         "ui.display = function(t) { kwcc_ui('display',t); };\n"
-        "ui.textCentered = function(t) { kwcc_ui('textCentered',t); };\n";
+        "ui.textCentered = function(t) { kwcc_ui('textCentered',t); };\n"
+        "ui.loadFont = function(n,p) { kwcc_ui('loadFont',n,p); };\n"
+        "ui.setFont = function(n) { kwcc_ui('setFont',n); };\n"
+        "ui.loadFontDir = function(d) { kwcc_ui('loadFontDir',d); };\n";
     JSValue meth_result = JS_Eval(ctx, methods_js, strlen(methods_js), "<bridge>", 0);
     if (JS_IsException(meth_result)) {
         JSValue exc = JS_GetException(ctx);
@@ -234,6 +347,10 @@ void bridge_process_js(JSContext *ctx, const char *js_text) {
 
 mu_Context *bridge_get_mu(void) {
     return &g_mu;
+}
+
+const char *bridge_get_font(void) {
+    return g_current_font ? g_current_font : "sans";
 }
 
 void bridge_input_mousemove(int x, int y) {

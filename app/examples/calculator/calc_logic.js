@@ -1,4 +1,4 @@
-/* calc_logic.js — Calculator state and logic */
+/* calculator/calc_logic.js — Calculator state and logic */
 
 if (typeof _calcInit == "undefined") {
     var display = "0";

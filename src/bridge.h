@@ -15,5 +15,7 @@ void          bridge_input_mousedown(int x, int y, int btn);
 void          bridge_input_mouseup(int x, int y, int btn);
 void          bridge_input_scroll(int x, int y);
 void          bridge_input_text(const char *text);
+const char   *bridge_get_font(void);
+void          bridge_load_font_dir(const char *dir_path);
 
 #endif

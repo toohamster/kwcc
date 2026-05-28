@@ -59,7 +59,7 @@ static void render_mu_commands(void) {
             {
                 mu_TextCommand *c = (mu_TextCommand *)cmd;
                 nvgBeginPath(vg);
-                nvgFontFace(vg, "sans");
+                nvgFontFace(vg, bridge_get_font());
                 nvgFontSize(vg, 14);
                 nvgFillColor(vg, nvgRGBA(c->color.r, c->color.g, c->color.b, c->color.a));
                 nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
@@ -102,7 +102,17 @@ static void init(void) {
     });
 
     vg = nvgCreateGL3(NVG_ANTIALIAS | NVG_STENCIL_STROKES);
-    nvgCreateFont(vg, "sans", "assets/Roboto-Regular.ttf");
+
+    /* Load system fonts for CJK support */
+    int font = nvgCreateFontAtIndex(vg, "sans", "/System/Library/Fonts/PingFang.ttc", 0);
+    if (font < 0) {
+        log_warn("PingFang.ttc load failed, trying STHeiti");
+        font = nvgCreateFontAtIndex(vg, "sans", "/System/Library/Fonts/STHeiti Medium.ttc", 0);
+        if (font < 0) {
+            log_warn("STHeiti load failed, fallback to Roboto");
+            nvgCreateFont(vg, "sans", "assets/Roboto-Regular.ttf");
+        }
+    }
 
     bridge_init();
     js_ctx = bridge_create_js();
