@@ -18,7 +18,7 @@ DEP_SRCS = deps/nanovg/nanovg.c \
            deps/microui/microui.c \
            deps/log/log.c
 
-MQJS_SRCS = $(MQJS_CORE) $(DEP_SRCS) src/main.m src/bridge.c src/mquickjs_stubs.c
+MQJS_SRCS = $(MQJS_CORE) $(DEP_SRCS) src/main.m src/kwcc.c src/jsapi.c
 
 # Build directories
 BUILD_DIR = build
@@ -72,10 +72,10 @@ $(OBJ_DIR)/deps/log/%.o: deps/log/%.c | $(OBJ_DIR)/deps/log
 $(OBJ_DIR)/src/main.o: src/main.m $(MQJS_HEADERS) | $(OBJ_DIR)/src
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/src/bridge.o: src/bridge.c $(MQJS_HEADERS) | $(OBJ_DIR)/src
+$(OBJ_DIR)/src/kwcc.o: src/kwcc.c $(MQJS_HEADERS) | $(OBJ_DIR)/src
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/src/mquickjs_stubs.o: src/mquickjs_stubs.c $(MQJS_HEADERS) | $(OBJ_DIR)/src
+$(OBJ_DIR)/src/jsapi.o: src/jsapi.c $(MQJS_HEADERS) | $(OBJ_DIR)/src
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # ── Create build directories ────────────────────────────────────

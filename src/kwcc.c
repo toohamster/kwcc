@@ -1,4 +1,4 @@
-/* bridge.c — mquickjs ↔ microui bridge */
+/* kwcc.c — kwcc UI engine core (JS ↔ microui ↔ NanoVG bridge) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,20 +9,20 @@
 #include "nanovg/nanovg.h"
 #include "llog.h"
 
-#include "mquickjs_stubs.h"
+#include "jsapi.h"
 #include "mquickjs/mqjs_stdlib.h"
 
 /* Extern: NVG context set in main.m */
 extern NVGcontext *vg;
 
-#define BRIDGE_MEM_SIZE (4 * 1024 * 1024)
+#define KWCC_MEM_SIZE (4 * 1024 * 1024)
 
 static mu_Context g_mu;
 static mu_Real    g_slider_val = 0.5f;  /* persistent slider state (microui uses ptr as ID) */
 static const char *g_current_font = NULL; /* current active font name */
 
 /* Forward declaration */
-void bridge_load_font_dir(const char *dir_path);
+void kwcc_load_font_dir(const char *dir_path);
 
 /* ── microui text measurement callbacks (real font metrics) ── */
 
@@ -194,7 +194,7 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         JSCStringBuf path_buf;
         const char *dir = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &path_buf);
         if (dir) {
-            bridge_load_font_dir(dir);
+            kwcc_load_font_dir(dir);
         }
         return JS_UNDEFINED;
     }
@@ -224,7 +224,7 @@ static int is_cjk_hint(const char *name) {
     return 0;
 }
 
-void bridge_load_font_dir(const char *dir_path) {
+void kwcc_load_font_dir(const char *dir_path) {
     DIR *dir = opendir(dir_path);
     if (!dir) { log_error("font dir: cannot open %s", dir_path); return; }
 
@@ -237,7 +237,7 @@ void bridge_load_font_dir(const char *dir_path) {
         if (strcmp(ext, ".ttf") != 0 && strcmp(ext, ".otf") != 0 &&
             strcmp(ext, ".TTF") != 0 && strcmp(ext, ".OTF") != 0) continue;
 
-        /* Build font name: strip extension, lowercase */
+        /* Build font name: strip extension */
         char font_name[256];
         strncpy(font_name, ent->d_name, sizeof(font_name) - 1);
         font_name[sizeof(font_name) - 1] = '\0';
@@ -271,20 +271,20 @@ void bridge_load_font_dir(const char *dir_path) {
 
 /* ── Public API ───────────────────────────────────────────────── */
 
-void bridge_init(void) {
+void kwcc_init(void) {
     mu_init(&g_mu);
     g_mu.text_width  = mu_text_width;
     g_mu.text_height = mu_text_height;
 }
 
-void bridge_free(void) {
+void kwcc_free(void) {
 }
 
-JSContext *bridge_create_js(void) {
-    void *mem_buf = malloc(BRIDGE_MEM_SIZE);
-    JSContext *ctx = JS_NewContext(mem_buf, BRIDGE_MEM_SIZE, &js_stdlib);
+JSContext *kwcc_create_js(void) {
+    void *mem_buf = malloc(KWCC_MEM_SIZE);
+    JSContext *ctx = JS_NewContext(mem_buf, KWCC_MEM_SIZE, &js_stdlib);
     if (!ctx) {
-        log_fatal("JS_NewContext failed (not enough memory?)");
+        log_fatal("kwcc: JS_NewContext failed (not enough memory?)");
         return NULL;
     }
 
@@ -312,24 +312,24 @@ JSContext *bridge_create_js(void) {
         "ui.loadFont = function(n,p) { kwcc_ui('loadFont',n,p); };\n"
         "ui.setFont = function(n) { kwcc_ui('setFont',n); };\n"
         "ui.loadFontDir = function(d) { kwcc_ui('loadFontDir',d); };\n";
-    JSValue meth_result = JS_Eval(ctx, methods_js, strlen(methods_js), "<bridge>", 0);
+    JSValue meth_result = JS_Eval(ctx, methods_js, strlen(methods_js), "<kwcc>", 0);
     if (JS_IsException(meth_result)) {
         JSValue exc = JS_GetException(ctx);
         JSCStringBuf buf;
         const char *s = JS_ToCString(ctx, exc, &buf);
-        log_error("bridge JS_Eval: %s", s ? s : "(none)");
+        log_error("kwcc JS_Eval: %s", s ? s : "(none)");
     }
 
     return ctx;
 }
 
-void bridge_destroy_js(JSContext *ctx) {
+void kwcc_destroy_js(JSContext *ctx) {
     if (ctx) {
         JS_FreeContext(ctx);
     }
 }
 
-void bridge_process_js(JSContext *ctx, const char *js_text) {
+void kwcc_process_js(JSContext *ctx, const char *js_text) {
     if (!js_text) return;
 
     mu_begin(&g_mu);
@@ -345,30 +345,30 @@ void bridge_process_js(JSContext *ctx, const char *js_text) {
     mu_end(&g_mu);
 }
 
-mu_Context *bridge_get_mu(void) {
+mu_Context *kwcc_get_mu(void) {
     return &g_mu;
 }
 
-const char *bridge_get_font(void) {
+const char *kwcc_get_font(void) {
     return g_current_font ? g_current_font : "sans";
 }
 
-void bridge_input_mousemove(int x, int y) {
+void kwcc_input_mousemove(int x, int y) {
     mu_input_mousemove(&g_mu, x, y);
 }
 
-void bridge_input_mousedown(int x, int y, int btn) {
+void kwcc_input_mousedown(int x, int y, int btn) {
     mu_input_mousedown(&g_mu, x, y, btn);
 }
 
-void bridge_input_mouseup(int x, int y, int btn) {
+void kwcc_input_mouseup(int x, int y, int btn) {
     mu_input_mouseup(&g_mu, x, y, btn);
 }
 
-void bridge_input_scroll(int x, int y) {
+void kwcc_input_scroll(int x, int y) {
     mu_input_scroll(&g_mu, x, y);
 }
 
-void bridge_input_text(const char *text) {
+void kwcc_input_text(const char *text) {
     mu_input_text(&g_mu, text);
 }

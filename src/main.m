@@ -9,7 +9,7 @@
 #include "nanovg/nanovg.h"
 #include "nanovg/nanovg_gl.h"
 
-#include "bridge.h"
+#include "kwcc.h"
 #include "microui/microui.h"
 #include "llog.h"
 
@@ -29,7 +29,7 @@ static const char *load_file(const char *path) {
 }
 
 static void render_mu_commands(void) {
-    mu_Context *mu = bridge_get_mu();
+    mu_Context *mu = kwcc_get_mu();
     mu_Command *cmd = NULL;
     int count = 0;
 
@@ -59,7 +59,7 @@ static void render_mu_commands(void) {
             {
                 mu_TextCommand *c = (mu_TextCommand *)cmd;
                 nvgBeginPath(vg);
-                nvgFontFace(vg, bridge_get_font());
+                nvgFontFace(vg, kwcc_get_font());
                 nvgFontSize(vg, 14);
                 nvgFillColor(vg, nvgRGBA(c->color.r, c->color.g, c->color.b, c->color.a));
                 nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
@@ -114,8 +114,8 @@ static void init(void) {
         }
     }
 
-    bridge_init();
-    js_ctx = bridge_create_js();
+    kwcc_init();
+    js_ctx = kwcc_create_js();
     js_text = load_file("app/main.js");
 }
 
@@ -123,7 +123,7 @@ static void frame(void) {
     int w = sapp_width();
     int h = sapp_height();
 
-    bridge_process_js(js_ctx, js_text);
+    kwcc_process_js(js_ctx, js_text);
 
     sg_begin_pass(&(sg_pass){
         .action = {
@@ -147,8 +147,8 @@ static void cleanup(void) {
     log_info("=== kwcc exiting ===");
     if (log_fp) { fflush(log_fp); fclose(log_fp); log_fp = NULL; }
     if (vg) { nvgDeleteGL3(vg); vg = NULL; }
-    bridge_destroy_js(js_ctx);
-    bridge_free();
+    kwcc_destroy_js(js_ctx);
+    kwcc_free();
     sg_shutdown();
 }
 
@@ -161,23 +161,23 @@ static void input(const sapp_event *ev) {
 
     switch (ev->type) {
     case SAPP_EVENTTYPE_MOUSE_MOVE:
-        bridge_input_mousemove(mx, my);
+        kwcc_input_mousemove(mx, my);
         break;
     case SAPP_EVENTTYPE_MOUSE_DOWN:
-        bridge_input_mousedown(mx, my, btn);
+        kwcc_input_mousedown(mx, my, btn);
         break;
     case SAPP_EVENTTYPE_MOUSE_UP:
-        bridge_input_mouseup(mx, my, btn);
+        kwcc_input_mouseup(mx, my, btn);
         break;
     case SAPP_EVENTTYPE_MOUSE_SCROLL:
-        bridge_input_scroll((int)ev->scroll_x, (int)ev->scroll_y);
+        kwcc_input_scroll((int)ev->scroll_x, (int)ev->scroll_y);
         break;
     case SAPP_EVENTTYPE_CHAR:
         {
             char buf[8];
             int n = 0;
             if (ev->char_code < 128) { buf[0] = (char)ev->char_code; buf[1] = 0; n = 1; }
-            if (n) bridge_input_text(buf);
+            if (n) kwcc_input_text(buf);
         }
         break;
     default:

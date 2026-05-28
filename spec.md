@@ -39,11 +39,11 @@
 │   └── mquickjs/    #   mquickjs 解释器核心 + 构建工具
 ├── src/             # 项目 C 源码
 │   ├── main.m       # Sokol 窗口生命周期与渲染主循环 (Objective-C)
-│   ├── bridge.c     # mquickjs 与 microui 的 API 绑定
-│   ├── bridge.h     # Bridge 公共接口
-│   ├── llog.h       # 日志包装器 (解决 macOS syslog.h 宏冲突)
-│   ├── mquickjs_stubs.c  # mquickjs stdlib stub 函数
-│   └── mquickjs_stubs.h  # stub 函数声明
+│   ├── kwcc.c       # UI 引擎核心（JS ↔ microui ↔ NanoVG 桥接）
+│   ├── kwcc.h       # kwcc 公共 API
+│   ├── jsapi.c      # JS 运行时支持（stdlib stub + kwcc_ui 回调）
+│   ├── jsapi.h      # Stub 函数声明
+│   └── llog.h       # 日志包装器 (解决 macOS syslog.h 宏冲突)
 ├── app/             # 脚本层
 │   ├── main.js      # UI 入口文件（通过 load() 指向当前示例）
 │   └── examples/    # 示例集合

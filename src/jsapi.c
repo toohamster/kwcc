@@ -1,4 +1,4 @@
-/* mquickjs_stubs.c — stub functions for mquickjs stdlib references */
+/* jsapi.c — kwcc JS runtime support (stdlib stubs + UI bridge) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

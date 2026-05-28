@@ -47,13 +47,17 @@ make run
 │   └── log/        #   rxi/log.c logging library
 ├── src/
 │   ├── main.m          # Sokol lifecycle, NanoVG rendering, input routing
-│   ├── bridge.c        # mquickjs <-> microui bridge (ui object, JS execution)
-│   ├── bridge.h        # Bridge public API
-│   ├── llog.h          # Logging wrapper (wraps rxi/log.h, handles syslog.h conflicts)
-│   ├── mquickjs_stubs.c # Stub functions for mquickjs stdlib references
-│   └── mquickjs_stubs.h # Stub function declarations
+│   ├── kwcc.c          # UI engine core: JS ↔ microui ↔ NanoVG bridge
+│   ├── kwcc.h          # kwcc public API
+│   ├── jsapi.c         # JS runtime support (stdlib stubs + kwcc_ui)
+│   ├── jsapi.h         # Stub function declarations
+│   └── llog.h          # Logging wrapper (wraps rxi/log.h, handles syslog.h conflicts)
 ├── app/
-│   └── main.js     # JS UI logic (button, label, slider, etc.)
+│   ├── main.js         # JS entry point (via load() switches examples)
+│   └── examples/       # Example projects
+│       └── calculator/
+│           ├── main.js      # Calculator UI layout
+│           └── calc_logic.js # Calculator business logic
 ├── assets/         # Static resources (Roboto font)
 ├── setup.sh        # Dependency download script
 ├── Makefile        # Two-stage build configuration
@@ -64,13 +68,13 @@ make run
 ## Architecture
 
 ### Render Pipeline (60fps)
-1. `frame()` calls `bridge_process_js()` -> executes `app/main.js` in mquickjs
+1. `frame()` calls `kwcc_process_js()` -> executes `app/main.js` in mquickjs
 2. JS code calls `ui.button()`, `ui.label()`, etc. which trigger microui logic
 3. `mu_next_command()` iterates the microui command queue
 4. Commands (`MU_COMMAND_RECT`, `MU_COMMAND_TEXT`, etc.) are rendered via NanoVG calls
 
 ### Script Bridge API
-The `ui` object is injected via `kwcc_ui()` global function + JS wrapper in `bridge_create_js()`:
+The `ui` object is injected via `kwcc_ui()` global function + JS wrapper in `kwcc_create_js()`:
 - `ui.beginWindow(title, x, y, w, h)` / `ui.endWindow()`
 - `ui.button(text)` -> returns bool (clicked)
 - `ui.label(text)`
@@ -114,14 +118,14 @@ mquickjs is a stripped-down QuickJS with mostly ES5 support. Key findings from s
 
 ## Known Issues
 
-1. **JS not executing** — `bridge_create_js()` fails to create the `ui` object via `JS_Eval` with `SyntaxError: expecting ';'`. The fix is to use mquickjs-compatible syntax (see mquickjs ES5 Support section above). `app/main.js` then fails with `ReferenceError: variable 'ui' is not defined` as a consequence.
+1. **JS not executing** — `kwcc_create_js()` fails to create the `ui` object via `JS_Eval` with `SyntaxError: expecting ';'`. The fix is to use mquickjs-compatible syntax (see mquickjs ES5 Support section above). `app/main.js` then fails with `ReferenceError: variable 'ui' is not defined` as a consequence.
 
 2. **Logging** — `log_add_fp()` is called in `init()` to write to `output.log`. File is opened with `"w"` mode (truncated each run).
 
 ## Input Handling
 
 Mouse events are mapped from Sokol events in `input()`:
-- `SAPP_EVENTTYPE_MOUSE_MOVE` -> `bridge_input_mousemove()`
-- `SAPP_EVENTTYPE_MOUSE_DOWN/UP` -> `bridge_input_mousedown/mouseup()`
-- `SAPP_EVENTTYPE_MOUSE_SCROLL` -> `bridge_input_scroll()`
-- `SAPP_EVENTTYPE_CHAR` -> `bridge_input_text()`
+- `SAPP_EVENTTYPE_MOUSE_MOVE` -> `kwcc_input_mousemove()`
+- `SAPP_EVENTTYPE_MOUSE_DOWN/UP` -> `kwcc_input_mousedown/mouseup()`
+- `SAPP_EVENTTYPE_MOUSE_SCROLL` -> `kwcc_input_scroll()`
+- `SAPP_EVENTTYPE_CHAR` -> `kwcc_input_text()`

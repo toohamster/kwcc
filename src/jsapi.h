@@ -1,7 +1,7 @@
-/* mquickjs_stubs.h — forward declarations for stdlib functions
+/* jsapi.h — kwcc JS runtime support (stdlib stubs + UI bridge)
    Must be included before mqjs_stdlib.h */
-#ifndef MQUICKJS_STUBS_H
-#define MQUICKJS_STUBS_H
+#ifndef KWCC_JSAPI_H
+#define KWCC_JSAPI_H
 
 #include "mquickjs/mquickjs.h"
 
