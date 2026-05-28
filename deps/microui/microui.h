@@ -40,7 +40,9 @@ enum {
   MU_COMMAND_RECT,
   MU_COMMAND_TEXT,
   MU_COMMAND_ICON,
-  MU_COMMAND_MAX
+  MU_COMMAND_MAX,
+  /* kwcc extension: SVG rendering */
+  MU_COMMAND_SVG = 32,
 };
 
 enum {
@@ -122,6 +124,7 @@ typedef struct { mu_BaseCommand base; mu_Rect rect; } mu_ClipCommand;
 typedef struct { mu_BaseCommand base; mu_Rect rect; mu_Color color; } mu_RectCommand;
 typedef struct { mu_BaseCommand base; mu_Font font; mu_Vec2 pos; mu_Color color; char str[1]; } mu_TextCommand;
 typedef struct { mu_BaseCommand base; mu_Rect rect; int id; mu_Color color; } mu_IconCommand;
+typedef struct { mu_BaseCommand base; mu_Rect rect; char path[1]; } mu_SvgCommand;
 
 typedef union {
   int type;

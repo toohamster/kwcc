@@ -131,3 +131,45 @@ if (path->closed) nvgClosePath(vg);
 4. **SVG 命名空间不影响解析**: `xmlns` 属性被忽略
 5. **文件路径**: `nsvgParseFromFile` 使用 `fopen("rb")`，需要正确的相对或绝对路径
 6. **闭合路径**: `path->closed` 为 1 时需要在绘制后调用 `nvgClosePath`
+
+## kwcc 集成架构
+
+### SVG 作为 microui 命令（MU_COMMAND_SVG = 32）
+
+SVG 渲染不使用独立队列，而是通过 `mu_push_command` 插入 microui 命令流：
+
+```c
+// microui.h — kwcc 扩展命令类型（type=32，给官方留 31 个空间）
+enum {
+  MU_COMMAND_MAX,
+  MU_COMMAND_SVG = 32,
+};
+
+typedef struct { mu_BaseCommand base; mu_Rect rect; char path[1]; } mu_SvgCommand;
+```
+
+**入队（kwcc.c）**：
+```c
+static void kwcc_queue_svg(const char *path, float x, float y, float w, float h) {
+    mu_Rect clip = mu_get_clip_rect(&g_mu);
+    float sx = clip.x + x;  // 布局相对坐标 → 屏幕坐标
+    float sy = clip.y + y;
+    mu_SvgCommand *cmd = (mu_SvgCommand *)mu_push_command(&g_mu, MU_COMMAND_SVG, sizeof(mu_SvgCommand) + strlen(path));
+    cmd->rect.x = (int)sx; cmd->rect.y = (int)sy;
+    cmd->rect.w = (int)w;  cmd->rect.h = (int)h;
+    memcpy(cmd->path, path, strlen(path) + 1);
+}
+```
+
+**渲染（main.m render_mu_commands）**：
+- SVG 命令在 `mu_next_command` 遍历时自动跟随所属窗口的 zindex
+- 每个 SVG 命令紧跟在对应 microui 命令之后渲染
+- 点击其他窗口时，SVG 不会浮动在最上层
+
+### 已解决的问题
+
+1. **C ABI float 参数提升**：`kwcc.c` 没有 include `kwcc.h`，导致 `kwcc_queue_svg` 的 float 参数在 x86_64 下被提升为 double，ABI 不匹配导致参数全为 0。**修复**：添加 `#include "kwcc.h"`。
+
+2. **NANOSVG_IMPLEMENTATION 重复定义**：在 `main.m` 和 `kwcc.c` 中都定义了 `NANOSVG_IMPLEMENTATION`，链接时 6 个重复符号。**修复**：只在 `main.m` 中定义。
+
+3. **JS_ToNumber vs JS_ToInt32**：mquickjs 中 `JS_ToNumber` 对 JS 整数参数可能返回 0，改用 `JS_ToInt32`。

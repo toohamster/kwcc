@@ -40,6 +40,17 @@
 - DPR 不影响坐标转换，只控制渲染质量
 - HiDPI 渲染的两种等价方案
 
+### [nanosvg 源码分析](nanosvg_analysis.md)
+- 核心数据结构：NSVGimage → NSVGshape → NSVGpath 链表
+- 解析 API：nsvgParseFromFile / nsvgDelete
+- 颜色格式：R|(G<<8)|(B<<16) 无 alpha
+- 路径点格式：cubic bezier 6 floats per segment
+- **SVG 渲染架构**：作为 MU_COMMAND_SVG (type=32) 插入 microui 命令队列
+  - 用 `mu_push_command` 而非独立队列，确保 zindex 排序正确
+  - SVG 命令跟随所属窗口的 zindex，在 microui 命令流中按序渲染
+  - 屏幕坐标 = clip_rect.x + 布局相对偏移
+  - nanosvg 实现 (`NANOSVG_IMPLEMENTATION`) 只在 main.m 中定义一次
+
 ### [UI 设计与实现模式](ui_design_patterns.md)
 - 布局系统：layoutRow 参数规则、-1 的含义、状态切换
 - 文字测量与对齐：nvgTextBounds 替代硬编码

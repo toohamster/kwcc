@@ -20,6 +20,9 @@
 - **microui (UI 布局)**: `microui.c`, `microui.h`
   - 来源: `https://github.com/rxi/microui`
   - 目录: `deps/microui/`
+- **nanosvg (SVG 解析)**: `nanosvg.h`
+  - 来源: `https://github.com/memononen/nanosvg`
+  - 目录: `deps/nanosvg/`
 - **mquickjs (轻量脚本引擎)**: 核心解释器 + 两阶段构建工具
   - 核心 (4 个 .c，链接到最终二进制): `mquickjs.c`, `cutils.c`, `dtoa.c`, `libm.c`
   - 构建工具 (2 个 .c，仅在 make 时运行): `mquickjs_build.c`, `mqjs_stdlib.c`
@@ -35,6 +38,7 @@
 ├── deps/            # 第三方源码 (由 setup.sh 自动下载)
 │   ├── sokol/       #   Sokol 头文件 (单头库)
 │   ├── nanovg/      #   NanoVG 核心 + GL 后端
+│   ├── nanosvg/     #   nanosvg SVG 解析器 (单头库)
 │   ├── microui/     #   microui IMGUI
 │   └── mquickjs/    #   mquickjs 解释器核心 + 构建工具
 ├── src/             # 项目 C 源码
@@ -45,12 +49,14 @@
 │   ├── jsapi.h      # Stub 函数声明
 │   └── llog.h       # 日志包装器 (解决 macOS syslog.h 宏冲突)
 ├── app/             # 脚本层
-│   ├── main.js      # UI 入口文件（通过 load() 指向当前示例）
+│   ├── main.js      # UI 入口文件（通过 load() 加载多个示例）
 │   └── examples/    # 示例集合
-│       └── calculator/
-│           ├── main.js      # 计算器 UI 布局
-│           └── calc_logic.js # 计算器业务逻辑
-├── assets/          # 字体与静态资源
+│       ├── calculator/
+│       │   ├── main.js      # 计算器 UI 布局
+│       │   └── calc_logic.js # 计算器业务逻辑
+│       └── svg/
+│           └── main.js      # SVG 渲染示例
+├── assets/          # 字体与静态资源 (test.svg 等)
 ├── .claude/memory/  # 开发经验与记忆文件
 ├── setup.sh         # 依赖下载脚本
 └── Makefile         # 两阶段编译配置 (macOS)
@@ -81,6 +87,7 @@
 - `ui.rect(x, y, w, h, r, g, b)` — 绘制自定义颜色矩形
 - `ui.display(text)` — 计算器显示区（深色背景 + 右对齐白色文字）
 - `ui.textCentered(text)` — 水平居中文字
+- `ui.svg(path, x, y, w, h)` — 渲染 SVG 文件到指定位置
 
 全局函数:
 - `load(filename)` — 读取并执行 JS 文件，实现模块化
@@ -90,8 +97,10 @@
 ### 4.3 microui 渲染管线
 microui 的 draw hooks 被替换为命令列表 (`mu_Command`)。在 Sokol frame 回调中遍历该列表，将 `MU_COMMAND_RECT` / `MU_COMMAND_TEXT` / `MU_COMMAND_ICON` 转换为 NanoVG 调用。
 
+**SVG 集成**：SVG 通过 `MU_COMMAND_SVG`（type=32，保留 1-31 给官方未来扩展）作为自定义命令插入 microui 队列。`kwcc_queue_svg` 使用 `mu_push_command` 将 SVG 命令放入 microui 命令列表，在 `render_mu_commands()` 遍历中按 zindex 顺序渲染，确保 SVG 跟随所属窗口层级浮动。
+
 ### 4.4 JS 文件模块化与示例管理
-通过 `load("app/examples/calculator/main.js")` 加载示例。`app/main.js` 作为入口开关，只需修改一行 `load()` 路径即可切换不同示例。模块内使用 `typeof _initDone == "undefined"` 模式保持跨帧状态持久化，防止每帧重新初始化。
+通过 `load("app/examples/calculator/main.js")` 加载示例。`app/main.js` 作为入口开关，可加载多个示例（每个示例一个目录），microui 原生支持多窗口同时渲染，各示例窗口互不干扰。模块内使用 `typeof _initDone == "undefined"` 模式保持跨帧状态持久化，防止每帧重新初始化。
 
 ---
 
@@ -142,3 +151,12 @@ microui 的 draw hooks 被替换为命令列表 (`mu_Command`)。在 Sokol frame
 
 ### 第六步：GitHub 发布流程 ✅
 项目已部署到 GitHub，主分支为 `main`。发布流程文档保存在 `.claude/memory/deploy_workflow.md`。
+
+### 第七步：集成 nanosvg ✅
+集成 nanosvg 实现 SVG 文件渲染：
+- `setup.sh` 下载 `nanosvg.h` 到 `deps/nanosvg/`
+- `ui.svg(path, x, y, w, h)` 桥接 API
+- SVG 作为 `MU_COMMAND_SVG`（type=32）插入 microui 命令队列，通过 zindex 排序确保正确窗口层级
+- nanosvg 解析的 SVG 元素通过 NanoVG bezier 路径渲染
+- 独立示例：`app/examples/svg/main.js`
+- `NANOSVG_IMPLEMENTATION` 只在 `main.m` 中定义一次（避免链接重复符号）

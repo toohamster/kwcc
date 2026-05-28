@@ -135,3 +135,36 @@ const char *s = JS_ToCString(ctx, argv[i], &cbuf);
 ## 当前未解决的问题
 
 （暂无 — 之前记录的 JS_Eval 崩溃已修复，kwcc 二进制可以正常运行）
+
+## 开发方法论教训
+
+### 先出方案再做事（强制规则）
+
+不要盲目加几行代码就去编译调试。每次改动前：
+1. 分析根因（读源码、lldb、日志）
+2. 给出完整方案
+3. 用户确认后再实施
+
+### 优先使用 lldb 而非 printf 调试
+
+lldb 是 macOS 原生调试工具，比加日志打断点高效得多：
+```bash
+lldb --batch \
+  -o 'breakpoint set --name func_name' \
+  -o 'run' \
+  -o 'thread step-inst -c 8' \
+  -o 'frame variable' \
+  -o 'quit' -- ./kwcc
+```
+
+对于无 debug symbols 的二进制，用 `register read` 直接检查 x86_64 寄存器：
+- `rdi` = 第一个指针参数
+- `rsi`, `rdx`, `rcx` = 后续整型参数
+- `xmm0`-`xmm3` = float 参数
+- `thread step-inst` 跳过 prologue 后可检查栈帧
+
+### C 函数调用 ABI 陷阱
+
+**现象**：函数调用接收正确参数名但值为 0。
+
+**根因**：调用方没有 include 函数声明头文件。C 编译器在 x86_64 下对无原型的函数调用，float 参数会被提升为 double（通过 XMM 寄存器传递），但函数定义期望 float。**修复**：始终 include 正确的头文件。

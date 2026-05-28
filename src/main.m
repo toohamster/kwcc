@@ -13,6 +13,9 @@
 #include "microui/microui.h"
 #include "llog.h"
 
+#define NANOSVG_IMPLEMENTATION
+#include "nanosvg/nanosvg.h"
+
 NVGcontext *vg = NULL;
 static JSContext  *js_ctx = NULL;
 static const char *js_text = NULL;
@@ -83,6 +86,57 @@ static void render_mu_commands(void) {
                 nvgStroke(vg);
             }
             break;
+        case MU_COMMAND_SVG:
+            {
+                mu_SvgCommand *c = (mu_SvgCommand *)cmd;
+                NSVGimage *image = nsvgParseFromFile(c->path, "px", 96.0f);
+                if (!image) { log_error("svg: cannot parse '%s'", c->path); break; }
+
+                float svg_w = image->width > 0 ? image->width : 1;
+                float svg_h = image->height > 0 ? image->height : 1;
+                float sx = c->rect.w / svg_w;
+                float sy = c->rect.h / svg_h;
+                float scale = (sx < sy) ? sx : sy;
+                float sw = svg_w * scale;
+                float sh = svg_h * scale;
+                float ox = (float)c->rect.x + (c->rect.w - sw) / 2.0f;
+                float oy = (float)c->rect.y + (c->rect.h - sh) / 2.0f;
+
+                /* Extract NVG color from nanosvg color (stored as R|(G<<8)|(B<<16)) */
+                nvgSave(vg);
+                nvgTranslate(vg, ox, oy);
+                nvgScale(vg, scale, scale);
+                for (NSVGshape *shape = image->shapes; shape; shape = shape->next) {
+                    if (!(shape->flags & NSVG_FLAGS_VISIBLE)) continue;
+                    for (NSVGpath *p = shape->paths; p; p = p->next) {
+                        if (!p || p->npts < 2) continue;
+                        float *pts = p->pts;
+                        int n = p->npts;
+                        nvgBeginPath(vg);
+                        nvgMoveTo(vg, pts[0], pts[1]);
+                        for (int i = 1; i + 2 < n; i += 3) {
+                            nvgBezierTo(vg, pts[i*2], pts[i*2+1], pts[i*2+2], pts[i*2+3], pts[i*2+4], pts[i*2+5]);
+                        }
+                        if (p->closed) nvgClosePath(vg);
+                        if (shape->fill.type == NSVG_PAINT_COLOR) {
+                            unsigned int fc = shape->fill.color;
+                            nvgFillColor(vg, nvgRGBA(fc & 0xFF, (fc >> 8) & 0xFF, (fc >> 16) & 0xFF, 0xFF));
+                            nvgFill(vg);
+                        }
+                        if (shape->stroke.type == NSVG_PAINT_COLOR && shape->strokeWidth > 0) {
+                            unsigned int sc = shape->stroke.color;
+                            nvgStrokeColor(vg, nvgRGBA(sc & 0xFF, (sc >> 8) & 0xFF, (sc >> 16) & 0xFF, 0xFF));
+                            nvgStrokeWidth(vg, shape->strokeWidth);
+                            nvgLineCap(vg, shape->strokeLineCap);
+                            nvgLineJoin(vg, shape->strokeLineJoin);
+                            nvgStroke(vg);
+                        }
+                    }
+                }
+                nvgRestore(vg);
+                nsvgDelete(image);
+            }
+            break;
         }
     }
     static int first = 1;
@@ -137,7 +191,6 @@ static void frame(void) {
 
     nvgBeginFrame(vg, (float)w, (float)h, 1.0f);
     render_mu_commands();
-    kwcc_render_svg();
     nvgEndFrame(vg);
 
     sg_end_pass();
