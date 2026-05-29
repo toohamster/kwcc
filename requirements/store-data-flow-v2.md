@@ -11,6 +11,8 @@
 - **C 层用 JSValue 替代 malloc payload 结构体**：避免手动内存管理
 - **Topic 映射在 C 层**：控件创建时绑定 topic，JS 层无需写映射代码
 - **简化 MQTT 通配符**：精确匹配 + `*` 末尾通配，不做完整 MQTT
+- **模块注册机制**：`registerModule()` 统一注册，每个模块一个文件包含 state/actions/events
+- **视图注册机制**：`registerModuleView()` 将 render 挂到 `modules[name].render`，业务/视图分离，文件归拢到 `modules/`
 
 ---
 
@@ -352,28 +354,350 @@ function onFrame() {
 
 ---
 
-## 九、JS 项目目录结构
+## 九、模块注册机制（registerModule）
+
+### 1. 设计原则
+
+- **全局只有一个 `modules` 对象**，所有子模块将自己注册上去
+- 每个模块一个 JS 文件，包含自己的 state、actions、事件订阅
+- 新增模块只需一行 `registerModule` 调用，不用改其他地方
+- 用**数组记录 key 顺序**，避免 `for...in` 在 mquickjs 下不可靠
+
+### 2. main.js 框架部分
+
+```javascript
+// main.js — 全局模块注册表
+var modules = new Object();
+var moduleKeys = [];
+
+// 模块注册函数
+function registerModule(name, mod) {
+    modules[name] = mod;
+    moduleKeys.push(name);
+}
+
+// 合并所有模块的 state/actions，构建全局 Store
+function initStore() {
+    var initState = new Object();
+    var allActions = new Object();
+    var i, key, m;
+    for (i = 0; i < moduleKeys.length; i++) {
+        key = moduleKeys[i];
+        m = modules[key];
+        if (m.state) initState[key] = m.state;
+        if (m.actions) allActions[key] = m.actions;
+    }
+    $store = createStore({ state: initState, actions: allActions });
+}
+
+// 初始化所有模块的事件订阅
+function initEvents() {
+    var i, key, m;
+    for (i = 0; i < moduleKeys.length; i++) {
+        key = moduleKeys[i];
+        m = modules[key];
+        if (m.initEvents) m.initEvents();
+    }
+}
+```
+
+### 3. 模块写法（一个文件包含完整模块）
+
+```javascript
+// modules/calc.js
+registerModule("calc", {
+    state: {
+        display: "0",
+        operator: null,
+        prevValue: 0
+    },
+    actions: {
+        pressButton: function(state, btn) {
+            // 计算逻辑
+        },
+        clear: function(state) {
+            state.display = "0";
+            state.operator = null;
+            state.prevValue = 0;
+        }
+    },
+    initEvents: function() {
+        $bus.onGroup("calc", TOPIC.CALC_BTN, function(action, data) {
+            $store.dispatch("calc/pressButton", data.label);
+        });
+        $bus.onGroup("calc", TOPIC.CALC_CLEAR, function(action, data) {
+            $store.dispatch("calc/clear");
+        });
+    },
+    cleanup: function() {
+        $bus.offGroup("calc");
+    }
+});
+```
+
+### 4. 入口加载顺序
+
+```javascript
+// main.js
+load("runtime/store.js");
+load("runtime/bus.js");
+load("constant/topic.js");
+
+// 加载各模块（每个模块内部调用 registerModule）
+load("modules/calc.js");
+load("modules/svg.js");
+load("modules/settings.js");
+
+// 初始化
+initStore();
+initEvents();
+
+// 开始帧循环
+```
+
+### 5. 事件分组解绑
+
+动态模块（如弹窗）关闭后应取消订阅，避免内存泄漏：
+
+```javascript
+initEvents: function() {
+    $bus.onGroup("popup", TOPIC.POPUP_OPEN, function() { ... });
+    $bus.onGroup("popup", TOPIC.POPUP_SUBMIT, function() { ... });
+},
+cleanup: function() {
+    $bus.offGroup("popup");  // 模块卸载时取消所有订阅
+}
+```
+
+### 6. 模块加载后 modules 结构
 
 ```
-runtime/
-    bus.js          // EventBus（精确匹配 + *末尾通配 + 节流）
-    store.js        // 全局状态 + dispatch + 中间件
-constant/
-    topic.js        // 所有 topic 常量
-utils/
-    common.js       // 通用纯函数
-action/
-    action_main.js  // 模块化 Action
-view/
-    render_main.js  // onFrame 渲染逻辑
-event/
-    event_init.js   // 统一注册所有订阅
-main.js             // 入口、帧循环
+modules: {
+    calc:     { state, actions, initEvents, cleanup }
+    svg:      { state, actions, initEvents, cleanup }
+    settings: { state, actions, initEvents, cleanup }
+}
+
+// 合并后的 Store state：
+$store.state = {
+    calc:     { display, operator, prevValue }
+    svg:      { ... }
+    settings: { ... }
+}
 ```
 
 ---
 
-## 十、未来扩展：帧任务队列（不在本方案范围）
+## 十、视图注册机制（registerModuleView）
+
+### 1. 设计原则
+
+- **业务逻辑和视图渲染分离**：`modules/calc.js` 管 state/actions/events，`modules/calc_view.js` 管 UI 绘制
+- **挂到模块对象上**：`registerModuleView(name, renderFn)` 将 render 挂到 `modules[name].render`，不需要额外命名空间
+- **view 被动消费**：view 是一个纯函数：`state → UI`，不主动读 `$store.state`，不修改其他模块数据
+- **view 可选**：模块可以没有 view（纯数据模块），也可以注册多个 view（主界面 / 紧凑模式）
+- **统一调度**：`onFrame` 遍历模块时自动调用 `m.render`，不需要手动写每个 render 调用
+- **文件归拢**：同一模块的文件都放在 `modules/` 下，`ls modules/` 就能看到所有模块相关文件
+
+### 2. main.js 框架部分
+
+```javascript
+// main.js — 模块 + 视图统一注册
+var modules = new Object();
+var moduleKeys = [];
+
+// 模块注册函数
+function registerModule(name, mod) {
+    modules[name] = mod;
+    moduleKeys.push(name);
+}
+
+// 视图注册函数（挂到模块对象上）
+function registerModuleView(name, renderFn) {
+    modules[name].render = renderFn;
+}
+
+// 合并所有模块的 state/actions，构建全局 Store
+function initStore() {
+    var initState = new Object();
+    var allActions = new Object();
+    var i, key, m;
+    for (i = 0; i < moduleKeys.length; i++) {
+        key = moduleKeys[i];
+        m = modules[key];
+        if (m.state) initState[key] = m.state;
+        if (m.actions) allActions[key] = m.actions;
+    }
+    $store = createStore({ state: initState, actions: allActions });
+}
+
+// 初始化所有模块的事件订阅
+function initEvents() {
+    var i, key, m;
+    for (i = 0; i < moduleKeys.length; i++) {
+        key = moduleKeys[i];
+        m = modules[key];
+        if (m.initEvents) m.initEvents();
+    }
+}
+
+// 帧循环：遍历模块，调用对应 render
+function onFrame() {
+    var i, key, m;
+    for (i = 0; i < moduleKeys.length; i++) {
+        key = moduleKeys[i];
+        m = modules[key];
+        if (m.render) {
+            m.render($store.state[key]);
+        }
+    }
+}
+```
+
+### 3. 模块文件写法
+
+```javascript
+// modules/calc.js — 逻辑层
+registerModule("calc", {
+    state: {
+        display: "0",
+        operator: null,
+        prevValue: 0,
+        showHistory: false,
+        historyItems: []
+    },
+    actions: {
+        pressButton: function(state, btn) {
+            // 计算逻辑
+        },
+        clear: function(state) {
+            state.display = "0";
+            state.operator = null;
+            state.prevValue = 0;
+        },
+        toggleHistory: function(state) {
+            state.showHistory = !state.showHistory;
+        }
+    },
+    initEvents: function() {
+        $bus.onGroup("calc", TOPIC.CALC_BTN, function(action, data) {
+            $store.dispatch("calc/pressButton", data.label);
+        });
+    },
+    cleanup: function() {
+        $bus.offGroup("calc");
+    }
+});
+```
+
+### 4. view 文件写法
+
+```javascript
+// modules/calc_view.js — 视图层
+registerModuleView("calc", function(s) {
+    // s = modules.calc.state = $store.state.calc
+    ui.beginWindow("Calculator", 50, 50, 260, 320);
+    ui.display(s.display);
+    ui.layoutRow(40, -1);
+    ui.button("C", "calc/btn/C");
+    ui.button("+/-", "calc/btn/sign");
+    ui.button("%", "calc/btn/percent");
+    ui.button("/", "calc/btn/div");
+    ui.button("7", "calc/btn/7");
+    ui.button("8", "calc/btn/8");
+    ui.button("9", "calc/btn/9");
+    ui.button("*", "calc/btn/mul");
+    ui.button("4", "calc/btn/4");
+    ui.button("5", "calc/btn/5");
+    ui.button("6", "calc/btn/6");
+    ui.button("-", "calc/btn/sub");
+    ui.button("1", "calc/btn/1");
+    ui.button("2", "calc/btn/2");
+    ui.button("3", "calc/btn/3");
+    ui.button("+", "calc/btn/add");
+    ui.button("0", "calc/btn/0");
+    ui.button(".", "calc/btn/point");
+    ui.button("=", "calc/btn/eq");
+    ui.button("历史", "calc/btn/history");
+    ui.endWindow();
+
+    // 状态驱动弹窗（同一个 view 函数内）
+    if (s.showHistory) {
+        ui.beginWindow("History", 320, 50, 200, 320);
+        var i;
+        for (i = 0; i < s.historyItems.length; i++) {
+            ui.label(s.historyItems[i]);
+        }
+        ui.button("关闭", "calc/btn/close_history");
+        ui.endWindow();
+    }
+});
+```
+
+### 5. 入口加载顺序
+
+```javascript
+// main.js
+load("runtime/store.js");
+load("runtime/bus.js");
+load("constant/topic.js");
+
+// 加载模块逻辑（每个模块先加载逻辑，再加载视图）
+load("modules/calc.js");
+load("modules/calc_view.js");
+load("modules/svg.js");
+load("modules/svg_view.js");
+
+// 初始化
+initStore();
+initEvents();
+```
+
+### 6. 加载后 modules 结构
+
+```
+modules: {
+    calc: {
+        state:       { display, operator, prevValue, ... }
+        actions:     { pressButton, clear, ... }
+        initEvents:  fn()
+        cleanup:     fn()
+        render:      fn(s)  ← registerModuleView 挂上去的
+    },
+    svg: { ... }
+}
+```
+
+### 7. 注意事项
+
+- `modules/calc.js` 必须先于 `modules/calc_view.js` 加载，否则 render 挂载时 `modules[name]` 不存在
+- view 文件只接收自己的 state 参数，不主动读 `$store.state`
+- 一个模块可以不写 `_view.js`（纯数据模块），也可以写多个 view 文件
+
+---
+
+## 十一、JS 项目目录结构
+
+```
+runtime/
+    bus.js          // EventBus（精确匹配 + *末尾通配 + 节流 + onGroup/offGroup）
+    store.js        // createStore + dispatch + 中间件
+constant/
+    topic.js        // 所有 topic 常量
+modules/
+    calc.js         // 计算器模块（state + actions + events）
+    calc_view.js    // 计算器视图（registerModuleView("calc", ...)）
+    svg.js          // SVG 示例模块
+    svg_view.js     // SVG 视图
+    settings.js     // 设置模块
+utils/
+    common.js       // 通用纯函数
+main.js             // 入口、模块加载、帧循环（onFrame 遍历所有模块 render）
+```
+
+---
+
+## 十二、未来扩展：帧任务队列（不在本方案范围）
 
 当需要处理网络 I/O、大文件读取等耗时操作时，作为独立性能优化专项引入。
 
@@ -385,11 +709,11 @@ main.js             // 入口、帧循环
 
 ---
 
-## 十一、落地实施顺序（推荐）
+## 十三、落地实施顺序（推荐）
 
-1. **Store + dispatch**：最小核心，`$store.state` + `$store.dispatch()` + Action 系统
-2. **EventBus**：精确匹配 + `*` 末尾通配，`$bus.on()` / `$bus.emit()`
+1. **Store + registerModule + registerModuleView + dispatch**：最小核心，`$store.state` + 模块/视图注册 + Action 系统
+2. **EventBus**：精确匹配 + `*` 末尾通配 + `onGroup/offGroup`，`$bus.on()` / `$bus.emit()`
 3. **C 层统一事件分发**：JSValue 构造 `{topic, action, data}`，全局单回调
-4. **迁移计算器示例**：用新方案重写计算器，验证闭环
+4. **迁移计算器示例**：拆分为 `modules/calc.js` + `modules/calc_view.js`，验证闭环
 5. **弹窗状态驱动**：用 state 控制弹窗显隐
 6. **未来**：帧任务队列作为独立专项引入
