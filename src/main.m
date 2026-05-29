@@ -175,14 +175,18 @@ static void init(void) {
 
     kwcc_init();
     js_ctx = kwcc_create_js();
+
+    /* Load and eval main.js once during init (register modules, init store/events) */
     js_text = load_file("app/main.js");
+    kwcc_process_js(js_ctx, js_text);
 }
 
 static void frame(void) {
     int w = sapp_width();
     int h = sapp_height();
 
-    kwcc_process_js(js_ctx, js_text);
+    /* Each frame: just call onFrame() for rendering */
+    kwcc_process_js(js_ctx, "onFrame();");
 
     sg_begin_pass(&(sg_pass){
         .action = {

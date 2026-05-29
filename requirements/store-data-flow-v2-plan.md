@@ -13,21 +13,23 @@
 
 ## 实施阶段
 
-### 阶段一：运行时骨架（纯 JS）
+### 阶段一：运行时骨架（纯 JS）✅ 已完成
 
 **目标**：创建 `runtime/store.js` + `runtime/bus.js` + `constant/topic.js`，验证 Store + EventBus 可工作
 
-**新增文件**：
-- `app/runtime/store.js` — `createStore`（双参数 dispatch：`dispatch(module, actionName, payload)`）
+**已完成**：
+- `app/runtime/store.js` — `createStore`（双参数 dispatch）
 - `app/runtime/bus.js` — EventBus（精确匹配 + `*` 末尾通配 + `onGroup/offGroup`）
 - `app/constant/topic.js` — TOPIC 常量
+- `app/main.js` — 改为 init 时 eval 一次注册，frame 时只调 `onFrame()`
+- `app/modules/test.js` / `app/modules/test_view.js` — 最小测试模块
 
-**验收**：
-- 在 mquickjs 下 `load()` 可正常加载
-- `$store.state` / `$store.dispatch("module", "action", data)` 可工作
-- `$bus.on()` / `$bus.emit()` 可工作
+**验证结果**：
+- `render: 21 commands` — Test Counter 窗口正常渲染
+- init 只执行一次，frame 纯渲染
+- `$store.dispatch("test", "increment")` 机制就绪（需阶段三 C 层支持后触发）
 
-**暂不改动**：现有 `app/main.js` 和 `app/examples/` 不动
+**暂不改动**：计算器示例暂不迁移
 
 ---
 

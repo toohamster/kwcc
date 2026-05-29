@@ -5,7 +5,6 @@
 .idea/
 .git/
 build
-runtime/
 uploads/
 .phpintel/
 .env
