@@ -194,7 +194,22 @@ static void ui_global_event_cb(void *userData, JSValue data_obj);
 
 所有控件统一绑定该回调，通过 `userData` 传递 topic 字符串指针。
 
-### 3. 控件绑定方式（C 层存储 topic — Zero-Alloc 单帧覆盖）
+### 3. 控件 API 设计：topic 始终为最后一个参数
+
+所有带交互的控件，**最后一个参数固定为 topic**（const char * 或 JS 端的 TOPIC 常量）：
+
+```javascript
+ui.button("确认", TOPIC.CONFIRM);
+ui.slider("音量", s.volume, 0, 100, TOPIC.VOLUME);
+ui.checkbox("静音", s.muted, TOPIC.MUTE);
+ui.textbox("备注", s.note, TOPIC.NOTE);
+```
+
+- topic 为**强制参数**，新项目无历史包袱，不传视为调用错误
+- 控件绘制后 C 层自动调用 `kwcc_bind_topic(mu_get_id(), topic)`
+- 用户交互时 C 层根据 ID 查 topic，构造统一事件格式
+
+### 4. 控件绑定方式（C 层存储 topic — Zero-Alloc 单帧覆盖）
 
 microui 是立即模式，每帧重新绘制所有控件。C 层维护一个**帧内临时**映射表：
 
@@ -231,7 +246,7 @@ void kwcc_bind_topic(mu_Id id, const char *topic) {
 - 不存在跨帧清理、淘汰、溢出问题
 - 零内存分配，纯覆盖写入
 
-### 4. JSValue 代替 malloc payload
+### 5. JSValue 代替 malloc payload
 
 不需要 `malloc` + `strcpy` 的 C 结构体 payload，直接用 JSValue：
 
@@ -253,13 +268,13 @@ JS_FreeValue(ctx, data);
 - 不需要改 C 结构体定义
 - 支持任意长度字符串
 
-### 5. GC 压力说明（不过早优化）
+### 6. GC 压力说明（不过早优化）
 
 拖拽 Slider 时每秒约创建 ~60 个 JSValue 对象，QuickJS GC 可正常处理此量级。当前方案不做对象池优化。
 
 **如果未来出现真实卡顿**（多高频控件同时触发），采用方案：**4 槽循环队列对象池**（`JSValue g_event_pool[4]`，轮转复用），避免影子对象的引用腐败问题。
 
-### 6. 各控件的 data 构造示例
+### 7. 各控件的 data 构造示例
 
 ```c
 // button → data = {}

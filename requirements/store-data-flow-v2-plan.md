@@ -81,13 +81,14 @@ registerModuleView("test", function(s) {
 - `src/main.m` — 在 `frame()` 开头调用 `kwcc_begin_frame()`
 
 **关键设计**：
-- 新增 C 函数 `kwcc_button_ex(ctx, text, topic)` 支持 topic 参数
-- JS 侧 `ui.button(text, topic)` 调用时，C 层绘制后调用 `kwcc_bind_topic(mu_get_id(), topic)`
+- `topic` 为最后一个参数，所有控件**强制传入**，不传视为调用错误
+- JS 侧 `ui.button("确认", TOPIC.CONFIRM)` 调用时，C 层绘制后调用 `kwcc_bind_topic(mu_get_id(), topic)`
 - 用户点击时，C 层全局回调根据 ID 查 topic，构造 `{topic, action, data}` JSValue 调用 `js_on_event`
+- 修改 `js_ui_dispatch` 各 handler，从最后一个参数读取 topic 字符串
 
 **验收**：
 - 带 topic 的按钮点击后能正确触发 `$bus.emit`
-- 不带 topic 的按钮保持现有行为（返回 bool）
+- 所有交互控件都传 topic，旧例代码（`if (ui.button(...))`）替换为 `ui.button(text, topic)` 写法
 
 ---
 
