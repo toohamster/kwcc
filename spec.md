@@ -1,5 +1,14 @@
 # Spec: kwcc - 极轻量级自包含 UI 引擎
 
+> **KWCC (Kite Window Canvas Core)** — A tiny, self-contained desktop UI engine.
+>
+> - **Kite**（风筝）：轻盈、灵动、低负载，象征引擎极轻量、体积小巧、运行高效
+> - **Window**：面向桌面窗口场景
+> - **Canvas**：基于 NanoVG 画布实现界面渲染
+> - **Core**：自包含的底层 UI 核心引擎，零外部依赖
+>
+> 整体定位：一款极轻量、自包含、无外部依赖的桌面 UI 引擎。
+
 ## 1. 项目愿景
 构建一个 100% 源码依赖、无外部库安装需求的极轻量桌面 UI 引擎。
 - **核心理念**: 开发者只需拥有编译器即可运行，无需 `brew install`。

@@ -1,5 +1,9 @@
 # kwcc
 
+> **KWCC (Kite Window Canvas Core)** — A tiny, self-contained desktop UI engine.
+>
+> Kite（风筝）取轻盈之意 · Window 桌面窗口 · Canvas 画布渲染 · Core 自包含核心引擎
+
 极轻量级自包含桌面 UI 引擎，macOS 10.14+。
 
 **零外部依赖** — 所有第三方源码通过 `setup.sh` 下载到 `deps/` 目录，开发者只需有编译器即可运行。
