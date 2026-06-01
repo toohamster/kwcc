@@ -1123,7 +1123,11 @@ int mu_begin_window_ex(mu_Context *ctx, const char *title, mu_Rect rect, int opt
       mu_draw_icon(ctx, MU_ICON_CLOSE, r, ctx->style->colors[MU_COLOR_TITLETEXT]);
       mu_update_control(ctx, id, r, opt);
       if (ctx->mouse_pressed == MU_MOUSE_LEFT && id == ctx->focus) {
-        cnt->open = 0;
+        if (ctx->on_window_close) {
+          ctx->on_window_close(ctx, title);
+        } else {
+          cnt->open = 0;
+        }
       }
     }
   }
