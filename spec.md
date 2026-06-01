@@ -49,15 +49,22 @@
 │   ├── jsapi.h      # Stub 函数声明
 │   └── llog.h       # 日志包装器 (解决 macOS syslog.h 宏冲突)
 ├── app/             # 脚本层
-│   ├── main.js      # UI 入口文件（通过 load() 加载多个示例）
-│   └── examples/    # 示例集合
-│       ├── calculator/
-│       │   ├── main.js      # 计算器 UI 布局
-│       │   └── calc_logic.js # 计算器业务逻辑
+│   ├── main.js      # 模块入口（loadJs 加载示例模块）
+│   ├── runtime/
+│   │   ├── store.js #   全局状态 + 双参数 dispatch + 中间件
+│   │   └── bus.js   #   EventBus（精确匹配 + *末尾通配 + onGroup/offGroup）
+│   └── modules/examples/  # 示例模块集合
+│       ├── test/
+│       │   ├── test.js      # test 模块（state + actions + events）
+│       │   └── test_view.js # test 模块视图
+│       ├── calc/
+│       │   ├── calc.js      # 计算器模块（state + actions + events）
+│       │   └── calc_view.js # 计算器模块视图
 │       └── svg/
-│           ├── main.js      # SVG 渲染示例
-│           ├── star.svg     # 五角星测试
-│           └── test.svg     # 原始测试图形
+│           ├── svg.js       # SVG 模块
+│           ├── svg_view.js  # SVG 模块视图
+│           ├── star.svg     # 蓝色五角星
+│           └── test.svg     # 测试图形
 ├── assets/          # 字体与静态资源（Roboto.ttf 等）
 ├── .claude/memory/  # 开发经验与记忆文件
 ├── setup.sh         # 依赖下载脚本
@@ -80,19 +87,33 @@
 ### 4.2 脚本桥接 API
 通过 `kwcc_ui()` 全局函数 + JS 包装注入 `ui` 对象:
 - `ui.label(text)`
-- `ui.button(text)` → 返回布尔值表示是否被点击
-- `ui.beginWindow(title, x, y, w, h, opt)` / `ui.endWindow()`
+- `ui.button(text, topic)` → 返回布尔值，topic 非空时点击自动 dispatch 事件
+- `ui.beginWindow(title, x, y, w, h, opt, topic)` / `ui.endWindow()` — topic 参数用于 X 关闭事件
 - `ui.beginPanel(name, opt)` / `ui.endPanel()` — 无标题栏的面板容器
+- `ui.sync(key, visible)` — 同步模块状态到 C 层，控制窗口可见性挡板
 - `ui.layoutRow(height, w1, w2, ...)` — `-1` 表示充满剩余空间
-- `ui.slider(text, value, min, max)` → 返回当前值
+- `ui.slider(text, value, min, max, topic)` → 返回当前值，变化时自动 dispatch
 - `ui.setNext(x, y, w, h)` — 绝对定位下一个控件
 - `ui.rect(x, y, w, h, r, g, b)` — 绘制自定义颜色矩形
 - `ui.display(text)` — 计算器显示区（深色背景 + 右对齐白色文字）
 - `ui.textCentered(text)` — 水平居中文字
 - `ui.svg(path_or_svg, x, y, w, h)` — 渲染 SVG。参数以 `<` 开头时作为内联 SVG 字符串解析，否则作为文件路径
+- `ui.loadFont(name, path)` — 加载单个字体文件
+- `ui.setFont(name)` — 设置当前字体
+- `ui.loadFontDir(dir)` — 加载目录下所有字体（自动识别 CJK 字体）
 
-全局函数:
-- `load(filename)` — 读取并执行 JS 文件，实现模块化
+**框架全局函数（$ 前缀为框架内置变量）**:
+- `$store` — Store 实例，`$store.dispatch(module, actionName, payload)`
+- `$bus` — EventBus 实例，`$bus.on(topic, handler)` / `$bus.emit(topic, action, data)`
+- `$topics` — 全局 topic 注册表，`$topics.calc.digit_7`
+- `$modules` — 模块注册表
+- `registerModule(name, mod)` — 注册模块（state + actions + initEvents）
+- `registerModuleView(name, renderFn)` — 注册模块视图渲染函数
+- `registerTopic(name, topics)` — 注册模块 topic 常量到 `$topics[name]`
+- `loadJs(path, once)` — 加载 JS 文件，`once=1`(默认)只加载一次，`once=0` 强制加载
+
+**mquickjs 内置函数**:
+- `load(filename)` — 读取并执行 JS 文件（底层加载函数）
 - `print()`, `console.log()` — 日志输出
 - `gc()` — 垃圾回收
 
@@ -101,8 +122,23 @@ microui 的 draw hooks 被替换为命令列表 (`mu_Command`)。在 Sokol frame
 
 **SVG 集成**：SVG 通过 `MU_COMMAND_SVG`（type=32，保留 1-31 给官方未来扩展）作为自定义命令插入 microui 队列。`kwcc_queue_svg` 使用 `mu_push_command` 将 SVG 命令放入 microui 命令列表，在 `render_mu_commands()` 遍历中按 zindex 顺序渲染，确保 SVG 跟随所属窗口层级浮动。
 
-### 4.4 JS 文件模块化与示例管理
-通过 `load("app/examples/calculator/main.js")` 加载示例。`app/main.js` 作为入口开关，可加载多个示例（每个示例一个目录），microui 原生支持多窗口同时渲染，各示例窗口互不干扰。模块内使用 `typeof _initDone == "undefined"` 模式保持跨帧状态持久化，防止每帧重新初始化。
+### 4.4 JS 模块注册体系与单向数据流
+
+采用 **store-data-flow-v2** 架构：单向数据流 + 模块注册 + topic 事件总线。
+
+**模块注册**：每个模块通过 `registerModule()` 注册 state、actions、事件订阅。视图通过 `registerModuleView()` 注册渲染函数，业务与视图分离。Topic 常量通过 `registerTopic()` 注册到 `$topics`。
+
+**加载顺序**：
+```javascript
+loadJs("app/modules/examples/calc/calc.js");      // 注册 topic + module
+loadJs("app/modules/examples/calc/calc_view.js"); // 注册视图
+```
+
+**每帧渲染**：`onFrame()` 遍历所有已注册模块，自动调用 `ui.sync(key, visible)` + `render(state)`。
+
+**事件流**：用户操作 → microui → C 层全局回调 → `kwcc_dispatch_event` → `$bus.emit(topic, action, data)` → JS handler → `$store.dispatch(module, action, payload)` → state 更新 → 下一帧 `onFrame` 刷新。
+
+**状态持久化**：`$loadedFiles` 记录 JS 文件加载次数，防止重复加载。`registerModule/View/Topic` 内部去重，防止重复注册。
 
 ---
 
@@ -171,3 +207,26 @@ microui 的 draw hooks 被替换为命令列表 (`mu_Command`)。在 Sokol frame
 - 缓存结构体 (`svg_cache_t`) 通过 `kwcc.h` 的 extern 声明共享给 `main.m`，由渲染端从缓存取 image，生命周期完全由缓存管理
 - `nsvgParse` 会修改输入字符串，使用 `strdup` 后 `free` 避免副作用
 - 文件移动到 `app/examples/svg/` 目录，与示例代码内聚
+
+### 第九步：store-data-flow-v2 单向数据流架构 ✅
+
+将旧版全局变量 + 同步回调模式升级为单向数据流 + 模块注册体系：
+
+- **runtime/store.js**：`createStore` 双参数 dispatch（module, actionName），零字符串解析
+- **runtime/bus.js**：EventBus 精确匹配 + `*` 末尾通配 + `onGroup/offGroup` 分组解绑
+- **模块注册**：`registerModule(name, mod)` / `registerModuleView(name, renderFn)` / `registerTopic(name, topics)`
+- **C 层事件**：`kwcc_dispatch_event` 通过 `$bus.emit` 触发 JS 事件，button/slider 控件自动 dispatch
+- **窗口挡板**：`ui.sync(key, visible)` + C 层可见性拦截，支持状态驱动窗口显隐
+- **示例迁移**：calculator、test、svg 全部迁移到 `app/modules/examples/` 目录
+- **加载保护**：`loadJs(path)` 防止重复加载，`register*` 内部去重防止重复注册
+
+---
+
+## 7. 开发规范（强制规则）
+
+1. **出现错误 → 分析根因 → 出方案 → 确定范围 → 等确认 → 再实施**
+2. **以方案为主，不因问题打乱计划**
+3. **先出方案再做事**：不要盲目加几行代码就去编译调试
+4. **非必要不动 C 层**：C 层改动优先评估影响范围
+5. **JS 代码遵守 mquickjs ES5 语法**：无 let/const/箭头函数，`{}` 语句开头陷阱
+6. **所有 topic 通过 `registerTopic` 注册**：禁止手写硬编码 topic 字符串

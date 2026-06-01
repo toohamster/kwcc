@@ -24,6 +24,112 @@ static mu_Context g_mu;
 static mu_Real    g_slider_val = 0.5f;  /* persistent slider state (microui uses ptr as ID) */
 static const char *g_current_font = NULL; /* current active font name */
 
+/* ── Topic map: Zero-Alloc single-frame overwrite ───────────── */
+
+#define TOPIC_MAP_SIZE 256
+
+static struct { mu_Id id; char topic[128]; } g_topic_map[TOPIC_MAP_SIZE];
+static int g_topic_map_count = 0;
+
+/* ── Window barrier: intercept beginWindow based on sync state ── */
+
+#define MAX_WIN_DEPTH 32
+
+typedef struct {
+    char key[64];
+    int  visible;
+} mod_state_t;
+
+#define MAX_MODULES 32
+static mod_state_t g_sync_table[MAX_MODULES];
+static int         g_sync_count = 0;
+
+/* Current module key context — set by ui.sync, used by beginWindow */
+static const char *g_current_mod_key = NULL;
+
+/* Stack tracking: for each beginWindow call, whether it was intercepted + its topic */
+static int    g_win_intercepted[MAX_WIN_DEPTH];
+static char   g_win_topics[MAX_WIN_DEPTH][128];
+static int    g_win_top = 0;
+
+/* JS context — set during kwcc_create_js() for close callback */
+static JSContext *g_js_ctx = NULL;
+void kwcc_set_js_context(JSContext *ctx) {
+    g_js_ctx = ctx;
+}
+
+static void kwcc_dispatch_event(JSContext *ctx, const char *topic, const char *action);
+
+static void kwcc_sync_module(const char *key, int visible) {
+    g_current_mod_key = key;
+    for (int i = 0; i < g_sync_count; i++) {
+        if (strcmp(g_sync_table[i].key, key) == 0) {
+            g_sync_table[i].visible = visible;
+            return;
+        }
+    }
+    if (g_sync_count < MAX_MODULES) {
+        strncpy(g_sync_table[g_sync_count].key, key, 63);
+        g_sync_table[g_sync_count].key[63] = '\0';
+        g_sync_table[g_sync_count].visible = visible;
+        g_sync_count++;
+    }
+}
+
+static int kwcc_get_current_visibility(void) {
+    if (!g_current_mod_key) return 1;
+    for (int i = 0; i < g_sync_count; i++) {
+        if (strcmp(g_sync_table[i].key, g_current_mod_key) == 0) {
+            return g_sync_table[i].visible;
+        }
+    }
+    return 1;
+}
+
+static void kwcc_on_window_close(mu_Context *ctx, const char *title) {
+    (void)ctx;
+    log_info("on_window_close: %s", title);
+    kwcc_dispatch_event(g_js_ctx, title, "close");
+}
+
+void kwcc_begin_frame(void) {
+    g_topic_map_count = 0;
+    g_sync_count = 0;
+    g_win_top = 0;
+}
+
+static void kwcc_bind_topic(mu_Id id, const char *topic) {
+    if (g_topic_map_count < TOPIC_MAP_SIZE && topic) {
+        g_topic_map[g_topic_map_count].id = id;
+        strncpy(g_topic_map[g_topic_map_count].topic, topic, 127);
+        g_topic_map[g_topic_map_count].topic[127] = '\0';
+        g_topic_map_count++;
+    }
+}
+
+/* ── Event dispatch: C → JS via $bus.emit ───────────────────── */
+
+static void kwcc_dispatch_event(JSContext *ctx, const char *topic, const char *action) {
+    /* Escape single quotes in topic/action */
+    char t[256], a[128], buf[512];
+    int tj = 0;
+    for (int i = 0; topic[i] && tj < 254; i++) {
+        char c = topic[i];
+        if (c == '\\' || c == '\'') t[tj++] = '\\';
+        t[tj++] = c;
+    }
+    t[tj] = '\0';
+    int aj = 0;
+    for (int i = 0; action[i] && aj < 126; i++) {
+        char c = action[i];
+        if (c == '\\' || c == '\'') a[aj++] = '\\';
+        a[aj++] = c;
+    }
+    a[aj] = '\0';
+    snprintf(buf, sizeof(buf), "$bus.emit('%s', '%s', new Object());", t, a);
+    JS_Eval(ctx, buf, strlen(buf), "<dispatch>", 0);
+}
+
 /* ── SVG cache ──────────────────────────────────────────────── */
 
 svg_cache_t g_svg_cache[SVG_CACHE_SIZE];
@@ -142,7 +248,7 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
                                int argc, JSValue *argv) {
     (void)argv;
     if (strcmp(method, "beginWindow") == 0) {
-        JSCStringBuf buf;
+        JSCStringBuf buf, tbuf;
         const char *title = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &buf);
         int x = 50, y = 50, w = 400, h = 300;
         int opt = 0;
@@ -151,11 +257,56 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         if (argc > 3) JS_ToInt32(ctx, &w, argv[3]);
         if (argc > 4) JS_ToInt32(ctx, &h, argv[4]);
         if (argc > 5) JS_ToInt32(ctx, &opt, argv[5]);
+
+        /* 7th param: topic (for X close event) */
+        const char *topic = NULL;
+        if (argc > 6) {
+            topic = JS_ToCString(ctx, argv[6], &tbuf);
+        }
+
+        /* Window barrier: check visibility using current module key from ui.sync */
+        int visible = kwcc_get_current_visibility();
+        if (g_win_top < MAX_WIN_DEPTH) {
+            if (!visible) {
+                g_win_intercepted[g_win_top] = 1;
+                if (topic) {
+                    strncpy(g_win_topics[g_win_top], topic, 127);
+                    g_win_topics[g_win_top][127] = '\0';
+                } else {
+                    g_win_topics[g_win_top][0] = '\0';
+                }
+                g_win_top++;
+                return JS_NewBool(0);
+            }
+            g_win_intercepted[g_win_top] = 0;
+            if (topic) {
+                strncpy(g_win_topics[g_win_top], topic, 127);
+                g_win_topics[g_win_top][127] = '\0';
+            } else {
+                g_win_topics[g_win_top][0] = '\0';
+            }
+            g_win_top++;
+        }
+
         mu_begin_window_ex(&g_mu, title ? title : "", (mu_Rect){x, y, w, h}, opt);
         return JS_UNDEFINED;
     }
     if (strcmp(method, "endWindow") == 0) {
-        mu_end_window(&g_mu);
+        /* Window barrier: only call microui if this window was not intercepted */
+        if (g_win_top > 0) {
+            g_win_top--;
+            if (!g_win_intercepted[g_win_top]) {
+                mu_end_window(&g_mu);
+            }
+        }
+        return JS_UNDEFINED;
+    }
+    if (strcmp(method, "sync") == 0) {
+        JSCStringBuf buf;
+        const char *key = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &buf);
+        int visible = 1;
+        if (argc > 1) JS_ToInt32(ctx, &visible, argv[1]);
+        if (key) kwcc_sync_module(key, visible);
         return JS_UNDEFINED;
     }
     if (strcmp(method, "beginPanel") == 0) {
@@ -171,9 +322,16 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         return JS_UNDEFINED;
     }
     if (strcmp(method, "button") == 0) {
-        JSCStringBuf buf;
+        JSCStringBuf buf, tbuf;
         const char *text = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &buf);
+        const char *topic = NULL;
+        if (argc > 1) {
+            topic = JS_ToCString(ctx, argv[1], &tbuf);
+        }
         int res = mu_button_ex(&g_mu, text ? text : "", 0, MU_OPT_ALIGNCENTER);
+        if ((res & MU_RES_SUBMIT) && topic) {
+            kwcc_dispatch_event(ctx, topic, "click");
+        }
         return JS_NewBool(res & MU_RES_SUBMIT);
     }
     if (strcmp(method, "label") == 0) {
@@ -183,13 +341,25 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         return JS_UNDEFINED;
     }
     if (strcmp(method, "slider") == 0) {
+        JSCStringBuf tbuf;
+        const char *text = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &tbuf);
         double val = g_slider_val, low = 0, high = 1;
+        const char *topic = NULL;
+        JSCStringBuf topic_buf;
         if (argc > 1) JS_ToNumber(ctx, &val, argv[1]);
         if (argc > 2) JS_ToNumber(ctx, &low, argv[2]);
         if (argc > 3) JS_ToNumber(ctx, &high, argv[3]);
+        if (argc > 4) {
+            topic = JS_ToCString(ctx, argv[4], &topic_buf);
+        }
         g_slider_val = (mu_Real)val;
         mu_Real flow = (mu_Real)low, fhigh = (mu_Real)high;
+        mu_Real prev = g_slider_val;
         mu_slider_ex(&g_mu, &g_slider_val, flow, fhigh, 0.01f, "%g", MU_OPT_ALIGNCENTER);
+        if (g_slider_val != prev && topic) {
+            /* Dispatch slider change event */
+            kwcc_dispatch_event(ctx, topic, "change");
+        }
         return JS_NewFloat64(ctx, g_slider_val);
     }
     if (strcmp(method, "layoutRow") == 0) {
@@ -397,6 +567,10 @@ JSContext *kwcc_create_js(void) {
     }
 
     kwcc_set_ui_callback(js_ui_dispatch);
+    kwcc_set_js_context(ctx);
+
+    /* Set microui close callback */
+    g_mu.on_window_close = kwcc_on_window_close;
 
     /* Create ui object and methods from C */
     JSValue global_obj = JS_GetGlobalObject(ctx);
@@ -405,13 +579,14 @@ JSContext *kwcc_create_js(void) {
 
     /* Note: JS_Eval requires strlen() for input_len, not 0 */
     const char *methods_js =
-        "ui.beginWindow = function(t,x,y,w,h,opt) { kwcc_ui('beginWindow',t,x,y,w,h,opt||0); };\n"
+        "ui.beginWindow = function(t,x,y,w,h,opt,topic) { kwcc_ui('beginWindow',t,x,y,w,h,opt||0,topic); };\n"
         "ui.endWindow = function() { kwcc_ui('endWindow'); };\n"
+        "ui.sync = function(key, visible) { kwcc_ui('sync', key, visible !== undefined ? visible : 1); };\n"
         "ui.beginPanel = function(n,opt) { kwcc_ui('beginPanel',n,opt||0); };\n"
         "ui.endPanel = function() { kwcc_ui('endPanel'); };\n"
-        "ui.button = function(t) { return kwcc_ui('button',t); };\n"
+        "ui.button = function(t, topic) { kwcc_ui('button', t, topic); };\n"
         "ui.label = function(t) { kwcc_ui('label',t); };\n"
-        "ui.slider = function(t,v,lo,hi) { return kwcc_ui('slider',t,v,lo,hi); };\n"
+        "ui.slider = function(t,v,lo,hi,topic) { return kwcc_ui('slider',t,v,lo,hi,topic); };\n"
         "ui.layoutRow = function(h,w1,w2,w3,w4) { kwcc_ui('layoutRow',h,w1,w2,w3,w4); };\n"
         "ui.setNext = function(x,y,w,h) { kwcc_ui('setNext',x,y,w,h); };\n"
         "ui.rect = function(x,y,w,h,r,g,b) { kwcc_ui('rect',x,y,w,h,r,g,b); };\n"
@@ -441,6 +616,7 @@ void kwcc_destroy_js(JSContext *ctx) {
 void kwcc_process_js(JSContext *ctx, const char *js_text) {
     if (!js_text) return;
     g_frame_counter++;
+    kwcc_begin_frame();
 
     mu_begin(&g_mu);
 

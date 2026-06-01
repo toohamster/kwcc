@@ -134,7 +134,13 @@ const char *s = JS_ToCString(ctx, argv[i], &cbuf);
 
 ## 当前未解决的问题
 
-（暂无 — 之前记录的 JS_Eval 崩溃已修复，kwcc 二进制可以正常运行）
+1. **窗口 X 关闭事件不工作**（store-data-flow-v2 阶段四）
+   - **现象**：点击 X 按钮不崩溃，但窗口不关闭（visible 未更新）
+   - **根因**：`on_window_close` 收到的是 title 字符串，JS handler 订阅的是 topic（如 "test/window"）。dispatch 的 topic 不对，没有到达订阅者
+   - **已分析的方案**：在 `beginWindow` handler 中计算 `mu_Id wid = mu_get_id(&g_mu, title, strlen(title))` 存入 `g_topic_map`（id → topic 映射），`on_window_close` 中用 title 算出 wid 查找 topic 再 dispatch
+   - **暂不处理**：v2 方案完成后统一处理
+
+（之前记录的 JS_Eval 崩溃已修复，kwcc 二进制可以正常运行）
 
 ## 开发方法论教训
 
@@ -144,6 +150,14 @@ const char *s = JS_ToCString(ctx, argv[i], &cbuf);
 1. 分析根因（读源码、lldb、日志）
 2. 给出完整方案
 3. 用户确认后再实施
+
+### 以方案为主，不要因问题打乱计划（强制规则）
+
+- 开发计划必须围绕已确认的方案（如 store-data-flow-v2）进行
+- 中间遇到的问题不能打乱原定的方案计划
+- 修改不能"说一句立马就去变更"，应该先准备修改方案，评估之后再去做
+- 遇到的问题如果是方案外的问题，先讨论方案，确认后再实施
+- 不能为了修某个问题就去破坏原来定好的架构设计
 
 ### 优先使用 lldb 而非 printf 调试
 

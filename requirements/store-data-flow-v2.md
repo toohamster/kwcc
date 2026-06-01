@@ -200,6 +200,7 @@ static void ui_global_event_cb(void *userData, JSValue data_obj);
 
 ```javascript
 ui.button("确认", TOPIC.CONFIRM);
+ui.beginWindow("计算器", 50, 50, 260, 320, 0, TOPIC.CALC_WINDOW);
 ui.slider("音量", s.volume, 0, 100, TOPIC.VOLUME);
 ui.checkbox("静音", s.muted, TOPIC.MUTE);
 ui.textbox("备注", s.note, TOPIC.NOTE);

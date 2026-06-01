@@ -4,11 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Cross-session Memory
 
-Before starting work, read `.claude/memory/MEMORY.md` for a summary of key project knowledge.
-Detailed documents in `.claude/memory/` cover:
-- **mquickjs ES5 syntax support** — see `.claude/memory/mquickjs_es5.md`
-- **Build pitfalls & resolved issues** — see `.claude/memory/build_pitfalls.md`
-- **nanosvg SVG analysis** — see `.claude/memory/nanosvg_analysis.md` (includes SVG cache enhancement docs)
+**Memory files are in the PROJECT ROOT `.claude/memory/` (NOT `/Users/xuyimu/.claude/`).**
+
+**MANDATORY at session start**: Read `.claude/memory/MEMORY.md` for the index, then **read every detailed file it references**. Do NOT stop at the index — MEMORY.md is just a table of contents, the real knowledge is in the files it links to.
+
+## Development Workflow Rules (MANDATORY)
+
+1. **出现错误 → 分析根因 → 出方案 → 确定范围 → 等确认 → 再实施**
+   - 不要看到错误就立刻加代码修。先分析根因（读源码 / lldb / 日志），给出完整方案，明确改动范围，用户确认后再动手。
+   - 修改不能"说一句立马就去变更"，应先准备方案，评估之后再去做。
+   - 中间遇到的问题如果是方案外的，先讨论方案，确认后再实施。不能为了修某个问题去破坏原定的架构设计。
+
+2. **以方案为主，不因问题打乱计划**
+   - 开发计划必须围绕已确认的方案进行。
+   - 方案外的阻塞性问题需先讨论新方案，确认后再调整计划。
 
 ## Project Overview
 
@@ -55,15 +64,14 @@ make run
 │   ├── jsapi.h         # Stub function declarations
 │   └── llog.h          # Logging wrapper (wraps rxi/log.h, handles syslog.h conflicts)
 ├── app/
-│   ├── main.js         # JS entry point (via load() switches examples)
-│   └── examples/       # Example projects
-│       ├── calculator/
-│       │   ├── main.js      # Calculator UI layout
-│       │   └── calc_logic.js # Calculator business logic
-│       └── svg/
-│           ├── main.js      # SVG rendering example (inline + file)
-│           ├── star.svg     # Star test graphic
-│           └── test.svg     # Original test graphic
+│   ├── main.js         # Module entry (loadJs loads example modules)
+│   ├── runtime/
+│   │   ├── store.js    #   createStore + dual-param dispatch + middleware
+│   │   └── bus.js      #   EventBus (exact match + * wildcard + onGroup/offGroup)
+│   └── modules/examples/  # Example modules
+│       ├── test/       #   test module (state + actions + events + view)
+│       ├── calc/       #   calculator module
+│       └── svg/        #   SVG rendering module
 ├── assets/         # Static resources (Roboto font)
 ├── setup.sh        # Dependency download script
 ├── Makefile        # Two-stage build configuration
@@ -81,14 +89,17 @@ make run
 
 ### Script Bridge API
 The `ui` object is injected via `kwcc_ui()` global function + JS wrapper in `kwcc_create_js()`:
-- `ui.beginWindow(title, x, y, w, h)` / `ui.endWindow()`
-- `ui.button(text)` -> returns bool (clicked)
+- `ui.beginWindow(title, x, y, w, h, opt, topic)` / `ui.endWindow()`
+- `ui.sync(key, visible)` — sync module state to C layer (visibility barrier)
+- `ui.button(text, topic)` → returns bool (clicked), auto-dispatches when topic provided
+- `ui.slider(text, value, min, max, topic)` → returns current value, auto-dispatches on change
 - `ui.label(text)`
-- `ui.slider(text, value, min, max)` -> returns current value
 - `ui.layoutRow(height)`
 - `ui.svg(path_or_svg, x, y, w, h)` — render SVG from file path or inline string (`data[0] == '<'`)
+- `ui.display(text)` — calculator display area (dark bg + right-aligned white text)
+- `ui.loadFont(name, path)` / `ui.setFont(name)` / `ui.loadFontDir(dir)` — font management
 
-Global functions available in JS: `print()`, `console.log()`, `kwcc_ui()`, `gc()`, `load()`
+**Framework globals**: `$store`, `$bus`, `$topics`, `$modules`, `registerModule()`, `registerModuleView()`, `registerTopic()`, `loadJs(path, once)`
 
 ### Logging
 Use `llog.h` — provides `log_trace()`, `log_debug()`, `log_info()`, `log_warn()`, `log_error()`, `log_fatal()`. Wraps rxi/log.h and handles macOS syslog.h macro conflicts (`LOG_INFO` etc.). Logs to both `output.log` and stdout.
@@ -125,7 +136,7 @@ mquickjs is a stripped-down QuickJS with mostly ES5 support. Key findings from s
 
 ## Known Issues
 
-1. **Logging** — `log_add_fp()` is called in `init()` to write to `kwcc.log`. File is opened with `"w"` mode (truncated each run).
+1. **Window X close event** — `on_window_close` receives title string but JS handlers subscribe to topic (e.g. "test/window"). Dispatch mismatch means close doesn't reach subscribers. Fix deferred until store-data-flow-v2 complete.
 
 ## SVG Caching
 

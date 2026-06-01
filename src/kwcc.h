@@ -26,6 +26,7 @@ extern int         g_frame_counter;
 
 void          kwcc_init(void);
 void          kwcc_free(void);
+void          kwcc_begin_frame(void);
 JSContext    *kwcc_create_js(void);
 void          kwcc_destroy_js(JSContext *ctx);
 void          kwcc_process_js(JSContext *ctx, const char *js_text);

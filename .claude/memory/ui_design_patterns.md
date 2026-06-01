@@ -219,12 +219,36 @@ ui.beginWindow("Calculator", 200, 80, 280, 350, 64);
 
 ## 6. Bridge API 开发模式
 
+### ui.* 方法完整清单（kwcc.c js_ui_dispatch + methods_js）
+
+**已实现的 C 层 handler**（`kwcc.c:250-479`）：
+
+| JS 方法 | C handler 行号 | 功能 |
+|---------|---------------|------|
+| `ui.beginWindow(title, x, y, w, h, opt, topic)` | 250-293 | 开始窗口，第7参 topic 用于 X 关闭事件。带可见性挡板逻辑 |
+| `ui.endWindow()` | 294-303 | 结束窗口，只对未拦截的窗口调 microui |
+| `ui.sync(key, visible)` | 304-311 | 同步模块状态，设置当前模块 key 上下文 |
+| `ui.beginPanel(name, opt)` | 312-319 | 开始面板 |
+| `ui.endPanel()` | 320-323 | 结束面板 |
+| `ui.button(text, topic)` | 324-336 | 按钮，topic 非空时点击 dispatch `action="click"` |
+| `ui.label(text)` | 337-342 | 标签（左对齐） |
+| `ui.slider(text, value, min, max, topic)` | 343-364 | 滑块，值变化时 dispatch `action="change"` |
+| `ui.layoutRow(height, w1, w2, w3, w4)` | 365-376 | 布局行，最多4列 |
+| `ui.setNext(x, y, w, h)` | 377-385 | 设置下一个控件绝对位置 |
+| `ui.rect(x, y, w, h, r, g, b)` | 386-398 | 绘制矩形 |
+| `ui.display(text)` | 399-416 | 计算器显示屏：深色背景 + 右对齐白色文本 |
+| `ui.textCentered(text)` | 417-423 | 水平居中文字 |
+| `ui.loadFont(name, path)` | 424-437 | 加载字体 |
+| `ui.setFont(name)` | 438-449 | 设置当前字体 |
+| `ui.loadFontDir(dir)` | 450-457 | 加载目录下所有字体 |
+| `ui.svg(path_or_svg, x, y, w, h)` | 458-478 | SVG 渲染（inline + 文件路径，128 槽缓存） |
+
 ### 新增 UI 方法的标准流程
 
-1. **C 层**（`bridge.c`）：在 `js_ui_dispatch` 添加 `strcmp` 分支
+1. **C 层**（`kwcc.c`）：在 `js_ui_dispatch` 添加 `strcmp` 分支
 2. **C 层**：调用对应的 microui/NanoVG 函数
-3. **JS wrapper**（`bridge.c` 中的 `methods_js`）：添加 JS 方法定义
-4. **JS 业务层**（`app/main.js`）：调用新方法
+3. **JS wrapper**（`kwcc_create_js` 中的 `methods_js`）：添加 JS 方法定义
+4. **JS 业务层**（app 代码）：调用新方法
 
 ### 参数提取模板
 

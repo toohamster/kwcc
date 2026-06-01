@@ -66,37 +66,66 @@ registerModuleView("test", function(s) {
 
 ---
 
-### 阶段三：C 层统一事件分发
+### 阶段三：C 层统一事件分发 ✅ 已完成
 
 **目标**：改造 C 层，新增全局回调 + `id -> topic` 映射 + JSValue 事件构造
 
-**修改文件**：
+**已完成**：
 - `src/kwcc.c` — 新增：
   1. `g_topic_map[256]` + `g_topic_map_count`（Zero-Alloc 单帧覆盖）
-  2. `kwcc_bind_topic(mu_Id id, const char *topic)` — 绘制时绑定
-  3. `kwcc_begin_frame()` — 每帧清零 `g_topic_map_count`
-  4. `kwcc_dispatch_event(topic, action, data)` — 构造 JSValue 并调用 `js_on_event`
-  5. 修改 `ui.button()` 等 handler 支持 topic 参数
+  2. `kwcc_begin_frame()` — 每帧清零 `g_topic_map_count`（在 `kwcc_process_js` 中调用）
+  3. `kwcc_bind_topic(mu_Id id, const char *topic)` — 绘制时绑定
+  4. `kwcc_dispatch_event()` — JS_Eval 调用 `$bus.emit()`
+  5. 修改 button handler 支持 topic 参数
+- `src/kwcc.h` — 新增 `kwcc_begin_frame()` 声明
+- `app/constant/topic.js` — 补充 TEST_RESET 常量
+- `app/modules/test.js` — 补充 reset 事件处理
 
-- `src/kwcc.h` — 新增公共 API 声明
-
-- `src/main.m` — 在 `frame()` 开头调用 `kwcc_begin_frame()`
-
-**关键设计**：
-- `topic` 为最后一个参数，所有控件**强制传入**，不传视为调用错误
-- JS 侧 `ui.button("确认", TOPIC.CONFIRM)` 调用时，C 层绘制后调用 `kwcc_bind_topic(mu_get_id(), topic)`
-- 用户点击时，C 层全局回调根据 ID 查 topic，构造 `{topic, action, data}` JSValue 调用 `js_on_event`
-- 修改 `js_ui_dispatch` 各 handler，从最后一个参数读取 topic 字符串
-
-**验收**：
-- 带 topic 的按钮点击后能正确触发 `$bus.emit`
-- 所有交互控件都传 topic，旧例代码（`if (ui.button(...))`）替换为 `ui.button(text, topic)` 写法
+**验证结果**：
+- 点击 "+" 按钮 count 从 0 变为 1，闭环通
+- `$bus.emit()` → 订阅回调 → `$store.dispatch` → Action → state 更新 → 渲染 全链路正常
 
 ---
 
-### 阶段四：迁移计算器示例
+### 阶段四：topic 全覆盖 + C 层窗口挡板 + microui X close 回调 🔄 进行中
 
-**目标**：将 `app/examples/calculator/` 改造为 `app/modules/calc.js` + `app/modules/calc_view.js`
+**目标**：所有交互控件统一 topic 参数 + C 层可见性挡板 + microui X 关闭事件外化
+
+**核心设计**：
+- 所有带交互的控件，**最后一个参数固定为 topic**（与 v2 方案一致）
+- C 层 `ui.sync(key, visible)` 同步模块状态，`beginWindow` 用 sync 设置的上下文查可见性
+
+**topic 参数范围**：
+
+| 函数 | 参数变化 |
+|------|---------|
+| `ui.button(text, topic)` | 已有，不需改 |
+| `ui.beginWindow(title, x, y, w, h, opt, topic)` | 加第 7 个参数 topic |
+| `ui.slider(text, value, min, max, topic)` | 加第 5 个参数 topic |
+
+**修改文件**：
+- `deps/microui/microui.h` — `mu_Context` 新增 `on_window_close` 回调
+- `deps/microui/microui.c` — `cnt->open = 0` 替换为 `ctx->on_window_close(ctx, title)`
+- `src/kwcc.c`：
+  1. C 层挡板：`g_win_intercepted[32]` + `g_win_top` — 记录 beginWindow 是否被拦截
+  2. `ui.sync(key, state)` — 同步 JS 端模块状态，设置 `g_current_mod_key` 上下文
+  3. `beginWindow` handler：读第 7 个参数存为窗口 topic，查 `g_current_mod_key` 可见性，visible=0 时标记拦截、跳过 microui 调用
+  4. `endWindow` handler：检查 g_win_intercepted，只对未拦截的窗口调用 mu_end_window
+  5. `slider` handler：读第 5 个参数 topic，value 变化时 dispatch
+  6. `on_window_close` 回调实现：dispatch 窗口 topic → JS state.visible = 0
+  7. `kwcc_dispatch_event()` — JS_Eval 调用 `$bus.emit()`
+
+**JS 层配合**：
+- `onFrame` 框架在 render 前自动调 `ui.sync(key, $store.state[key].visible)`
+- view 函数：`beginWindow` 和 `slider` 都传 topic
+- `endWindow` 正常调用，C 层自动配对
+
+**验证**：
+- 点击 X → C 回调 → JS state.visible = 0 → 下帧窗口消失，不崩溃
+- 拖拽 slider → C 层 dispatch topic → JS state 更新 → 下一帧渲染新值
+- visible=1 重新出现时，窗口正常渲染
+
+### 阶段五：迁移计算器示例
 
 **新增文件**：
 - `app/modules/calc.js` — 计算器 state + actions + initEvents
@@ -115,7 +144,7 @@ registerModuleView("test", function(s) {
 
 ---
 
-### 阶段五：验证与清理
+### 阶段六：验证与清理
 
 **目标**：确保 SVG 示例不受影响，清理旧代码
 

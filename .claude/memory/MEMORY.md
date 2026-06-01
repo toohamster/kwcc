@@ -51,13 +51,22 @@
   - 屏幕坐标 = clip_rect.x + 布局相对偏移
   - nanosvg 实现 (`NANOSVG_IMPLEMENTATION`) 只在 main.m 中定义一次
 
+### [C 层完整架构](c_architecture.md)
+- 全局变量、核心函数、ui.* API 完整清单
+- 事件系统：kwcc_dispatch_event、kwcc_bind_topic、topic map
+- 窗口挡板：kwcc_sync_module、可见性拦截栈
+- SVG 缓存：fnv1a、svg_resolve、帧安全淘汰
+- 字体系统：loadFontDir 自动选 CJK 字体
+- JS wrapper（methods_js）定义
+- 已实现/未实现控件对照表
+
 ### [UI 设计与实现模式](ui_design_patterns.md)
 - 布局系统：layoutRow 参数规则、-1 的含义、状态切换
 - 文字测量与对齐：nvgTextBounds 替代硬编码
 - 坐标系与 DPI：high_dpi=false 是简单方案
 - 状态持久化：Slider 值指针、JS 层状态保护
 - 图标渲染：MU_COMMAND_ICON 的正确画法
-- Bridge API 开发模式：参数提取模板
+- Bridge API 开发模式：**ui.* 方法完整清单** + 参数提取模板
 - NanoVG 渲染技巧：字体、矩形、描边、裁剪
 - 调试检查清单
 - JS 文件模块化：load() 函数、模块状态持久化
