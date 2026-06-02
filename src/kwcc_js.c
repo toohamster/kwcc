@@ -1,10 +1,11 @@
-/* jsapi.c — kwcc JS runtime support (stdlib stubs + UI bridge) */
+/* kwcc_js.c — kwcc JS runtime support (stdlib stubs + JS bindings) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "mquickjs/mquickjs.h"
 #include "llog.h"
-#include "kwcc.h"
+#include "kwcc_js.h"
+#include "kwcc_base.h"
 
 /* ── js_print: print all arguments to stdout and log ─────────── */
 JSValue js_print(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {

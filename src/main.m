@@ -10,6 +10,7 @@
 #include "nanovg/nanovg_gl.h"
 
 #include "kwcc.h"
+#include "kwcc_ui.h"
 #include "microui/microui.h"
 #include "llog.h"
 
@@ -173,8 +174,9 @@ static void init(void) {
         }
     }
 
-    kwcc_init();
-    js_ctx = kwcc_create_js();
+    js_ctx = kwcc_create_js();    /* 1. JSContext */
+    kwcc_init();                   /* 2. microui */
+    kwcc_register_ui(js_ctx);      /* 3. UI methods */
 
     /* Load and eval main.js once during init (register modules, init store/events) */
     js_text = load_file("app/main.js");

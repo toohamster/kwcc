@@ -1,7 +1,7 @@
-/* jsapi.h — kwcc JS runtime support (stdlib stubs + UI bridge)
+/* kwcc_js.h — kwcc JS runtime support (stdlib stubs + JS bindings)
    Must be included before mqjs_stdlib.h */
-#ifndef KWCC_JSAPI_H
-#define KWCC_JSAPI_H
+#ifndef KWCC_JS_H
+#define KWCC_JS_H
 
 #include "mquickjs/mquickjs.h"
 
