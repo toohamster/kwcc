@@ -282,7 +282,7 @@ JSValue js_native_http_request(JSContext *ctx, JSValue *this_val,
 | 创建 JS 对象 | `JS_NewObject(ctx)` | 不用 `{}` |
 | 创建 JS 数组 | `JS_NewArray(ctx, initial_len)` | |
 | 获取对象属性 | `JS_GetPropertyStr(ctx, obj, "key")` | 返回 `JSValue` |
-| 设置对象属性 | `JS_SetPropertyStr(ctx, obj, "key", val)` | |
+| 设置对象属性 | `JS_SetPropertyStr(ctx, obj, "key", val)` | 注意：`val` 被 transfer 到对象上 |
 | 获取数组元素 | `JS_GetPropertyUint32(ctx, arr, idx)` | 返回 `JSValue` |
 | 获取数组长度 | `JS_GetPropertyStr(ctx, arr, "length")` + `JS_ToInt32` | mquickjs 没有 `JS_GetArrayLength` |
 | 判断类型 | `JS_IsString(ctx, val)` / `JS_IsNumber(ctx, val)` / `JS_IsNull(val)` / `JS_IsUndefined(val)` | |
@@ -290,11 +290,19 @@ JSValue js_native_http_request(JSContext *ctx, JSValue *this_val,
 | 创建 bool | `JS_NewBool(val)` | |
 | 未定义值 | `JS_UNDEFINED` | 宏常量 |
 | C 函数注册 | `JS_CFUNC_DEF("name", argc, func)` | 在 `mqjs_stdlib.c` 的 `js_global_object[]` 中注册 |
+| GC 栈式保护 | `JS_PUSH_VALUE(ctx, v)` / `JS_POP_VALUE(ctx, v)` | 保护函数内临时 JSValue，先声明 `JSGCRef v_ref` |
+| GC 列表保护 | `JS_AddGCRef(ctx, &ref)` / `JS_DeleteGCRef(ctx, &ref)` | 长期保护（如 config 存储），返回 `JSValue*` |
+| 调用 JS 函数 | `JS_PushArg(ctx, val)` + `JS_Call(ctx, n)` | 必须先 `JS_StackCheck(ctx, n+2)`，压栈顺序：arg[n-1]...arg[0], func, this_obj |
+| 执行 JS 代码 | `JS_Eval(ctx, code, len, "<file>", flags)` | **最安全的 C→JS dispatch 方式**，配合全局对象传递复杂数据 |
+| 无此函数 | ~~`JS_Duplicate`~~、~~`JS_FreeValue`~~、~~`JS_Call(ctx, func, this, argc, argv)`~~ | **标准 QuickJS 有，但 mquickjs 没有！** |
 
 **关键陷阱**（来自 `build_pitfalls.md` + `mquickjs_es5.md`）：
 - `JS_ToCString` 可能返回 NULL → 必须 NULL 检查后再使用
 - `JSCStringBuf` 是 5 字节栈结构（`uint8_t buf[5]`），短字符串内联存储
 - mquickjs 的 `JSValue` 是 `uint64_t`（64 位平台），不是结构体
+- **没有引用计数**：`JSValue` 是值类型（tagged integer），不需要 `JS_Duplicate`
+- **没有 `JS_FreeValue`**：GC 通过 `JS_PUSH_VALUE`/`JS_POP_VALUE`（栈式）或 `JS_AddGCRef`/`JS_DeleteGCRef`（列表式）管理
+- **`JS_Call(ctx, call_flags)` 只有 2 个参数**，不是标准 QuickJS 的 5 参数版本。参数通过 `JS_PushArg` 预先压栈
 - 不支持 `...rest` 参数 → JS 侧传固定参数，C 侧用 `argc` 判断可选参数
 - `{}` 在语句开头被解析为 block → JS 侧用 `new Object()`
 - C 函数必须 include 头文件声明，否则 x86_64 ABI 会 float→double 提升
@@ -303,43 +311,72 @@ JSValue js_native_http_request(JSContext *ctx, JSValue *this_val,
 
 **核心原则**：C 层在 pipe 端完整读取响应，只在 ON_END 时一次性 dispatch，避免 per-chunk 拖慢 60fps。
 
-C 层构建 JS response 对象并 dispatch：
+**mquickjs 正确方案**：用 `JS_Eval` + 全局对象传递复杂数据（参考 `kwcc_dispatch_event` 模式）
 
 ```c
-static void http_dispatch_end(JSContext *ctx, kwcc_http_req_t *req) {
-    // 构建 response 对象
+static void http_dispatch_end(kwcc_http_req_t *req, int error,
+                               int status, const char *body, int body_len,
+                               struct phr_header *headers, size_t num_headers) {
+    JSContext *ctx = g_js_ctx;
+    if (!ctx) return;
+
+    if (error) {
+        /* 错误：转义错误消息中的引号和换行 */
+        char escaped[512];
+        int j = 0;
+        for (int i = 0; i < body_len && j < (int)(sizeof(escaped) - 2); i++) {
+            char c = body[i];
+            if (c == '\\' || c == '\'' || c == '\n' || c == '\r')
+                escaped[j++] = '\\';
+            escaped[j++] = c;
+        }
+        escaped[j] = '\0';
+
+        char buf[1024];
+        snprintf(buf, sizeof(buf),
+            "$bus.emit('http/end', { reqId:'%s', error:'%s' });",
+            req->req_id, escaped);
+        JS_Eval(ctx, buf, strlen(buf), "<http_end>", 0);
+        return;
+    }
+
+    /* 成功：构建 JS response 对象 */
     JSValue resp = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, resp, "status", JS_NewInt32(ctx, req->http_status));
+    JS_SetPropertyStr(ctx, resp, "status", JS_NewInt32(ctx, status));
+    JS_SetPropertyStr(ctx, resp, "body", JS_NewStringLen(ctx, body, body_len));
 
-    // body 字符串
-    const char *body_start = req->response_buf + header_end_offset;
-    int body_len = req->response_len - header_end_offset;
-    JSValue body_val = JS_NewStringLen(ctx, body_start, body_len);
-    JS_SetPropertyStr(ctx, resp, "body", body_val);
-
-    // headers 对象
     JSValue headers_obj = JS_NewObject(ctx);
-    for (int i = 0; i < num_headers; i++) {
-        JSValue h_val = JS_NewStringLen(ctx, h[i].value, h[i].value_len);
-        JS_SetPropertyStr(ctx, headers_obj, (char*)h[i].name, h_val);
+    for (size_t i = 0; i < num_headers; i++) {
+        char *hname = strndup(headers[i].name, headers[i].name_len);
+        JS_SetPropertyStr(ctx, headers_obj, hname,
+            JS_NewStringLen(ctx, headers[i].value, headers[i].value_len));
+        free(hname);
     }
     JS_SetPropertyStr(ctx, resp, "headers", headers_obj);
 
-    // 构建 data 对象 { reqId, response }
-    JSValue data = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, data, "reqId", JS_NewString(ctx, req->req_id));
-    JS_SetPropertyStr(ctx, data, "response", resp);
+    /* 通过全局对象保护 resp（GC 安全），然后 JS_Eval emit */
+    JSValue global_obj = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global_obj, "__http_resp", resp);
 
-    // 调用 $bus.emit("http/end", action, data)
-    // 类似 kwcc_dispatch_event 的现有模式
-    char buf[256];
+    char buf[512];
     snprintf(buf, sizeof(buf),
-        "$bus.emit('http/end', new Object(), %s)",
-        js_serialize_object(ctx, data));  // 或直接用 JS_Call
-
+        "$bus.emit('http/end', new Object(), __http_resp);");
     JS_Eval(ctx, buf, strlen(buf), "<http>", JS_EVAL_REPL);
+
+    /* 清理全局变量 */
+    JS_SetPropertyStr(ctx, global_obj, "__http_resp", JS_UNDEFINED);
 }
 ```
+
+**为什么不用 `JS_Call`**：
+- mquickjs 的 `JS_Call(ctx, call_flags)` 签名不同于标准 QuickJS
+- 参数需通过 `JS_PushArg` 压栈，且需 `JS_StackCheck` 检查栈空间
+- `JS_Eval` + 字符串构建方式更简单、更安全，与现有 `kwcc_dispatch_event` 模式一致
+
+**为什么用全局对象传递**：
+- `JS_SetPropertyStr(ctx, global_obj, "__http_resp", resp)` 把对象挂到全局对象上，GC 不会回收
+- `JS_Eval` 执行 emit 后，`JS_SetPropertyStr(ctx, global_obj, "__http_resp", JS_UNDEFINED)` 清理
+- 避免了手动 `JS_PUSH_VALUE`/`JS_POP_VALUE` 的复杂性
 
 ```
 C 层 select() 每帧循环:
@@ -584,7 +621,7 @@ fetchAsync("upload", "https://example.com/upload", {
 | 是否引入 `deps/picohttpparser/`？ | 是，2 个文件，MIT 许可，~400 行 |
 | setup.sh 需要改动？ | 是，添加 picohttpparser 下载 |
 | Makefile 需要改动？ | 是，`kwcc_http.o` 依赖 `picohttpparser.o` |
-| 解析状态码 | picohttpparser 不直接返回状态码，需从首行 `sscanf` 提取 |
+| 解析状态码 | picohttpparser **直接返回** 状态码到 `*status` 参数中（无需 sscanf 从首行提取） |
 
 ### 3. 超时控制
 

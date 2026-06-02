@@ -71,6 +71,13 @@
 - 调试检查清单
 - JS 文件模块化：load() 函数、模块状态持久化
 
+### [picohttpparser 分析](picohttpparser_analysis.md)
+- HTTP 响应解析 API：`phr_parse_response()` 返回值语义（>0 成功/-2 不完整/-1 错误）
+- `phr_header` 零拷贝指针结构，需 `JS_NewStringLen` 提取
+- 增量解析机制：`last_len` 参数用于 incomplete 检测
+- 与 mquickjs 集成：`JS_NewStringLen` 创建 JS 字符串，`JS_NewInt32` 创建状态码
+- chunked 解码器：`phr_decode_chunked`（自研 socket 实现时需要）
+
 ### [GitHub 发布流程](deploy_workflow.md)
 - GitHub Token 提取方法
 - 功能分支 → main 的完整发布流程（PR、合并、打标签、Release）
