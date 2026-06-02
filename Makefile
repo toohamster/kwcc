@@ -16,7 +16,8 @@ MQJS_CORE = deps/mquickjs/mquickjs.c \
 
 DEP_SRCS = deps/nanovg/nanovg.c \
            deps/microui/microui.c \
-           deps/log/log.c
+           deps/log/log.c \
+           deps/picohttpparser/picohttpparser.c
 
 MQJS_SRCS = $(MQJS_CORE) $(DEP_SRCS) src/main.m src/kwcc.c src/jsapi.c
 
@@ -69,6 +70,9 @@ $(OBJ_DIR)/deps/microui/%.o: deps/microui/%.c | $(OBJ_DIR)/deps/microui
 $(OBJ_DIR)/deps/log/%.o: deps/log/%.c | $(OBJ_DIR)/deps/log
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(OBJ_DIR)/deps/picohttpparser/%.o: deps/picohttpparser/%.c | $(OBJ_DIR)/deps/picohttpparser
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(OBJ_DIR)/src/main.o: src/main.m $(MQJS_HEADERS) | $(OBJ_DIR)/src
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -84,6 +88,7 @@ $(OBJ_DIR)/deps/mquickjs \
 $(OBJ_DIR)/deps/nanovg \
 $(OBJ_DIR)/deps/microui \
 $(OBJ_DIR)/deps/log \
+$(OBJ_DIR)/deps/picohttpparser \
 $(OBJ_DIR)/src:
 	mkdir -p $@
 

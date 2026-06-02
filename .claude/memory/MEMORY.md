@@ -9,6 +9,16 @@
 
 ## 记忆文件索引
 
+### [mquickjs C API 参考](mquickjs_c_api.md)
+- **JSValue 类型系统**：uint64_t 值类型，无引用计数
+- **创建 API**：JS_NewObject / JS_NewArray / JS_NewStringLen / JS_NewInt32 / JS_NewBool
+- **属性访问**：JS_GetPropertyStr / JS_SetPropertyStr / JS_GetPropertyUint32
+- **C 字符串转换**：JS_ToCString（⚠️ 可能返回 NULL，必须检查）
+- **GC 管理**：JS_PUSH_VALUE/JS_POP_VALUE（栈式），JS_AddGCRef/JS_DeleteGCRef（列表式）
+- **JS 函数调用**：JS_PushArg + JS_Call(ctx, flags)（2 参数版本！）
+- **C→JS Dispatch**：C API 构建对象 + 全局变量传递（禁止拼接用户数据到 JS_Eval）
+- **不存在的 API**：JS_FreeValue、JS_Duplicate、JS_Call(ctx, func, this, argc, argv)
+
 ### [mquickjs ES5 语法支持](mquickjs_es5.md)
 - 从测试用例 (`tests/*.js`) 和源码分析验证的支持/不支持语法清单
 - **关键陷阱**: `{}` 在语句开头被解析为 block 而非 object literal

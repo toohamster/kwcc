@@ -3,7 +3,7 @@
 set -euo pipefail
 
 DEPS_DIR="$(cd "$(dirname "$0")" && pwd)/deps"
-mkdir -p "$DEPS_DIR/sokol" "$DEPS_DIR/nanovg" "$DEPS_DIR/microui" "$DEPS_DIR/mquickjs" "$DEPS_DIR/nanosvg"
+mkdir -p "$DEPS_DIR/sokol" "$DEPS_DIR/nanovg" "$DEPS_DIR/microui" "$DEPS_DIR/mquickjs" "$DEPS_DIR/nanosvg" "$DEPS_DIR/picohttpparser"
 mkdir -p "$(dirname "$0")/assets"
 
 download() {
@@ -62,12 +62,19 @@ fi
 rm -rf "$MQJS_TMP"
 
 # --- nanosvg (SVG 解析) ---
-echo "[5/6] Downloading nanosvg..."
+echo "[5/7] Downloading nanosvg..."
 NANOSVG_BASE="https://raw.githubusercontent.com/memononen/nanosvg/master/src"
 download "$NANOSVG_BASE/nanosvg.h"  "$DEPS_DIR/nanosvg/nanosvg.h"
 
+# --- picohttpparser (HTTP parser) ---
+echo "[6/7] Downloading picohttpparser..."
+mkdir -p "$DEPS_DIR/picohttpparser"
+PICO_BASE="https://raw.githubusercontent.com/h2o/picohttpparser/master"
+download "$PICO_BASE/picohttpparser.h"  "$DEPS_DIR/picohttpparser/picohttpparser.h"
+download "$PICO_BASE/picohttpparser.c"  "$DEPS_DIR/picohttpparser/picohttpparser.c"
+
 # --- 字体 (Roboto) ---
-echo "[6/6] Downloading font..."
+echo "[7/7] Downloading font..."
 FONT_URL="https://fonts.gstatic.com/s/roboto/v30/KFOmCnqEu92Fr1Me5Q.ttf"
 download "$FONT_URL" "$(dirname "$0")/assets/Roboto-Regular.ttf"
 

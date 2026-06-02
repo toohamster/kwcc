@@ -153,29 +153,32 @@ if (ret > 0) {
 }
 ```
 
-**注意**：picohttpparser 不直接返回 HTTP 状态码，需要从响应首行（`HTTP/1.1 200 OK`）手动解析。可以在 `phr_parse_response` 返回后，用 `sscanf` 从 `response_buf` 提取状态码。
+**注意**：picohttpparser **直接返回** 状态码到 `*status` 参数中（无需 sscanf 从首行提取）。
 
-### 动态缓冲区管理
+### 动态缓冲区管理（picohttpparser 安全边界）
 
 ```c
 // 初始分配
 req->response_buf = malloc(KWCC_HTTP_INIT_CAP);
 req->response_cap = KWCC_HTTP_INIT_CAP;
 
-// 每帧 read() 后追加
+// 每帧 read() 后追加 — 每次追加后必须追加 trailing '\0'
 while ((n = read(req->pipe_read_fd, buf, sizeof(buf))) > 0) {
-    if (req->response_len + n > req->response_cap) {
-        req->response_cap *= 2;  // 翻倍扩容
+    if (req->response_len + n + 4 > req->response_cap) {
+        req->response_cap = (req->response_len + n + 4) * 2;
         req->response_buf = realloc(req->response_buf, req->response_cap);
     }
     memcpy(req->response_buf + req->response_len, buf, n);
     req->response_len += n;
+    req->response_buf[req->response_len] = '\0';  // picohttpparser 安全边界
 }
 ```
 
+**为什么需要 trailing `\0`**：`phr_parse_response` 内部做指针扫描（`scan_quote`、`is_token_char`），如果 buffer 末尾没有 null 终止符可能越界读取。`+4` 字节保证 SIMD/指针扫描不越界。
+
 ### curl 参数规范
 ```bash
-kwcc_curl -s -i \
+kwcc_curl -s -L -i \
   -X POST \
   -H "Authorization: Bearer token" \
   -H "Content-Type: application/json" \
@@ -185,6 +188,7 @@ kwcc_curl -s -i \
 
 参数说明：
 - `-s`：silent 模式，不输出进度
+- `-L`：**自动跟随 HTTP 301/302 重定向**（避免中间响应头泄漏到 picohttpparser）
 - `-i`：包含 HTTP 响应头（用于解析状态码和 Content-Length）
 - 未来替换为自研实现时，**输入输出格式保持不变**
 
@@ -211,14 +215,71 @@ Content-Length: 1234\r\n
 ```
 
 **解析流程**：
-1. 每帧 `read()` 后，动态扩容 `response_buf`
+1. 每帧 `read()` 后，动态扩容 `response_buf`（realloc +4 字节 + trailing `\0`）
 2. 调用 `phr_parse_response(response_buf, response_len, ...)`：
    - 返回 `-2` → 数据不完整，退出，下帧继续
    - 返回 `-1` → 协议错误，dispatch `ON_ERROR`
    - 返回 `> 0` → header 解析成功，body 起始偏移 = ret
-3. 从首行提取状态码：`sscanf(buf, "HTTP/%*d.%*d %d", &http_status)`
+3. 状态码直接从 `*status` 参数获取（picohttpparser 已解析），**无需 sscanf**
 4. 遍历 `headers[]` 找 `Content-Length` → `total_size`
 5. Body = `response_buf + ret`，一次性 dispatch `ON_END`
+
+### `kwcc_http_request()` 内部流程
+
+```c
+/* 1. 查找空闲槽位，复制 req_id / method / url */
+
+/* 2. 读取 http config */
+JSValue cfg = kwcc_config_get("http");
+const char *bin_path = "curl";
+const char *parser_mode = "raw";
+int timeout = 30;
+
+if (!JS_IsUndefined(cfg)) {
+    /* bin_path */
+    JSValue bp = JS_GetPropertyStr(ctx, cfg, "bin_path");
+    if (JS_IsString(ctx, bp)) { JSCStringBuf b; const char *s = JS_ToCString(ctx, bp, &b); if (s) bin_path = s; }
+
+    /* parser_mode */
+    JSValue pm = JS_GetPropertyStr(ctx, cfg, "parser_mode");
+    if (JS_IsString(ctx, pm)) { JSCStringBuf b; const char *s = JS_ToCString(ctx, pm, &b); if (s) parser_mode = s; }
+
+    /* timeout */
+    JSValue to = JS_GetPropertyStr(ctx, cfg, "timeout");
+    if (!JS_IsUndefined(to)) { int ret = JS_ToInt32(ctx, &timeout, to); (void)ret; }
+}
+
+/* 3. 构建 curl argv */
+// 基础："-s", "-X", method
+// if (parser_mode == "raw") 添加 "-i"
+// 始终添加 "-L"（跟随重定向）
+// 添加 "--max-time", timeout_string
+// 遍历 headers 数组添加 "-H", header_string
+// if (body_len > 0) 添加 "-d", body
+// 最后添加 url
+
+/* 4. pipe() + fork() */
+/* 5. 子进程：dup2(pipefd[1], STDOUT_FILENO) → execvp(bin_path, argv) */
+/* 6. 父进程：close(pipefd[1]) → fcntl(O_NONBLOCK) → malloc(response_buf) → kwcc_io_register() */
+```
+
+### HTTP 配置选项（`kwcc_config`）
+
+```javascript
+kwcc_config("http", {
+    bin_path: "curl",         // HTTP 客户端可执行文件路径（默认 "curl"）
+    parser_mode: "raw",       // "raw" = picohttpparser 解析原始 HTTP 文本（curl -i 输出）
+                              // "body" = 后端已返回纯净 body，跳过 picohttpparser
+    chunked_support: 0,       // 0 = 不支持 chunked transfer（默认）
+                              // 1 = 启用 phr_decode_chunked 解码
+    timeout: 30,              // curl --max-time 秒数（默认 30s）
+});
+```
+
+**`parser_mode` 说明**：
+- **`"raw"`（默认）**：curl 使用 `-i` 参数输出完整 HTTP 响应（status line + headers + `\r\n\r\n` + body）。C 层用 `phr_parse_response()` 解析原始 HTTP 文本，提取状态码、headers、body 偏移。
+- **`"body"`**：未来如果自研 socket 实现直接返回纯净 body（无 HTTP 头），C 层跳过 `phr_parse_response()` 调用，直接将读取数据作为 body dispatch。
+- 切换 `parser_mode` 不影响 JS 层消费方式，`$bus.emit('http/end', resp)` 输出的 response 对象格式保持一致。
 
 ### JS→C 通信：mquickjs binding
 
@@ -235,7 +296,7 @@ C 侧 binding（`src/jsapi.c` 风格）：
 JSValue js_native_http_request(JSContext *ctx, JSValue *this_val,
                                int argc, JSValue *argv) {
     (void)this_val;
-    if (argc < 4) return JS_UNDEFINED;
+    if (argc < 3) return JS_UNDEFINED;
 
     // reqId (arg 0) — 字符串
     JSCStringBuf rb;
@@ -245,14 +306,33 @@ JSValue js_native_http_request(JSContext *ctx, JSValue *this_val,
     // method (arg 1) — 字符串
     JSCStringBuf mb;
     const char *method = JS_ToCString(ctx, argv[1], &mb);
+    if (!method) return JS_UNDEFINED;
 
     // url (arg 2) — 字符串
     JSCStringBuf ub;
     const char *url = JS_ToCString(ctx, argv[2], &ub);
+    if (!url) return JS_UNDEFINED;
 
-    // headers (arg 3) — JSArray
-    JSValue headers_arr = argv[3];
-    JS_BOOL is_arr = (JS_GetClassID(ctx, headers_arr) == JS_CLASS_ARRAY);
+    // headers (arg 3, optional) — JSArray，提取为 C 字符串数组
+    const char *header_ptrs[16] = {0};
+    int header_count = 0;
+    if (argc > 3 && !JS_IsUndefined(argv[3]) && !JS_IsNull(argv[3])) {
+        JSValue headers_arr = argv[3];
+        if (JS_GetClassID(ctx, headers_arr) == JS_CLASS_ARRAY) {
+            // 获取数组长度
+            JSValue len_val = JS_GetPropertyStr(ctx, headers_arr, "length");
+            int arr_len = 0;
+            if (JS_ToInt32(ctx, &arr_len, len_val) == 0) {
+                if (arr_len > 16) arr_len = 16;
+                for (int i = 0; i < arr_len; i++) {
+                    JSValue item = JS_GetPropertyUint32(ctx, headers_arr, i);
+                    JSCStringBuf hb;
+                    const char *s = JS_ToCString(ctx, item, &hb);
+                    if (s) header_ptrs[header_count++] = s;
+                }
+            }
+        }
+    }
 
     // body (arg 4, optional) — 字符串
     const char *body = "";
@@ -260,17 +340,21 @@ JSValue js_native_http_request(JSContext *ctx, JSValue *this_val,
     if (argc > 4 && !JS_IsUndefined(argv[4]) && !JS_IsNull(argv[4])) {
         JSCStringBuf bb;
         const char *b = JS_ToCString(ctx, argv[4], &bb);
-        if (b) { body = b; body_len = strlen(b); }
+        if (b) { body = b; body_len = (int)strlen(b); }
     }
 
     kwcc_http_request(req_id, method, url,
-                      is_arr ? headers_arr : NULL,
-                      is_arr ? JS_GetPropertyUint32_array_len(ctx, headers_arr) : 0,
+                      header_count > 0 ? header_ptrs : NULL,
+                      header_count,
                       body, body_len);
 
     return JS_UNDEFINED;
 }
 ```
+
+**说明**：
+- mquickjs 没有 `JS_GetArrayLength` 或 `JS_GetPropertyUint32_array_len`，必须用 `JS_GetPropertyStr(ctx, arr, "length")` + `JS_ToInt32`
+- `JS_ToCString` 返回的指针是函数内局部使用（短字符串内联到 `JSCStringBuf` 栈缓冲区），传给 `kwcc_http_request` 后会被 `strdup` 保存，函数返回后指针失效不影响
 
 **mquickjs API 对照**（基于 `deps/mquickjs/mquickjs.h` + `src/jsapi.c` 验证）：
 
@@ -311,7 +395,15 @@ JSValue js_native_http_request(JSContext *ctx, JSValue *this_val,
 
 **核心原则**：C 层在 pipe 端完整读取响应，只在 ON_END 时一次性 dispatch，避免 per-chunk 拖慢 60fps。
 
-**mquickjs 正确方案**：用 `JS_Eval` + 全局对象传递复杂数据（参考 `kwcc_dispatch_event` 模式）
+**安全原则**：
+- **禁止**用 `JS_Eval` + 字符串拼接传递 body/header 数据（引号、换行会破坏 JS 语法，导致 `SyntaxError`）
+- **允许**用 `JS_Eval` + 全局对象传递变量名（变量名不含用户数据，语法安全）
+- 复杂对象（body、headers）必须通过 C API 构建后挂到全局对象上
+
+**并发安全**：
+- 如果同时有 2+ 个 `fetchAsync` 在同一帧或相邻帧返回，使用单一全局名 `__http_resp` 会被后一个请求覆盖
+- 必须用 `__http_resp_<req_id>` 隔离，每个请求有独立的全局变量
+- dispatch 后必须 `delete global.__http_resp_<req_id>` 清理，防止内存泄漏
 
 ```c
 static void http_dispatch_end(kwcc_http_req_t *req, int error,
@@ -321,26 +413,16 @@ static void http_dispatch_end(kwcc_http_req_t *req, int error,
     if (!ctx) return;
 
     if (error) {
-        /* 错误：转义错误消息中的引号和换行 */
-        char escaped[512];
-        int j = 0;
-        for (int i = 0; i < body_len && j < (int)(sizeof(escaped) - 2); i++) {
-            char c = body[i];
-            if (c == '\\' || c == '\'' || c == '\n' || c == '\r')
-                escaped[j++] = '\\';
-            escaped[j++] = c;
-        }
-        escaped[j] = '\0';
-
+        /* 错误：仅传递可控的简短描述，不传递 body 原文 */
         char buf[1024];
         snprintf(buf, sizeof(buf),
             "$bus.emit('http/end', { reqId:'%s', error:'%s' });",
-            req->req_id, escaped);
+            req->req_id, "parse error");
         JS_Eval(ctx, buf, strlen(buf), "<http_end>", 0);
         return;
     }
 
-    /* 成功：构建 JS response 对象 */
+    /* 成功：用 C API 构建 JS response 对象（不拼接任何用户数据到字符串）*/
     JSValue resp = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, resp, "status", JS_NewInt32(ctx, status));
     JS_SetPropertyStr(ctx, resp, "body", JS_NewStringLen(ctx, body, body_len));
@@ -354,29 +436,24 @@ static void http_dispatch_end(kwcc_http_req_t *req, int error,
     }
     JS_SetPropertyStr(ctx, resp, "headers", headers_obj);
 
-    /* 通过全局对象保护 resp（GC 安全），然后 JS_Eval emit */
+    /* 全局对象传递 — 用 req_id 隔离变量名，防止并发请求互相污染 */
     JSValue global_obj = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global_obj, "__http_resp", resp);
+    char global_name[128];
+    snprintf(global_name, sizeof(global_name), "__http_resp_%s", req->req_id);
+    JS_SetPropertyStr(ctx, global_obj, global_name, resp);
 
+    /* 注意：delete 使用 bracket 语法，防止 req_id 含特殊字符 */
     char buf[512];
     snprintf(buf, sizeof(buf),
-        "$bus.emit('http/end', new Object(), __http_resp);");
+        "$bus.emit('http/end', new Object(), %s); delete global['%s'];",
+        global_name, global_name);
     JS_Eval(ctx, buf, strlen(buf), "<http>", JS_EVAL_REPL);
-
-    /* 清理全局变量 */
-    JS_SetPropertyStr(ctx, global_obj, "__http_resp", JS_UNDEFINED);
 }
 ```
 
-**为什么不用 `JS_Call`**：
-- mquickjs 的 `JS_Call(ctx, call_flags)` 签名不同于标准 QuickJS
-- 参数需通过 `JS_PushArg` 压栈，且需 `JS_StackCheck` 检查栈空间
-- `JS_Eval` + 字符串构建方式更简单、更安全，与现有 `kwcc_dispatch_event` 模式一致
-
-**为什么用全局对象传递**：
-- `JS_SetPropertyStr(ctx, global_obj, "__http_resp", resp)` 把对象挂到全局对象上，GC 不会回收
-- `JS_Eval` 执行 emit 后，`JS_SetPropertyStr(ctx, global_obj, "__http_resp", JS_UNDEFINED)` 清理
-- 避免了手动 `JS_PUSH_VALUE`/`JS_POP_VALUE` 的复杂性
+**禁止的做法**（安全约束）：
+- ~~`snprintf(buf, ..., "$bus.emit('http/end', '%s')", body)`~~ — body 含引号/换行会导致 SyntaxError
+- ~~`snprintf(buf, ..., "$bus.emit('http/end', '%.*s')", body_len, body)`~~ — 同上
 
 ```
 C 层 select() 每帧循环:
@@ -622,6 +699,7 @@ fetchAsync("upload", "https://example.com/upload", {
 | setup.sh 需要改动？ | 是，添加 picohttpparser 下载 |
 | Makefile 需要改动？ | 是，`kwcc_http.o` 依赖 `picohttpparser.o` |
 | 解析状态码 | picohttpparser **直接返回** 状态码到 `*status` 参数中（无需 sscanf 从首行提取） |
+| Buffer 安全边界 | `realloc +4` 字节 + trailing `\0`，防止 `phr_parse_response` 越界扫描 |
 
 ### 3. 超时控制
 
