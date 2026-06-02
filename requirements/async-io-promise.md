@@ -219,10 +219,21 @@ Content-Length: 1234\r\n
 2. 调用 `phr_parse_response(response_buf, response_len, ...)`：
    - 返回 `-2` → 数据不完整，退出，下帧继续
    - 返回 `-1` → 协议错误，dispatch `ON_ERROR`
-   - 返回 `> 0` → header 解析成功，body 起始偏移 = ret
-3. 状态码直接从 `*status` 参数获取（picohttpparser 已解析），**无需 sscanf**
-4. 遍历 `headers[]` 找 `Content-Length` → `total_size`
-5. Body = `response_buf + ret`，一次性 dispatch `ON_END`
+   - 返回 `> 0` → header 解析成功，body 起始偏移 = ret（正常情况）
+3. **EOF 后（`n == 0`）重定向循环解析**：`curl -i -L` 遭遇 302/301 重定向时，buffer 会包含所有中间响应。必须循环调用 `phr_parse_response`，每次从上次返回值（ret）继续，直到 buffer 剩余部分不再以 "HTTP/1.x" 开头：
+   ```c
+   const char *p = req->response_buf;
+   size_t remaining = req->response_len;
+   while (remaining >= 9 && memcmp(p, "HTTP/1.", 7) == 0) {
+       // phr_parse_response 解析当前响应
+       // ret = 当前响应 headers 结束位置
+       // p = req->response_buf + ret; remaining -= ret;
+   }
+   // 循环结束：最后一次成功解析的就是最终响应（如 200）
+   ```
+4. 状态码直接从 `*status` 参数获取（picohttpparser 已解析），**无需 sscanf**
+5. 遍历 `headers[]` 找 `Content-Length` → `total_size`
+6. Body = 最终响应的 body 起始指针，一次性 dispatch `ON_END`
 
 ### `kwcc_http_request()` 内部流程
 
@@ -491,7 +502,37 @@ void kwcc_http_request(const char *req_id, const char *method,
                        const char *url, const char **headers, int header_count,
                        const char *body, int body_len);
 void kwcc_http_cancel(const char *req_id);
+/* 内部函数：统一清理资源 + 收割子进程 */
+static void kwcc_http_cleanup(kwcc_http_req_t *req);
 ```
+
+### 僵尸进程清理 + 资源释放
+
+**问题**：每个请求通过 `fork()` 创建独立 `kwcc_curl` 子进程，如果不 `waitpid()` 收割，退出的子进程会变成僵尸进程，耗尽系统进程描述符。
+
+**方案**：实现 `kwcc_http_cleanup()` 统一销毁函数，在所有结束路径调用：
+
+```c
+static void kwcc_http_cleanup(kwcc_http_req_t *req) {
+    if (req->pipe_read_fd >= 0) {
+        close(req->pipe_read_fd);
+        req->pipe_read_fd = -1;
+    }
+    kwcc_io_unregister(req->pipe_read_fd);
+    waitpid(req->pid, NULL, WNOHANG);  /* 非阻塞收割，防止僵尸进程 */
+    free(req->response_buf);
+    free(req->body);
+    for (int i = 0; i < req->header_count; i++) free(req->headers[i]);
+    memset(req, 0, sizeof(kwcc_http_req_t));  /* 清空槽位，允许复用 */
+}
+```
+
+**调用时机**（必须调用的路径）：
+- `http_on_read()` 中 EOF（`n == 0`）后 → 循环解析 → dispatch → `kwcc_http_cleanup(req)`
+- `http_on_read()` 中协议错误（`ret == -1`）→ dispatch error → `kwcc_http_cleanup(req)`
+- `kwcc_http_cancel(req_id)` → `kill(SIGTERM)` → `waitpid(WNOHANG)` → `kwcc_http_cleanup(req)`
+
+**关键点**：`waitpid` 必须用 `WNOHANG` 非阻塞标志，避免阻塞渲染主线程。
 
 ---
 
