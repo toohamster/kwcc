@@ -88,21 +88,89 @@ typedef struct {
     char     req_id[64];      // 唯一标识
     char     method[16];      // GET/POST/PUT/DELETE
     char     url[1024];
-    char    *body;            // 请求体（POST）
+    char    *body;            // 请求体（POST），动态分配
     int      body_len;
     char    *headers[16];     // 请求头数组
     int      header_count;
     pid_t    pid;             // curl 子进程 PID
     int      pipe_read_fd;    // pipe 读端（已设 O_NONBLOCK）
-    char     response_buf[65536];  // 响应缓冲区
+    char    *response_buf;    // 动态分配的响应缓冲区（realloc）
+    int      response_cap;    // response_buf 当前容量
     int      response_len;    // 已读字节数
     int      total_size;      // 从 Content-Length 解析的总大小（0=未知）
     int      http_status;     // HTTP 状态码
-    int      state;           // 0=parsing headers, 1=parsing body
+    int      last_dispatched; // 上次 dispatch 进度时的已读字节数
     int      in_use;
 } kwcc_http_req_t;
 
 #define KWCC_HTTP_MAX_REQS 8
+#define KWCC_HTTP_INIT_CAP 4096  // 初始缓冲 4KB，按需 realloc
+```
+
+### 依赖：picohttpparser（HTTP 响应解析器）
+
+**来源**：`https://github.com/h2o/picohttpparser`
+**下载**：`picohttpparser.h` + `picohttpparser.c` → `deps/picohttpparser/`
+**许可**：MIT，~400 行 C，零外部依赖
+
+**为什么引入**：
+- `kwcc_curl` 是外部工具，未来可能被自研实现替换，新工具不一定支持 `-i` 标志
+- picohttpparser 提供 `phr_parse_response()` 增量解析：
+  - 返回 `-2`：数据不完整，继续累积，下帧再试
+  - 返回 `-1`：HTTP 协议错误
+  - 返回 `> 0`：header 解析成功，返回 header 结束位置
+- 处理 `\r\n\r\n` 不完整、多行 header、Transfer-Encoding 等边缘情况
+- 比手写 `strstr("\r\n\r\n")` 更健壮，面向未来可移植性
+
+**使用方式**：
+```c
+int minor_version;
+const char *msg;
+size_t msg_len;
+struct phr_header headers[64];
+size_t num_headers = 64;
+int prev_len = req->response_len;  // 已累积的字节数
+
+int ret = phr_parse_response(req->response_buf, req->response_len,
+                             &minor_version, &msg, &msg_len,
+                             headers, &num_headers, 0);
+
+if (ret == -2) {
+    // 数据不完整，继续累积，下帧再试
+    return;
+}
+if (ret == -1) {
+    // HTTP 协议错误，dispatch error
+    return;
+}
+if (ret > 0) {
+    // header 解析成功
+    // ret = header 结束位置（即 body 起始偏移）
+    // msg = 状态消息（如 "OK"）
+    // 从第一行提取 http_status（需要额外解析）
+    // headers[] 数组包含所有 header，遍历找 Content-Length
+    // body = response_buf + ret
+}
+```
+
+**注意**：picohttpparser 不直接返回 HTTP 状态码，需要从响应首行（`HTTP/1.1 200 OK`）手动解析。可以在 `phr_parse_response` 返回后，用 `sscanf` 从 `response_buf` 提取状态码。
+
+### 动态缓冲区管理
+
+```c
+// 初始分配
+req->response_buf = malloc(KWCC_HTTP_INIT_CAP);
+req->response_cap = KWCC_HTTP_INIT_CAP;
+
+// 每帧 read() 后追加
+while ((n = read(req->pipe_read_fd, buf, sizeof(buf))) > 0) {
+    if (req->response_len + n > req->response_cap) {
+        req->response_cap *= 2;  // 翻倍扩容
+        req->response_buf = realloc(req->response_buf, req->response_cap);
+    }
+    memcpy(req->response_buf + req->response_len, buf, n);
+    req->response_len += n;
+}
 ```
 
 ### curl 参数规范
@@ -131,7 +199,7 @@ kwcc/
 - 生命周期独立：crash 不影响主程序，退出时 pipe 自动关闭
 - 未来可替换为自研实现（标准 socket HTTP），接口不变（stdin/stdout + exit code）
 
-### C 层响应解析
+### C 层响应解析（picohttpparser）
 
 curl `-i` 输出格式：
 ```
@@ -142,26 +210,136 @@ Content-Length: 1234\r\n
 {"result":"ok","data":...}
 ```
 
-**解析逻辑**：
-1. 扫描 `\r\n\r\n` 分隔线
-2. Header 部分：解析 `HTTP/x.x STATUS_CODE` → `http_status`
-3. 解析 `Content-Length` → `total_size`
-4. Body 部分：追加到 `response_buf`
+**解析流程**：
+1. 每帧 `read()` 后，动态扩容 `response_buf`
+2. 调用 `phr_parse_response(response_buf, response_len, ...)`：
+   - 返回 `-2` → 数据不完整，退出，下帧继续
+   - 返回 `-1` → 协议错误，dispatch `ON_ERROR`
+   - 返回 `> 0` → header 解析成功，body 起始偏移 = ret
+3. 从首行提取状态码：`sscanf(buf, "HTTP/%*d.%*d %d", &http_status)`
+4. 遍历 `headers[]` 找 `Content-Length` → `total_size`
+5. Body = `response_buf + ret`，一次性 dispatch `ON_END`
 
-### JS→C 通信：直接传 JSValue 参数
+### JS→C 通信：mquickjs binding
 
-**不用 JSON 序列化**，C binding 直接接收多个参数：
+**不用 JSON 序列化**，C binding 直接接收多个 JSValue 参数：
 
 ```javascript
 // JS 侧调用
 _native_http_request(reqId, method, url, headersArray, bodyString);
 ```
 
-C 侧通过 `JS_GetProperty` 逐个读取 JSValue 数组，跳过 JSON 解析层。
+C 侧 binding（`src/jsapi.c` 风格）：
+
+```c
+JSValue js_native_http_request(JSContext *ctx, JSValue *this_val,
+                               int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 4) return JS_UNDEFINED;
+
+    // reqId (arg 0) — 字符串
+    JSCStringBuf rb;
+    const char *req_id = JS_ToCString(ctx, argv[0], &rb);
+    if (!req_id) return JS_UNDEFINED;
+
+    // method (arg 1) — 字符串
+    JSCStringBuf mb;
+    const char *method = JS_ToCString(ctx, argv[1], &mb);
+
+    // url (arg 2) — 字符串
+    JSCStringBuf ub;
+    const char *url = JS_ToCString(ctx, argv[2], &ub);
+
+    // headers (arg 3) — JSArray
+    JSValue headers_arr = argv[3];
+    JS_BOOL is_arr = (JS_GetClassID(ctx, headers_arr) == JS_CLASS_ARRAY);
+
+    // body (arg 4, optional) — 字符串
+    const char *body = "";
+    int body_len = 0;
+    if (argc > 4 && !JS_IsUndefined(argv[4]) && !JS_IsNull(argv[4])) {
+        JSCStringBuf bb;
+        const char *b = JS_ToCString(ctx, argv[4], &bb);
+        if (b) { body = b; body_len = strlen(b); }
+    }
+
+    kwcc_http_request(req_id, method, url,
+                      is_arr ? headers_arr : NULL,
+                      is_arr ? JS_GetPropertyUint32_array_len(ctx, headers_arr) : 0,
+                      body, body_len);
+
+    return JS_UNDEFINED;
+}
+```
+
+**mquickjs API 对照**（基于 `deps/mquickjs/mquickjs.h` + `src/jsapi.c` 验证）：
+
+| 用途 | mquickjs API | 说明 |
+|------|-------------|------|
+| JSValue → C 字符串 | `JS_ToCString(ctx, val, &cbuf)` | 返回 `const char*`，`cbuf` 是 `JSCStringBuf[5]` 栈缓冲区 |
+| 创建 JS 字符串 | `JS_NewString(ctx, buf)` 或 `JS_NewStringLen(ctx, buf, len)` | 避免 NULL 问题 |
+| 创建 JS 数字 | `JS_NewInt32(ctx, val)` / `JS_NewInt64(ctx, val)` / `JS_NewFloat64(ctx, val)` | |
+| 创建 JS 对象 | `JS_NewObject(ctx)` | 不用 `{}` |
+| 创建 JS 数组 | `JS_NewArray(ctx, initial_len)` | |
+| 获取对象属性 | `JS_GetPropertyStr(ctx, obj, "key")` | 返回 `JSValue` |
+| 设置对象属性 | `JS_SetPropertyStr(ctx, obj, "key", val)` | |
+| 获取数组元素 | `JS_GetPropertyUint32(ctx, arr, idx)` | 返回 `JSValue` |
+| 获取数组长度 | `JS_GetPropertyStr(ctx, arr, "length")` + `JS_ToInt32` | mquickjs 没有 `JS_GetArrayLength` |
+| 判断类型 | `JS_IsString(ctx, val)` / `JS_IsNumber(ctx, val)` / `JS_IsNull(val)` / `JS_IsUndefined(val)` | |
+| 判断类 | `JS_GetClassID(ctx, val) == JS_CLASS_ARRAY` | 更精确 |
+| 创建 bool | `JS_NewBool(val)` | |
+| 未定义值 | `JS_UNDEFINED` | 宏常量 |
+| C 函数注册 | `JS_CFUNC_DEF("name", argc, func)` | 在 `mqjs_stdlib.c` 的 `js_global_object[]` 中注册 |
+
+**关键陷阱**（来自 `build_pitfalls.md` + `mquickjs_es5.md`）：
+- `JS_ToCString` 可能返回 NULL → 必须 NULL 检查后再使用
+- `JSCStringBuf` 是 5 字节栈结构（`uint8_t buf[5]`），短字符串内联存储
+- mquickjs 的 `JSValue` 是 `uint64_t`（64 位平台），不是结构体
+- 不支持 `...rest` 参数 → JS 侧传固定参数，C 侧用 `argc` 判断可选参数
+- `{}` 在语句开头被解析为 block → JS 侧用 `new Object()`
+- C 函数必须 include 头文件声明，否则 x86_64 ABI 会 float→double 提升
 
 ### C→JS 通信：一次性 dispatch（ON_END）
 
 **核心原则**：C 层在 pipe 端完整读取响应，只在 ON_END 时一次性 dispatch，避免 per-chunk 拖慢 60fps。
+
+C 层构建 JS response 对象并 dispatch：
+
+```c
+static void http_dispatch_end(JSContext *ctx, kwcc_http_req_t *req) {
+    // 构建 response 对象
+    JSValue resp = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, resp, "status", JS_NewInt32(ctx, req->http_status));
+
+    // body 字符串
+    const char *body_start = req->response_buf + header_end_offset;
+    int body_len = req->response_len - header_end_offset;
+    JSValue body_val = JS_NewStringLen(ctx, body_start, body_len);
+    JS_SetPropertyStr(ctx, resp, "body", body_val);
+
+    // headers 对象
+    JSValue headers_obj = JS_NewObject(ctx);
+    for (int i = 0; i < num_headers; i++) {
+        JSValue h_val = JS_NewStringLen(ctx, h[i].value, h[i].value_len);
+        JS_SetPropertyStr(ctx, headers_obj, (char*)h[i].name, h_val);
+    }
+    JS_SetPropertyStr(ctx, resp, "headers", headers_obj);
+
+    // 构建 data 对象 { reqId, response }
+    JSValue data = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, data, "reqId", JS_NewString(ctx, req->req_id));
+    JS_SetPropertyStr(ctx, data, "response", resp);
+
+    // 调用 $bus.emit("http/end", action, data)
+    // 类似 kwcc_dispatch_event 的现有模式
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        "$bus.emit('http/end', new Object(), %s)",
+        js_serialize_object(ctx, data));  // 或直接用 JS_Call
+
+    JS_Eval(ctx, buf, strlen(buf), "<http>", JS_EVAL_REPL);
+}
+```
 
 ```
 C 层 select() 每帧循环:
@@ -169,10 +347,11 @@ C 层 select() 每帧循环:
     追加到 response_buf（不触发 JS）
 
   if read() == 0 (pipe closed / curl 退出):
-    dispatch ON_END → $bus.emit("http/end", { reqId, status, body })
+    phr_parse_response() 解析 → 构建 response 对象
+    dispatch ON_END → JS_Eval("$bus.emit('http/end', ...)")
 
   if read() == -1 (error):
-    dispatch ON_ERROR → $bus.emit("http/error", { reqId, error })
+    dispatch ON_ERROR → JS_Eval("$bus.emit('http/error', ...)")
 ```
 
 ### C→JS 通信：进度事件（ON_PROGRESS，按帧限频）
@@ -398,12 +577,14 @@ fetchAsync("upload", "https://example.com/upload", {
 | 编译产物放哪？ | 项目根目录或 `bin/` 目录 |
 | macOS 签名/沙箱影响？ | 待验证：fork/exec 在 macOS 默认环境下是否正常 |
 
-### 2. 缓冲区大小
+### 2. picohttpparser 集成
 
 | 问题 | 方案 |
 |------|------|
-| 响应最大缓冲 | `response_buf[65536]` = 64KB，够用（API 响应通常 < 10KB） |
-| 超过 64KB 怎么办？ | 方案 1：动态分配（malloc）；方案 2：截断 + warning；方案 3：流式分块 dispatch |
+| 是否引入 `deps/picohttpparser/`？ | 是，2 个文件，MIT 许可，~400 行 |
+| setup.sh 需要改动？ | 是，添加 picohttpparser 下载 |
+| Makefile 需要改动？ | 是，`kwcc_http.o` 依赖 `picohttpparser.o` |
+| 解析状态码 | picohttpparser 不直接返回状态码，需从首行 `sscanf` 提取 |
 
 ### 3. 超时控制
 
@@ -437,9 +618,11 @@ fetchAsync("upload", "https://example.com/upload", {
 
 ## 实施步骤
 
-1. **Layer 1**: 实现 `kwcc_io.h/c`（select + FD 管理）
-2. **Layer 2**: 实现 `kwcc_http.h/c`（fork + pipe + curl 参数构造 + 响应解析）
-3. **Layer 3**: 在 `src/main.m` 的 `frame()` 中插入 `kwcc_io_poll_once()`
-4. **Layer 4**: 实现 `app/runtime/http.js`（MiniPromise + fetchAsync + http module）
-5. **验证**: 在 test 模块中添加简单 HTTP 请求示例
-6. `make clean && make` 验证编译 + 运行测试
+1. **准备**: `setup.sh` 下载 picohttpparser 到 `deps/picohttpparser/`，更新 `Makefile`
+2. **Layer 1**: 实现 `kwcc_io.h/c`（select + FD 管理）
+3. **Layer 2**: 实现 `kwcc_http.h/c`（fork + pipe + curl 参数构造 + picohttpparser 增量解析 + 动态 buffer）
+4. **Layer 3**: 在 `src/main.m` 的 `frame()` 中插入 `kwcc_io_poll_once()`
+5. **Layer 4**: 实现 `app/runtime/http.js`（MiniPromise + fetchAsync + http module）
+6. **C binding**: 在 `jsapi.c` 中注册 `_native_http_request`，参照 `js_kwcc_ui` 模式
+7. **验证**: 在 test 模块中添加简单 HTTP 请求示例
+8. `make clean && make` 验证编译 + 运行测试

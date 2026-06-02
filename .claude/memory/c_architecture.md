@@ -165,3 +165,79 @@ ui.svg(path_or_svg, x, y, w, h)
 | `initStore()` | 聚合所有模块 state + actions → 创建 $store |
 | `initEvents()` | 遍历模块调用 initEvents() → 注册 $bus handler |
 | `onFrame()` | 每帧调用，遍历模块 render，自动 ui.sync |
+
+## mquickjs C API 速查（基于 `mquickjs.h` + `jsapi.c` 验证）
+
+### JSValue 类型与创建
+
+| 用途 | API | 说明 |
+|------|-----|------|
+| 创建字符串 | `JS_NewString(ctx, buf)` 或 `JS_NewStringLen(ctx, buf, len)` | |
+| 创建整数 | `JS_NewInt32(ctx, v)` / `JS_NewInt64(ctx, v)` / `JS_NewFloat64(ctx, v)` | |
+| 创建布尔 | `JS_NewBool(v)` | |
+| 创建对象 | `JS_NewObject(ctx)` | 不用 `{}` |
+| 创建数组 | `JS_NewArray(ctx, initial_len)` | |
+| 未定义值 | `JS_UNDEFINED` | 宏常量，uint64 |
+| JSValue 本质 | `uint64_t` (64 位平台) | 不是结构体 |
+
+### JSValue → C 值
+
+| 用途 | API | 说明 |
+|------|-----|------|
+| 转 C 字符串 | `JS_ToCString(ctx, val, &cbuf)` | 返回 `const char*`，`cbuf` 是 `JSCStringBuf[5]` 栈缓冲 |
+| 转 int32 | `JS_ToInt32(ctx, &pres, val)` | 返回 0 成功，-1 异常 |
+| 转 uint32 | `JS_ToUint32(ctx, &pres, val)` | |
+| 转 double | `JS_ToNumber(ctx, &pres, val)` | |
+| 转字符串 | `JS_ToString(ctx, val)` | 返回 JSValue |
+
+### 对象/数组操作
+
+| 用途 | API |
+|------|-----|
+| 获取属性 | `JS_GetPropertyStr(ctx, obj, "key")` → JSValue |
+| 设置属性 | `JS_SetPropertyStr(ctx, obj, "key", val)` |
+| 获取数组元素 | `JS_GetPropertyUint32(ctx, arr, idx)` → JSValue |
+| 获取数组长度 | `JS_GetPropertyStr(ctx, arr, "length")` + `JS_ToInt32` |
+
+### 类型判断
+
+| 用途 | API |
+|------|-----|
+| 判断字符串 | `JS_IsString(ctx, val)` |
+| 判断数字 | `JS_IsNumber(ctx, val)` |
+| 判断 null | `JS_IsNull(val)` |
+| 判断 undefined | `JS_IsUndefined(val)` |
+| 判断函数 | `JS_IsFunction(ctx, val)` |
+| 判断数组 | `JS_GetClassID(ctx, val) == JS_CLASS_ARRAY` |
+| 判断错误 | `JS_IsError(ctx, val)` |
+
+### C 函数注册
+
+| 步骤 | 说明 |
+|------|------|
+| 函数签名 | `JSValue js_func(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)` |
+| 注册位置 | `deps/mquickjs/mqjs_stdlib.c` 的 `js_global_object[]` 数组 |
+| 宏 | `JS_CFUNC_DEF("name", argc, func)` |
+| 不要重复注册 | 不在 `js_c_function_decl[]` 中注册 |
+| Makefile | `HOST_CFLAGS` 加 `-DCONFIG_KWCC` |
+| 函数实现 | `src/jsapi.c` 或 `src/mquickjs_stubs.c` |
+
+### C 函数调用（C→JS）
+
+| 方式 | 说明 |
+|------|------|
+| `JS_Eval(ctx, code, len, filename, JS_EVAL_REPL)` | 执行 JS 字符串，REPL 模式可创建全局变量 |
+| `JS_GetGlobalObject(ctx)` | 获取全局对象 |
+| `JS_Call(ctx, call_flags)` | 调用已压栈的函数（需先 `JS_PushArg`） |
+| `JS_GetException(ctx)` | 获取异常（调用失败后检查） |
+
+### 关键陷阱
+
+| 陷阱 | 说明 |
+|------|------|
+| `JS_ToCString` 返回 NULL | 必须 NULL 检查后再使用（如传字符串给 microui 函数） |
+| `JSCStringBuf` 大小 | 仅 5 字节 `uint8_t buf[5]`，短字符串内联存储 |
+| 不支持 `...rest` | mquickjs 不支持展开参数，JS 侧传固定参数 |
+| `{}` 语句开头 | 被解析为 block，JS 侧用 `new Object()` |
+| 头文件必须 include | 否则 x86_64 ABI float→double 提升导致参数错误 |
+| GC 安全 | 长时间持有的 JSValue 用 `JS_PushGCRef` / `JS_AddGCRef` 保护 |
