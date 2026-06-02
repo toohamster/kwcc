@@ -1,6 +1,6 @@
 # Async I/O 实施计划
 
-> 基于已确认的方案：`requirements/async-io-promise.md`（含 5 个 Defensive Fixes）
+> 基于已确认的方案：`requirements/async-io-promise.md`（含 11 个 Defensive Fixes）
 > 状态：待确认
 
 ---
@@ -18,12 +18,6 @@
 | 5 | Sokol Frame Hook（Layer 3） | `src/main.m` | Step 2, 4 |
 | 6 | C binding + JS API | `src/jsapi.h`, `src/jsapi.c`, `src/kwcc.c` | Step 4 |
 | 7 | JS Promise + http module（Layer 4） | `app/runtime/http.js`, `app/main.js` | Step 6 |
-
-**为什么 Config 是独立步骤**：
-- `kwcc_config()` 是项目的**配置管理基础设施**，定义了 JS→C 的配置传递范式
-- HTTP 层的 `bin_path`、`parser_mode`、`timeout` 都依赖 config 读取
-- 未来其他模块（日志级别、渲染参数等）也会复用同一套机制
-- 当前代码中完全不存在 `kwcc_config` 实现（grep 确认），需要从零构建
 
 ---
 
@@ -82,6 +76,15 @@ void kwcc_io_poll_once(void);  /* 每帧调用，timeout=0 非阻塞 */
 5. `kwcc_io_poll_once()`：
    - 构建 `fd_set`，收集所有 `in_use` 的 fd
    - `select(max_fd+1, &readfds, NULL, NULL, &zero_timeout)`
+   - **Fix 7：EINTR 保护**：`select()` 返回 `-1` 且 `errno == EINTR` 时，说明被 OS 信号中断（窗口 resize、SIGCHLD 等），直接 `return`：
+     ```c
+     int ret = select(max_fd + 1, &readfds, NULL, NULL, &tv);
+     if (ret < 0) {
+         if (errno == EINTR) return;  /* 信号中断，下帧继续 */
+         return;
+     }
+     if (ret == 0) return;  /* 超时，无数据 */
+     ```
    - 对有数据的 fd 调用 `read()`：
      - `read() > 0`：回调，传递数据
      - `read() == 0`：pipe closed，标记 EOF，回调
@@ -100,10 +103,6 @@ void kwcc_io_poll_once(void);  /* 每帧调用，timeout=0 非阻塞 */
 ## Step 3: Config 系统（C↔JS 配置管理）
 
 **文件**：`src/kwcc.h`（修改）、`src/kwcc.c`（修改）、`src/jsapi.h`（修改）、`src/jsapi.c`（修改）
-
-**设计依据**：方案文档 "HTTP 配置选项（`kwcc_config`）" 章节
-
-**为什么独立**：Config 是项目的配置管理基础设施，不只是 HTTP 的附属品。JS 层调用 `kwcc_config(module, options)` 设置配置，C 层通过 `kwcc_config_get(module, key)` 读取。未来所有模块共享同一机制。
 
 ### 方案文档定义的 API
 
@@ -148,36 +147,7 @@ const char *kwcc_config_get(const char *module, const char *key, const char *def
 - `kwcc_config_set(module, key, value)`：查找/创建模块槽位，写入 key-value
 - `kwcc_config_get(module, key, default_value)`：查找模块→查找 key→返回 value，找不到返回 default
 
-**设计决策**：
-- 纯字符串存储（简单，避免类型转换复杂度）
-- HTTP 层读取后自行转换：`atoi(kwcc_config_get("http", "timeout", "30"))`
-- 不需要 JSON 解析，JS 层调用时由 C binding 展平对象为 key-value 对
-
 #### 3c. `src/jsapi.c` — 添加 `js_kwcc_config` C binding
-
-```c
-JSValue js_kwcc_config(JSContext *ctx, JSValue *this_val,
-                       int argc, JSValue *argv) {
-    (void)this_val;
-    if (argc < 2) return JS_UNDEFINED;
-
-    JSCStringBuf mb;
-    const char *module = JS_ToCString(ctx, argv[0], &mb);
-    if (!module) return JS_UNDEFINED;
-
-    JSValue options = argv[1];
-    if (JS_GetClassID(ctx, options) != JS_CLASS_ARRAY) {
-        /* 是对象：遍历属性 */
-        JSValue keys = JS_GetPropertyStr(ctx, options, "length");
-        /* 实际上 mquickjs 没有 Object.keys()，需要在 JS wrapper 中展平 */
-    }
-
-    /* JS wrapper 负责展平对象为逐 key 调用 */
-    return JS_UNDEFINED;
-}
-```
-
-**注册方式**：在 `kwcc_create_js()` 中通过 `JS_SetPropertyStr` + C function 挂载到 global object。
 
 #### 3d. JS wrapper（`methods_js` 字符串）
 
@@ -191,8 +161,6 @@ kwcc_config = function(module, options) {
 };
 ```
 
-**注意**：mquickjs 支持 `Object.keys()`（已在 `mquickjs_es5.md` 确认）。`_native_config_set` 是 C 层注册的底层函数。
-
 **验证**：`make` 编译通过
 
 ---
@@ -201,7 +169,7 @@ kwcc_config = function(module, options) {
 
 **文件**：`src/kwcc_http.h`（新建）、`src/kwcc_http.c`（新建）
 
-**设计依据**：方案文档 "Layer 2: HTTP Process Engine" 章节 + 5 个 Defensive Fixes
+**设计依据**：方案文档 "Layer 2: HTTP Process Engine" 章节 + 11 个 Defensive Fixes
 
 ### `src/kwcc_http.h`
 
@@ -209,17 +177,10 @@ kwcc_config = function(module, options) {
 #ifndef KWCC_HTTP_H
 #define KWCC_HTTP_H
 
-#include <sys/types.h>   /* pid_t */
+#include <sys/types.h>
 
 #define KWCC_HTTP_MAX_REQS 8
 #define KWCC_HTTP_INIT_CAP 4096
-
-typedef enum {
-    KWCC_HTTP_STATE_IDLE,
-    KWCC_HTTP_STATE_RUNNING,
-    KWCC_HTTP_STATE_DONE,
-    KWCC_HTTP_STATE_ERROR
-} kwcc_http_state_t;
 
 typedef struct {
     char     req_id[64];
@@ -234,10 +195,9 @@ typedef struct {
     char    *response_buf;
     int      response_cap;
     int      response_len;
-    int      total_size;      /* Content-Length, 0=unknown */
+    int      total_size;
     int      http_status;
-    int      last_dispatched; /* 上次 dispatch progress 时的已读字节 */
-    kwcc_http_state_t state;
+    int      last_dispatched;
     int      in_use;
 } kwcc_http_req_t;
 
@@ -246,7 +206,7 @@ void kwcc_http_request(const char *req_id, const char *method,
                        const char *url, const char **headers, int header_count,
                        const char *body, int body_len);
 void kwcc_http_cancel(const char *req_id);
-void kwcc_http_poll(void);  /* 每帧调用，检查进度事件 */
+void kwcc_http_poll(void);
 
 #endif
 ```
@@ -259,26 +219,26 @@ void kwcc_http_poll(void);  /* 每帧调用，检查进度事件 */
 static kwcc_http_req_t g_http_reqs[KWCC_HTTP_MAX_REQS];
 ```
 
-#### 2. `kwcc_http_init()`
-
-- 清零所有槽位
-
-#### 3. `kwcc_http_request()` 内部流程
+#### 2. `kwcc_http_request()` 内部流程
 
 ```
 1. 查找空闲槽位，复制 req_id / method / url
 2. 读取 http config（bin_path, parser_mode, timeout）
 3. bin_path 可执行检测：access(bin_path, X_OK) == -1 → 报错并 cleanup
 4. 构建 curl argv: "-s", "-L", "-i", "-X", method, "-H"..., "-d", body, url
-5. pipe() + fork()
-6. 子进程：dup2(pipefd[1], STDOUT_FILENO) → execvp(bin_path, argv)
+5. pipe() → fcntl(F_SETFD, FD_CLOEXEC) on pipefd[0]（Fix 10）→ fork()
+6. 子进程（fork == 0）：
+   a. 关闭所有无关继承的 FD（Fix 10）：close(pipefd[0]) + 关闭父进程所有其他 pipe FD
+   b. dup2(pipefd[1], STDOUT_FILENO) → close(pipefd[1])
+   c. execvp(bin_path, argv)
+   d. execvp 失败 → _exit(1)
 7. 父进程：close(pipefd[1]) → fcntl(O_NONBLOCK) → malloc(response_buf)
            → kwcc_io_register(pipe_read_fd, http_on_read, req)
 ```
 
 **Fix 3**：始终添加 `-L` 参数跟随重定向
 
-**Fix 6：bin_path 可执行检测**：`fork()` 之前用 `access(bin_path, X_OK)` 检测路径是否存在且可执行。检测失败时错误信息必须包含模块名和具体路径：
+**Fix 6：bin_path 可执行检测**：
 
 ```c
 const char *bin_path = kwcc_config_get("http", "bin_path", "curl");
@@ -292,9 +252,32 @@ if (access(bin_path, X_OK) == -1) {
 }
 ```
 
-#### 4. `http_on_read()` 回调（核心解析逻辑）
+**Fix 10：子进程 FD 污染防护** — `fork()` 后子进程继承父进程所有 FD。如果不关闭，子进程持有父进程的 socket/pipe FD，导致资源死锁：
 
-这是最复杂的部分，整合所有 5 个 fixes：
+```c
+if (pid == 0) {
+    /* 子进程 */
+
+    /* Fix 10a: pipe 创建时已设 FD_CLOEXEC（pipefd[0] 读端） */
+    /* 子进程只需关闭 pipe 读端（不需要读取） */
+    close(pipefd[0]);
+
+    /* Fix 10b: 关闭其他所有可能继承的 FD（遍历 g_io_slots 解绑的 FD） */
+    /* 最安全做法：关闭 > STDERR_FILENO 的所有 FD */
+    for (int fd = STDERR_FILENO + 1; fd < sysconf(_SC_OPEN_MAX); fd++) {
+        if (fd != pipefd[1]) {  /* 不要关闭待 dup2 的写端 */
+            close(fd);
+        }
+    }
+
+    dup2(pipefd[1], STDOUT_FILENO);
+    close(pipefd[1]);
+    execvp(bin_path, argv);
+    _exit(1);  /* execvp 失败 */
+}
+```
+
+#### 3. `http_on_read()` 回调（核心解析逻辑）
 
 ```c
 static void http_on_read(int fd, void *user_data) {
@@ -330,9 +313,11 @@ static void http_on_read(int fd, void *user_data) {
             size_t msg_len;
             int r = phr_parse_response(p, remaining, &mv, &st, &msg, &msg_len,
                                        final_headers, &nh, 0);
-            if (r <= 0) break;
+            if (r == -2) break;  /* Fix 8: 数据不完整，跳出等待 */
+            if (r <= 0) break;   /* -1 = 协议错误 */
             ret += r;
             final_status = st;
+            final_num_headers = nh;
             p = req->response_buf + ret;
             remaining = req->response_len - ret;
         }
@@ -342,7 +327,7 @@ static void http_on_read(int fd, void *user_data) {
 
         http_dispatch_end(req, 0, final_status, body_start, body_len,
                           final_headers, final_num_headers);
-        kwcc_http_cleanup(req);  /* Fix 5: 清理 */
+        kwcc_http_cleanup(req);
         return;
     }
 
@@ -350,14 +335,18 @@ static void http_on_read(int fd, void *user_data) {
         char errmsg[128];
         snprintf(errmsg, sizeof(errmsg), "http: read error (%s)", strerror(errno));
         http_dispatch_end(req, 1, 0, errmsg, (int)strlen(errmsg), NULL, 0);
-        kwcc_http_cleanup(req);  /* Fix 5: 清理 */
+        kwcc_http_cleanup(req);
     }
 }
 ```
 
-#### 5. `http_dispatch_end()` — C→JS 通信
+**Fix 8：不完整 Header 循环保护**：`phr_parse_response` 返回 `-2` 时立即 `break`，绝不能继续循环。
+
+#### 4. `http_dispatch_end()` — C→JS 通信
 
 **Fix 2**：禁止 `JS_Eval` + 字符串拼接传递 body/header
+
+**Fix 9：Global Property Shape 泄漏保护** — 用 `global.__http_registry` 容器：
 
 ```c
 static void http_dispatch_end(kwcc_http_req_t *req, int error,
@@ -367,7 +356,6 @@ static void http_dispatch_end(kwcc_http_req_t *req, int error,
     if (!ctx) return;
 
     if (error) {
-        /* 错误：仅传递可控的简短描述 */
         char buf[1024];
         snprintf(buf, sizeof(buf),
             "$bus.emit('http/end', { reqId:'%s', error:'%s' });",
@@ -376,7 +364,7 @@ static void http_dispatch_end(kwcc_http_req_t *req, int error,
         return;
     }
 
-    /* 成功：C API 构建 JS response 对象 */
+    /* C API 构建 JS response 对象 */
     JSValue resp = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, resp, "status", JS_NewInt32(ctx, status));
     JS_SetPropertyStr(ctx, resp, "body", JS_NewStringLen(ctx, body, body_len));
@@ -390,21 +378,26 @@ static void http_dispatch_end(kwcc_http_req_t *req, int error,
     }
     JS_SetPropertyStr(ctx, resp, "headers", headers_obj);
 
-    /* 全局对象传递 — req_id 隔离变量名 */
+    /* Fix 9: 挂载到 __http_registry 容器 */
     JSValue global_obj = JS_GetGlobalObject(ctx);
-    char global_name[128];
-    snprintf(global_name, sizeof(global_name), "__http_resp_%s", req->req_id);
-    JS_SetPropertyStr(ctx, global_obj, global_name, resp);
+    JSValue registry = JS_GetPropertyStr(ctx, global_obj, "__http_registry");
+    if (JS_IsUndefined(registry)) {
+        registry = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, global_obj, "__http_registry", registry);
+    }
+    JS_SetPropertyStr(ctx, registry, req->req_id, resp);
 
+    /* Fix 11: JS 层负责先 nullify body 再 delete，触发立即 GC */
     char buf[512];
     snprintf(buf, sizeof(buf),
-        "$bus.emit('http/end', new Object(), %s); delete global['%s'];",
-        global_name, global_name);
+        "$bus.emit('http/end', new Object(), __http_registry['%s']);"
+        "delete __http_registry['%s'];",
+        req->req_id, req->req_id);
     JS_Eval(ctx, buf, strlen(buf), "<http>", JS_EVAL_REPL);
 }
 ```
 
-#### 6. `kwcc_http_cleanup()` — Fix 5
+#### 5. `kwcc_http_cleanup()` — Fix 5
 
 ```c
 static void kwcc_http_cleanup(kwcc_http_req_t *req) {
@@ -421,7 +414,7 @@ static void kwcc_http_cleanup(kwcc_http_req_t *req) {
 }
 ```
 
-#### 7. `kwcc_http_cancel()`
+#### 6. `kwcc_http_cancel()`
 
 ```c
 void kwcc_http_cancel(const char *req_id) {
@@ -433,7 +426,7 @@ void kwcc_http_cancel(const char *req_id) {
 }
 ```
 
-#### 8. `kwcc_http_poll()` — 进度事件
+#### 7. `kwcc_http_poll()` — 进度事件
 
 每帧检查 `req->response_len != req->last_dispatched`，有变化则 dispatch progress。
 
@@ -445,8 +438,6 @@ void kwcc_http_cancel(const char *req_id) {
 
 **文件**：`src/main.m`（修改）
 
-**改动**：在 `frame()` 回调最前面插入 `kwcc_io_poll_once()`。
-
 ```c
 #include "kwcc_io.h"
 #include "kwcc_http.h"
@@ -455,7 +446,7 @@ static void frame(void) {
     int w = sapp_width();
     int h = sapp_height();
 
-    /* 1. I/O reactor polling (non-blocking) — 必须在 JS 处理之前 */
+    /* 1. I/O reactor polling (non-blocking) */
     kwcc_io_poll_once();
 
     /* 2. 原有 JS 处理 + microui 渲染 */
@@ -476,62 +467,14 @@ static void frame(void) {
 - `src/jsapi.c`（修改：添加 `_native_http_request` C binding 实现）
 - `src/kwcc.c`（修改：初始化 HTTP + 注册 JS wrapper）
 
-### 6a. `_native_http_request` C binding（`src/jsapi.c`）
+### 6a. `_native_http_request` C binding
 
 ```c
-#include "kwcc_http.h"
-
 JSValue js_native_http_request(JSContext *ctx, JSValue *this_val,
-                               int argc, JSValue *argv) {
-    (void)this_val;
-    if (argc < 3) return JS_UNDEFINED;
-
-    JSCStringBuf rb, mb, ub;
-    const char *req_id = JS_ToCString(ctx, argv[0], &rb);
-    const char *method = JS_ToCString(ctx, argv[1], &mb);
-    const char *url = JS_ToCString(ctx, argv[2], &ub);
-    if (!req_id || !method || !url) return JS_UNDEFINED;
-
-    const char *header_ptrs[16] = {0};
-    int header_count = 0;
-    if (argc > 3 && !JS_IsUndefined(argv[3]) && !JS_IsNull(argv[3])) {
-        JSValue headers_arr = argv[3];
-        if (JS_GetClassID(ctx, headers_arr) == JS_CLASS_ARRAY) {
-            JSValue len_val = JS_GetPropertyStr(ctx, headers_arr, "length");
-            int arr_len = 0;
-            if (JS_ToInt32(ctx, &arr_len, len_val) == 0) {
-                if (arr_len > 16) arr_len = 16;
-                for (int i = 0; i < arr_len; i++) {
-                    JSValue item = JS_GetPropertyUint32(ctx, headers_arr, i);
-                    JSCStringBuf hb;
-                    const char *s = JS_ToCString(ctx, item, &hb);
-                    if (s) header_ptrs[header_count++] = s;
-                }
-            }
-        }
-    }
-
-    const char *body = "";
-    int body_len = 0;
-    if (argc > 4 && !JS_IsUndefined(argv[4]) && !JS_IsNull(argv[4])) {
-        JSCStringBuf bb;
-        const char *b = JS_ToCString(ctx, argv[4], &bb);
-        if (b) { body = b; body_len = (int)strlen(b); }
-    }
-
-    kwcc_http_request(req_id, method, url,
-                      header_count > 0 ? header_ptrs : NULL,
-                      header_count, body, body_len);
-
-    return JS_UNDEFINED;
-}
+                               int argc, JSValue *argv);
 ```
 
-**注册方式**：通过 `js_global_object[]` 在 `deps/mquickjs/mqjs_stdlib.c` 中注册（`CONFIG_KWCC` 保护）。
-
-或者更简单的方式：在 `kwcc_create_js()` 中直接通过 C API 挂载到 global object（绕过 stdlib 重新编译）。
-
-### 6b. JS wrapper（`kwcc_create_js` 中的 `methods_js` 字符串）
+### 6b. JS wrapper
 
 ```javascript
 _native_http_request = function(reqId, method, url, headers, body) {
@@ -539,22 +482,12 @@ _native_http_request = function(reqId, method, url, headers, body) {
 };
 ```
 
-**注意**：mquickjs 的 `kwcc_http_request` 需要从 C 层注册。有两种方案：
-
-**方案 A**（推荐）：在 `kwcc_create_js()` 中通过 `JS_SetPropertyStr` + `JS_NewCFunctionParams` 直接挂载到 global object，无需修改 `mqjs_stdlib.c`。
-
-**方案 B**：在 `mqjs_stdlib.c` 的 `js_global_object[]` 中注册，需要重新编译 host tool。
-
-**选择方案 A**：避免重新编译 host tool，减少复杂度。
-
-### 6c. 初始化（`src/kwcc.c`）
+### 6c. 初始化
 
 在 `kwcc_init()` 或 `kwcc_create_js()` 中：
 - `kwcc_io_init()`
 - `kwcc_http_init()`
 - 注册 `_native_http_request` 到 global object
-
-**依赖确认**：Step 3 已实现 config 系统，HTTP 层可通过 `kwcc_config_get("http", ...)` 读取配置
 
 **验证**：`make` 编译通过
 
@@ -569,15 +502,33 @@ _native_http_request = function(reqId, method, url, headers, body) {
 ### 7a. `app/runtime/http.js`
 
 包含：
-1. `MiniPromise` 实现（ES5 兼容，无 let/const/箭头函数）
+1. `MiniPromise` 实现（ES5 兼容）
 2. `fetchAsync(reqId, url, options)` 封装
 3. `$store` 注册 http module
 
-**ES5 语法约束**（来自 `mquickjs_es5.md`）：
+**ES5 语法约束**：
 - 只用 `var`，不用 `let/const`
 - 只用 `function() {}`，不用箭头函数
 - 用 `new Object()` 代替 `{}` 在语句开头
 - 不用 `...rest` 参数
+
+**Fix 11：mquickjs 内存碎片防护** — 在 `ON_END` handler 中，先显式 nullify `body` 大字符串，再 delete 注册表项，触发立即 GC：
+
+```javascript
+var onEnd = function(action, data) {
+    if (data.reqId !== reqId) return;
+    /* Fix 11: 显式 nullify 大字符串，触发 GC 释放 C heap */
+    if (__http_registry && __http_registry[reqId]) {
+        __http_registry[reqId].body = null;
+        __http_registry[reqId].headers = null;
+        delete __http_registry[reqId];
+    }
+    cleanup();
+    resolve(data.response);
+};
+```
+
+**为什么需要**：mquickjs 没有 compacting GC，大量动态创建/释放大字符串会碎片化 C heap。显式 nullify body（通常是最大的属性）后再 delete，让 GC 有机会在 delete 前回收字符串内存，保护 heap 连续性。
 
 ### 7b. `app/main.js` 修改
 
@@ -585,18 +536,11 @@ _native_http_request = function(reqId, method, url, headers, body) {
 load("app/runtime/http.js");
 ```
 
-在 `initStore()` 之前加载。
-
 ### 7c. 测试用例
-
-在 test 模块中添加简单 HTTP 请求按钮：
 
 ```javascript
 ui.button("Test HTTP", "test/http");
-```
 
-对应 event handler：
-```javascript
 $bus.on("test/http", function(action, data) {
     fetchAsync("api_test", "https://httpbin.org/get").then(function(resp) {
         print("Response: " + resp.body);
@@ -618,9 +562,29 @@ $bus.on("test/http", function(action, data) {
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
-| `kwcc_curl` 不存在 | 无法发起 HTTP 请求 | 先用系统 `curl` 命令测试（`bin_path: "curl"`） |
+| `kwcc_curl` 不存在 | 无法发起 HTTP 请求 | 先用系统 `curl` 命令测试 |
 | macOS fork/exec 权限 | 子进程可能无法启动 | 先用简单 fork 测试验证 |
 | picohttpparser 内存扫描 | Fix 1 的 +4 已覆盖 | 已有 trailing `\0` 保护 |
 | JS_Eval + 用户数据注入 | Fix 2 已用 C API 构建对象 | 严格遵守安全边界 |
 | mquickjs API 不匹配 | 编译错误或运行时崩溃 | 严格参照 `mquickjs_c_api.md` |
-| JS 全局变量污染 | `delete global['name']` 清理 | Fix 2 的 `<req_id>` 隔离 |
+| JS 全局变量 shape 泄漏 | Fix 9 已用 `__http_registry` 容器 | 所有动态属性挂载到单一容器 |
+| select() 被信号中断 | Fix 7 EINTR 保护 | `if (errno == EINTR) return;` |
+| 不完整 header 卡住主线程 | Fix 8 incomplete 保护 | `if (r == -2) break;` |
+| 子进程继承父进程 FD | Fix 10 FD_CLOEXEC + 关闭循环 | 子进程 execvp 前关闭 > STDERR_FILENO 的所有 FD |
+| mquickjs heap 碎片化 | Fix 11 显式 nullify 大字符串 | ON_END 时先 null body 再 delete |
+
+## Defensive Fixes 清单
+
+| # | 名称 | Step | 状态 |
+|---|------|------|------|
+| 1 | picohttpparser Buffer Margin | Step 4 | `realloc +4` + trailing `\0` |
+| 2 | Ban JS_Eval string injection | Step 4 | C API 构建对象 |
+| 3 | Follow-Redirects | Step 4 | curl `-L` 参数 |
+| 4 | Redirect Loop Parsing | Step 4 | EOF 后循环 `phr_parse_response` |
+| 5 | Zombie Process Cleanup | Step 4 | `kwcc_http_cleanup()` + `waitpid(WNOHANG)` |
+| 6 | bin_path Executable Check | Step 4 | `access(bin_path, X_OK)` |
+| 7 | select() EINTR Protection | Step 2 | `if (errno == EINTR) return;` |
+| 8 | Incomplete Header Loop Guard | Step 4 | `if (r == -2) break;` |
+| 9 | Global Shape Table Leak | Step 4 | `__http_registry` 容器对象 |
+| 10 | FD Pollution via fork | Step 4 | `FD_CLOEXEC` + 关闭循环 |
+| 11 | Heap Fragmentation Guard | Step 7 | 显式 nullify body 再 delete |

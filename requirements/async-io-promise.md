@@ -68,12 +68,22 @@ void kwcc_io_poll_once();  // 每帧调用，timeout=0 非阻塞
 
 ### 实现要点
 1. `select()` 用 `timeout = {0, 0}`，不阻塞渲染
-2. `read()` 返回 > 0 时：追加到 `kwcc_http` 侧的 C buffer，**不触发 JS**
-3. `read()` 返回 0（pipe closed）：标记 stream end，触发 `ON_END`
-4. `read()` 返回 -1：
+2. **Fix 7：EINTR 保护**：`select()` 返回 `-1` 且 `errno == EINTR` 时，说明被 OS 信号中断（窗口 resize、SIGCHLD 等），这不是致命错误，直接 `return` 退出本帧，下帧继续：
+   ```c
+   int ret = select(max_fd + 1, &readfds, NULL, NULL, &tv);
+   if (ret < 0) {
+       if (errno == EINTR) return;  /* 信号中断，下帧继续 */
+       /* 其他错误：log_error */
+       return;
+   }
+   if (ret == 0) return;  /* 超时，无数据 */
+   ```
+3. `read()` 返回 > 0 时：追加到 `kwcc_http` 侧的 C buffer，**不触发 JS**
+4. `read()` 返回 0（pipe closed）：标记 stream end，触发 `ON_END`
+5. `read()` 返回 -1：
    - `EAGAIN`/`EWOULDBLOCK`：正常，无数据
    - 其他错误：触发 `ON_ERROR`
-5. macOS 上 pipe read-end 需要正确处理 `EAGAIN`
+6. macOS 上 pipe read-end 需要正确处理 `EAGAIN`
 
 ---
 
@@ -231,6 +241,7 @@ Content-Length: 1234\r\n
    }
    // 循环结束：最后一次成功解析的就是最终响应（如 200）
    ```
+   **Fix 8：不完整 Header 循环保护**：循环内 `phr_parse_response` 返回 `-2`（数据不完整）时必须立即 `break`，绝不能继续循环。否则会卡住 Sokol 主线程，造成永久冻结。
 4. 状态码直接从 `*status` 参数获取（picohttpparser 已解析），**无需 sscanf**
 5. 遍历 `headers[]` 找 `Content-Length` → `total_size`
 6. Body = 最终响应的 body 起始指针，一次性 dispatch `ON_END`
@@ -270,8 +281,25 @@ if (!JS_IsUndefined(cfg)) {
 // 最后添加 url
 
 /* 4. pipe() + fork() */
-/* 5. 子进程：dup2(pipefd[1], STDOUT_FILENO) → execvp(bin_path, argv) */
+/* Fix 10: FD Pollution — fcntl(pipefd[0], F_SETFD, FD_CLOEXEC) 创建后立即设置 */
+/* 5. 子进程：close(pipefd[0]) → 关闭 > STDERR_FILENO 的所有 FD → dup2(pipefd[1], STDOUT_FILENO) → execvp(bin_path, argv) */
 /* 6. 父进程：close(pipefd[1]) → fcntl(O_NONBLOCK) → malloc(response_buf) → kwcc_io_register() */
+```
+
+**Fix 10：子进程 FD 污染防护** — `fork()` 后子进程继承父进程所有 FD。如果不关闭，子进程持有父进程所有 pipe/socket FD，导致资源死锁：
+```c
+/* 父进程：pipe() 创建后立即设置 FD_CLOEXEC */
+fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
+
+/* 子进程：execvp 前关闭所有无关 FD */
+close(pipefd[0]);
+for (int fd = STDERR_FILENO + 1; fd < sysconf(_SC_OPEN_MAX); fd++) {
+    if (fd != pipefd[1]) close(fd);
+}
+dup2(pipefd[1], STDOUT_FILENO);
+close(pipefd[1]);
+execvp(bin_path, argv);
+_exit(1);
 ```
 
 ### HTTP 配置选项（`kwcc_config`）
@@ -413,8 +441,9 @@ JSValue js_native_http_request(JSContext *ctx, JSValue *this_val,
 
 **并发安全**：
 - 如果同时有 2+ 个 `fetchAsync` 在同一帧或相邻帧返回，使用单一全局名 `__http_resp` 会被后一个请求覆盖
-- 必须用 `__http_resp_<req_id>` 隔离，每个请求有独立的全局变量
-- dispatch 后必须 `delete global.__http_resp_<req_id>` 清理，防止内存泄漏
+- 必须用隔离机制，每个请求有独立的变量
+
+**Fix 9：Global Property Shape 泄漏保护** — mquickjs 是高度精简引擎，直接在 global object 上动态添加/删除唯一属性名（如 `__http_resp_req_xxx`）可能导致 global shape 表中未压缩的空洞泄漏。改用单一静态容器对象 `global.__http_registry`：
 
 ```c
 static void http_dispatch_end(kwcc_http_req_t *req, int error,
@@ -447,20 +476,48 @@ static void http_dispatch_end(kwcc_http_req_t *req, int error,
     }
     JS_SetPropertyStr(ctx, resp, "headers", headers_obj);
 
-    /* 全局对象传递 — 用 req_id 隔离变量名，防止并发请求互相污染 */
+    /* Fix 9: 挂载到 __http_registry 容器，避免 global shape 表泄漏 */
     JSValue global_obj = JS_GetGlobalObject(ctx);
-    char global_name[128];
-    snprintf(global_name, sizeof(global_name), "__http_resp_%s", req->req_id);
-    JS_SetPropertyStr(ctx, global_obj, global_name, resp);
+    JSValue registry = JS_GetPropertyStr(ctx, global_obj, "__http_registry");
+    if (JS_IsUndefined(registry)) {
+        registry = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, global_obj, "__http_registry", registry);
+    }
+    JS_SetPropertyStr(ctx, registry, req->req_id, resp);
 
-    /* 注意：delete 使用 bracket 语法，防止 req_id 含特殊字符 */
     char buf[512];
     snprintf(buf, sizeof(buf),
-        "$bus.emit('http/end', new Object(), %s); delete global['%s'];",
-        global_name, global_name);
+        "$bus.emit('http/end', new Object(), __http_registry['%s']);"
+        "delete __http_registry['%s'];",
+        req->req_id, req->req_id);
     JS_Eval(ctx, buf, strlen(buf), "<http>", JS_EVAL_REPL);
 }
 ```
+
+**为什么需要 `__http_registry`**：
+- 直接在 global object 上创建/删除唯一属性名（`__http_resp_req_1`, `__http_resp_req_2`, ...）会让 mquickjs 的 global shape 表累积空洞
+- 使用单一静态容器 `global.__http_registry`，所有响应通过 `registry[reqId]` 挂载
+- JS 层 `delete __http_registry[reqId]` 是安全的索引属性删除，不会膨胀 shape 表
+
+**Fix 11：mquickjs Heap 碎片防护**（JS 层 `runtime/http.js`）：
+
+mquickjs 没有 compacting GC，大量动态创建/释放大字符串会碎片化 C heap。在 `ON_END` handler 中显式 nullify 大属性后再 delete：
+
+```javascript
+var onEnd = function(action, data) {
+    if (data.reqId !== reqId) return;
+    /* Fix 11: 显式 nullify 大字符串，触发 GC 释放 C heap */
+    if (__http_registry && __http_registry[reqId]) {
+        __http_registry[reqId].body = null;
+        __http_registry[reqId].headers = null;
+        delete __http_registry[reqId];
+    }
+    cleanup();
+    resolve(data.response);
+};
+```
+
+**为什么需要**：mquickjs 没有 compacting GC，大量动态创建/释放大字符串会碎片化 C heap。显式 nullify body（通常是最大的属性）后再 delete，让 GC 有机会在 delete 前回收字符串内存，保护 heap 连续性。
 
 **禁止的做法**（安全约束）：
 - ~~`snprintf(buf, ..., "$bus.emit('http/end', '%s')", body)`~~ — body 含引号/换行会导致 SyntaxError
