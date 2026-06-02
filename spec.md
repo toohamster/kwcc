@@ -52,10 +52,12 @@
 │   └── mquickjs/    #   mquickjs 解释器核心 + 构建工具
 ├── src/             # 项目 C 源码
 │   ├── main.m       # Sokol 窗口生命周期与渲染主循环 (Objective-C)
-│   ├── kwcc.c       # UI 引擎核心（JS ↔ microui ↔ NanoVG 桥接）
-│   ├── kwcc.h       # kwcc 公共 API
-│   ├── jsapi.c      # JS 运行时支持（stdlib stub + kwcc_ui 回调）
-│   ├── jsapi.h      # Stub 函数声明
+│   ├── kwcc_base.h  # 纯 C 基础设施（config getter 声明，无 JS/microui 类型）
+│   ├── kwcc.c       # config JSValue 存储实现（无 microui）
+│   ├── kwcc_ui.c/h  # UI 模块（g_mu、microui 桥接、input、SVG、字体、register_ui）
+│   ├── kwcc_js.c/h  # JS lifecycle（create/destroy JSContext、stdlib stubs、kwcc_ui 桥接）
+│   ├── kwcc.h       # 入口 umbrella header（聚合 kwcc_base/ui/js/io 头文件）
+│   ├── kwcc_io.h    # I/O 模块声明
 │   └── llog.h       # 日志包装器 (解决 macOS syslog.h 宏冲突)
 ├── app/             # 脚本层
 │   ├── main.js      # 模块入口（loadJs 加载示例模块）

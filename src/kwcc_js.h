@@ -1,9 +1,12 @@
-/* kwcc_js.h — kwcc JS runtime support (stdlib stubs + JS bindings)
+/* kwcc_js.h — kwcc JS lifecycle + runtime support (stdlib stubs + JS bindings)
    Must be included before mqjs_stdlib.h */
 #ifndef KWCC_JS_H
 #define KWCC_JS_H
 
 #include "mquickjs/mquickjs.h"
+
+JSContext *kwcc_create_js(void);
+void       kwcc_destroy_js(JSContext *ctx);
 
 JSValue js_print(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_gc(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);

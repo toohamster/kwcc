@@ -1,11 +1,36 @@
-/* kwcc_js.c — kwcc JS runtime support (stdlib stubs + JS bindings) */
+/* kwcc_js.c — kwcc JS lifecycle + runtime support (stdlib stubs + JS bindings) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "mquickjs/mquickjs.h"
-#include "llog.h"
 #include "kwcc_js.h"
 #include "kwcc_base.h"
+#include "llog.h"
+#include "mquickjs/mqjs_stdlib.h"
+
+#define KWCC_MEM_SIZE (4 * 1024 * 1024)
+
+/* Extern from kwcc.c */
+void kwcc_config_set_jsctx(JSContext *ctx);
+
+/* ── JS lifecycle ───────────────────────────────────────────── */
+
+JSContext *kwcc_create_js(void) {
+    void *mem_buf = malloc(KWCC_MEM_SIZE);
+    JSContext *ctx = JS_NewContext(mem_buf, KWCC_MEM_SIZE, &js_stdlib);
+    if (!ctx) {
+        log_fatal("kwcc: JS_NewContext failed (not enough memory?)");
+        return NULL;
+    }
+    kwcc_config_set_jsctx(ctx);
+    return ctx;
+}
+
+void kwcc_destroy_js(JSContext *ctx) {
+    if (ctx) {
+        JS_FreeContext(ctx);
+    }
+}
 
 /* ── js_print: print all arguments to stdout and log ─────────── */
 JSValue js_print(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
@@ -88,7 +113,7 @@ JSValue js_performance_now(JSContext *ctx, JSValue *this_val, int argc, JSValue 
 /* ── kwcc UI bridge ──────────────────────────────────────────── */
 
 typedef JSValue (*JSUICallback)(JSContext *ctx, const char *method, int argc, JSValue *argv);
-static JSUICallback g_ui_callback = NULL;
+JSUICallback g_ui_callback = NULL;
 
 void kwcc_set_ui_callback(JSUICallback cb) {
     g_ui_callback = cb;

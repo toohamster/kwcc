@@ -39,7 +39,7 @@ make run
 
 **Two-stage build:**
 1. Stage 1 compiles a host tool (`mquickjs_build.c` + `mqjs_stdlib.c`) -> generates `mqjs_stdlib.h` and `mquickjs_atom.h` at build time
-2. Stage 2 compiles the main binary using only 4 mquickjs core .c files: `mquickjs.c`, `cutils.c`, `dtoa.c`, `libm.c`
+2. Stage 2 compiles the main binary using only 4 mquickjs core .c files + project .c files: `mquickjs.c`, `cutils.c`, `dtoa.c`, `libm.c` + `main.m` + `kwcc.c` + `kwcc_ui.c` + `kwcc_js.c` + `kwcc_io.c`
 
 **Key compiler flags:** `clang`, `-Wall -Wextra -fobjc-arc -O0 -D_GNU_SOURCE -fno-math-errno -fno-trapping-math`. macOS requires `main.m` (Objective-C) for Sokol.
 
@@ -58,10 +58,13 @@ make run
 │   └── nanosvg/    #   rxi/nanosvg SVG parser (single-header)
 ├── src/
 │   ├── main.m          # Sokol lifecycle, NanoVG rendering, input routing
-│   ├── kwcc.c          # UI engine core: JS ↔ microui ↔ NanoVG bridge
-│   ├── kwcc.h          # kwcc public API
-│   ├── jsapi.c         # JS runtime support (stdlib stubs + kwcc_ui)
-│   ├── jsapi.h         # Stub function declarations
+│   ├── kwcc_base.h     # Pure C infrastructure (config getter declarations)
+│   ├── kwcc.c          # config JSValue storage (no microui)
+│   ├── kwcc_ui.c       # UI module: g_mu + kwcc_ui_init + kwcc_process_js + UI bridge + input + SVG + register_ui
+│   ├── kwcc_ui.h       # UI module declarations + SVG cache extern
+│   ├── kwcc_js.c       # JS lifecycle: kwcc_create/destroy_js + stdlib stubs + kwcc_ui bridge
+│   ├── kwcc_js.h       # JS lifecycle + stubs declarations
+│   ├── kwcc.h          # Umbrella header (includes all module headers)
 │   └── llog.h          # Logging wrapper (wraps rxi/log.h, handles syslog.h conflicts)
 ├── app/
 │   ├── main.js         # Module entry (loadJs loads example modules)

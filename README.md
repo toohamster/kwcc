@@ -52,8 +52,12 @@ make && ./kwcc
 ├── deps/            # 第三方源码 (setup.sh 自动下载)
 ├── src/
 │   ├── main.m       # Sokol 生命周期 + NanoVG 渲染
-│   ├── kwcc.c       # JS ↔ microui ↔ NanoVG 桥接
-│   └── kwcc.h       # 公共 API
+│   ├── kwcc_base.h  # 纯 C 基础设施（config getter 声明）
+│   ├── kwcc.c       # config JSValue 存储实现
+│   ├── kwcc_ui.c/h  # UI 模块（g_mu、microui 桥接、input、SVG、字体）
+│   ├── kwcc_js.c/h  # JS lifecycle（create/destroy JSContext、stdlib stubs）
+│   ├── kwcc.h       # 入口 umbrella header（聚合各模块头文件）
+│   └── kwcc_io.h    # I/O 模块声明
 ├── app/
 │   ├── main.js      # 模块入口
 │   ├── runtime/     # store.js + bus.js

@@ -23,10 +23,14 @@ typedef struct {
 extern svg_cache_t g_svg_cache[SVG_CACHE_SIZE];
 extern int         g_frame_counter;
 
+void kwcc_ui_init(void);
+void kwcc_ui_free(void);
 void kwcc_register_ui(JSContext *ctx);
-void kwcc_ui_init(void);  /* set microui text callbacks */
+void kwcc_process_js(JSContext *ctx, const char *js_text);
+mu_Context *kwcc_get_mu(void);
 
 void kwcc_load_font_dir(const char *dir_path);
+const char *kwcc_get_font(void);
 
 void kwcc_input_mousemove(int x, int y);
 void kwcc_input_mousedown(int x, int y, int btn);

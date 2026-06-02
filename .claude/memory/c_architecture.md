@@ -1,85 +1,122 @@
 # C 层完整架构状态
 
-> 基于 `src/kwcc.c` 完整源码分析（661 行）
+> 基于 UI 模块拆分后的多文件架构（`kwcc_ui.c` + `kwcc_js.c` + `kwcc.c`）
+
+## 文件职责分布
+
+| 文件 | 职责 | 不含 |
+|------|------|------|
+| `kwcc_base.h` | 纯 C 类型 + config getter 声明 | 无 JS/microui 类型 |
+| `kwcc.c` | config JSValue 存储（内部 `__kwcc_config` 对象方案） | 无 microui |
+| `kwcc_ui.c` | `g_mu` + `kwcc_ui_init/free` + `kwcc_process_js` + UI 桥接 + input + SVG + 字体 | 无 JS lifecycle |
+| `kwcc_ui.h` | UI 模块声明 + SVG cache extern + `g_mu` extern | |
+| `kwcc_js.c` | `kwcc_create/destroy_js` + stdlib stubs + kwcc_ui 桥接 | 无 microui |
+| `kwcc_js.h` | JS lifecycle + stubs 声明 | 无 microui |
+| `kwcc.h` | 入口 umbrella header（#include 各模块头文件） | 无实现代码 |
 
 ## 全局变量
 
-| 变量 | 类型 | 行号 | 用途 |
-|------|------|------|------|
-| `g_mu` | `mu_Context` | 23 | microui 主上下文 |
-| `g_slider_val` | `mu_Real` | 24 | 持久化 slider 值（static，避免局部地址陷阱） |
-| `g_current_font` | `const char*` | 25 | 当前激活字体名称 |
-| `g_topic_map[256]` | struct { mu_Id, topic[128] } | 31 | 每帧 ID→topic 映射（Zero-Alloc） |
-| `g_topic_map_count` | `int` | 32 | topic map 计数 |
-| `g_sync_table[32]` | `mod_state_t` { key[64], visible } | 44 | 模块状态同步表 |
-| `g_sync_count` | `int` | 45 | sync 计数 |
-| `g_current_mod_key` | `const char*` | 48 | 当前模块 key（ui.sync 设置） |
-| `g_win_intercepted[32]` | `int` | 51 | 窗口拦截栈 |
-| `g_win_topics[32][128]` | `char` | 52 | 窗口 topic 栈 |
-| `g_win_top` | `int` | 53 | 窗口栈顶 |
-| `g_js_ctx` | `JSContext*` | 56 | JS 上下文（close 回调用） |
-| `g_svg_cache[128]` | `svg_cache_t` | 135 | SVG 缓存（extern，共享给 main.m） |
-| `g_svg_cache_next` | `int` | 136 | SVG 缓存轮转指针 |
-| `g_frame_counter` | `int` | 137 | 帧计数器 |
+### kwcc_ui.c
+| 变量 | 类型 | 用途 |
+|------|------|------|
+| `g_mu` | `mu_Context` | microui 主上下文（**定义**，非 extern） |
+| `g_slider_val` | `mu_Real` | 持久化 slider 值（static，避免局部地址陷阱） |
+| `g_current_font` | `const char*` | 当前激活字体名称 |
+| `g_topic_map[256]` | struct { mu_Id, topic[128] } | 每帧 ID→topic 映射（Zero-Alloc） |
+| `g_topic_map_count` | `int` | topic map 计数 |
+| `g_sync_table[32]` | `mod_state_t` { key[64], visible } | 模块状态同步表 |
+| `g_sync_count` | `int` | sync 计数 |
+| `g_current_mod_key` | `const char*` | 当前模块 key（ui.sync 设置） |
+| `g_win_intercepted[32]` | `int` | 窗口拦截栈 |
+| `g_win_topics[32][128]` | `char` | 窗口 topic 栈 |
+| `g_win_top` | `int` | 窗口栈顶 |
+| `g_js_ctx` | `JSContext*` | JS 上下文（close 回调用） |
+| `g_svg_cache[128]` | `svg_cache_t` | SVG 缓存（extern，共享给 main.m） |
+| `g_svg_cache_next` | `int` | SVG 缓存轮转指针 |
+| `g_frame_counter` | `int` | 帧计数器 |
+
+### kwcc_js.c
+| 变量 | 类型 | 用途 |
+|------|------|------|
+| `g_ui_callback` | `JSUICallback` | UI 桥接回调指针（kwcc_set_ui_callback 设置） |
+
+### kwcc.c
+| 变量 | 类型 | 用途 |
+|------|------|------|
+| `g_js_ctx` | `JSContext*` | config 存储用的 JSContext |
 
 ## C 层函数清单
 
 ### 核心生命周期
-| 函数 | 行号 | 功能 |
-|------|------|------|
-| `kwcc_init()` | 552 | 初始化 microui + text 回调 |
-| `kwcc_free()` | 558 | 空 |
-| `kwcc_create_js()` | 561 | 创建 JSContext + 注册 ui 对象 + methods_js |
-| `kwcc_destroy_js()` | 610 | 释放 JSContext |
-| `kwcc_begin_frame()` | 95 | 每帧重置：topic_map_count=0, sync_count=0, win_top=0 |
-| `kwcc_process_js()` | 616 | 帧入口：frame++ → begin_frame → mu_begin → JS_Eval → mu_end |
-| `kwcc_get_mu()` | 634 | 返回 g_mu 指针 |
-| `kwcc_get_font()` | 638 | 返回当前字体名称 |
+| 函数 | 所在文件 | 功能 |
+|------|----------|------|
+| `kwcc_ui_init()` | kwcc_ui.c | `mu_init` + text 回调 + `on_window_close` |
+| `kwcc_ui_free()` | kwcc_ui.c | 清理 UI 资源（当前空，备用） |
+| `kwcc_create_js()` | kwcc_js.c | 创建 JSContext + 调 `kwcc_config_set_jsctx` |
+| `kwcc_destroy_js()` | kwcc_js.c | 释放 JSContext |
+| `kwcc_begin_frame()` | kwcc_ui.c | 每帧重置：topic_map_count=0, sync_count=0, win_top=0 |
+| `kwcc_process_js()` | kwcc_ui.c | 帧入口：frame++ → begin_frame → mu_begin → JS_Eval → mu_end |
+| `kwcc_get_mu()` | kwcc_ui.c | 返回 g_mu 指针 |
+| `kwcc_get_font()` | kwcc_ui.c | 返回当前字体名称 |
 
-### 事件系统
-| 函数 | 行号 | 功能 |
-|------|------|------|
-| `kwcc_bind_topic(id, topic)` | 101 | 存入 g_topic_map（id→topic） |
-| `kwcc_dispatch_event(ctx, topic, action)` | 112 | JS_Eval 调用 `$bus.emit(topic, action, new Object())` |
-| `kwcc_on_window_close(ctx, title)` | 89 | X 按钮回调：dispatch(title, "close") |
+### 事件系统（kwcc_ui.c）
+| 函数 | 功能 |
+|------|------|
+| `kwcc_bind_topic(id, topic)` | 存入 g_topic_map（id→topic） |
+| `kwcc_dispatch_event(ctx, topic, action)` | JS_Eval 调用 `$bus.emit(topic, action, new Object())` |
+| `kwcc_on_window_close(ctx, title)` | X 按钮回调：dispatch(title, "close") |
 
-### 窗口挡板
-| 函数 | 行号 | 功能 |
-|------|------|------|
-| `kwcc_sync_module(key, visible)` | 63 | 设置当前模块 key + 更新 visible 状态 |
-| `kwcc_get_current_visibility()` | 79 | 查 g_sync_table 返回当前模块可见性 |
+### 窗口挡板（kwcc_ui.c）
+| 函数 | 功能 |
+|------|------|
+| `kwcc_sync_module(key, visible)` | 设置当前模块 key + 更新 visible 状态 |
+| `kwcc_get_current_visibility()` | 查 g_sync_table 返回当前模块可见性 |
 
-### SVG 缓存
-| 函数 | 行号 | 功能 |
-|------|------|------|
-| `fnv1a(s)` | 139 | FNV-1a 哈希 |
-| `svg_resolve(data, is_inline)` | 145 | 哈希匹配 → 解析 → 帧安全淘汰 |
-| `kwcc_queue_svg(data, is_inline, x, y, w, h)` | 206 | 先 mu_get_clip_rect → 再 svg_resolve → 入队 |
+### SVG 缓存（kwcc_ui.c）
+| 函数 | 功能 |
+|------|------|
+| `fnv1a(s)` | FNV-1a 哈希 |
+| `svg_resolve(data, is_inline)` | 哈希匹配 → 解析 → 帧安全淘汰 |
+| `kwcc_queue_svg(data, is_inline, x, y, w, h)` | 先 mu_get_clip_rect → 再 svg_resolve → 入队 |
 
-### 字体系统
-| 函数 | 行号 | 功能 |
-|------|------|------|
-| `is_cjk_hint(name)` | 485 | 检测字体名是否包含 CJK 关键词 |
-| `kwcc_load_font_dir(dir_path)` | 505 | 扫描目录下 .ttf/.otf 字体，自动选 CJK 字体 |
+### 字体系统（kwcc_ui.c）
+| 函数 | 功能 |
+|------|------|
+| `is_cjk_hint(name)` | 检测字体名是否包含 CJK 关键词 |
+| `kwcc_load_font_dir(dir_path)` | 扫描目录下 .ttf/.otf 字体，自动选 CJK 字体 |
 
-### 输入事件
-| 函数 | 行号 | 功能 |
-|------|------|------|
-| `kwcc_input_mousemove(x, y)` | 642 | → mu_input_mousemove |
-| `kwcc_input_mousedown(x, y, btn)` | 646 | → mu_input_mousedown |
-| `kwcc_input_mouseup(x, y, btn)` | 650 | → mu_input_mouseup |
-| `kwcc_input_scroll(x, y)` | 654 | → mu_input_scroll |
-| `kwcc_input_text(text)` | 658 | → mu_input_text |
+### 输入事件（kwcc_ui.c）
+| 函数 | 功能 |
+|------|------|
+| `kwcc_input_mousemove(x, y)` | → mu_input_mousemove |
+| `kwcc_input_mousedown(x, y, btn)` | → mu_input_mousedown |
+| `kwcc_input_mouseup(x, y, btn)` | → mu_input_mouseup |
+| `kwcc_input_scroll(x, y)` | → mu_input_scroll |
+| `kwcc_input_text(text)` | → mu_input_text |
 
-### JS wrapper（methods_js，kwcc.c:581-598）
+### JS stubs（kwcc_js.c）
+| 函数 | 功能 |
+|------|------|
+| `js_print` | 打印到 stdout + log |
+| `js_gc` | 触发 GC |
+| `js_load` | 读取并 eval JS 文件 |
+| `js_setTimeout` / `js_clearTimeout` | stub |
+| `js_date_now` / `js_performance_now` | stub |
+| `js_kwcc_ui` | UI 桥接入口 → g_ui_callback |
+| `js_kwcc_config_set` | config 设置入口 → kwcc_config_set |
 
-所有 ui.* 方法通过 `kwcc_ui(method, ...args)` 桥接，JS wrapper 定义在 `methods_js` 字符串中，`kwcc_create_js` 时 `JS_Eval` 执行。
+### kwcc_ui.c — js_ui_dispatch + register_ui
+`js_ui_dispatch` — 所有 ui.* 方法的 C handler，按 method 名 dispatch
+`kwcc_register_ui` — 创建 `ui` 对象 + 注入 JS wrapper + 调 `kwcc_set_ui_callback`
 
-### microui 文本回调
-| 函数 | 行号 | 功能 |
-|------|------|------|
-| `mu_text_width(font, str, len)` | 222 | nvgTextBounds 真实测量（nvgFontFace + nvgFontSize 14） |
-| `mu_text_height(font)` | 234 | nvgTextBounds("Hy") 真实测量 |
+### Config 存储（kwcc.c）
+| 函数 | 功能 |
+|------|------|
+| `kwcc_config_set_jsctx(ctx)` | 设置 JSContext（内部，kwcc_create_js 调用） |
+| `kwcc_config_set_object(module, obj)` | 存储 JS object 到 `__kwcc_config` 全局对象 |
+| `kwcc_config_set(module, key, value)` | C stub：字符串形式 config set |
+| `kwcc_config_get(module, key, default)` | 旋转 buffer 返回字符串值 |
+| `kwcc_config_get_int32(module, key, default)` | 返回 int32 值 |
 
 ## 已实现的 JS API（完整清单）
 
@@ -116,11 +153,14 @@ ui.loadFontDir(dir)
 
 // SVG
 ui.svg(path_or_svg, x, y, w, h)
+
+// config
+kwcc_config(module, options)  // 遍历 options 的 keys，逐个调 kwcc_config_set
 ```
 
 ## 未实现的常见控件
 
-以下控件在 microui 中有对应，但 kwcc.c 中没有桥接：
+以下控件在 microui 中有对应，但 kwcc 中没有桥接：
 
 | microui 函数 | 状态 |
 |--------------|------|
@@ -137,6 +177,7 @@ ui.svg(path_or_svg, x, y, w, h)
 3. **topic map 每帧清零**：g_topic_map_count = 0 在 begin_frame 中，不保留跨帧数据
 4. **deferred 机制已移除**：on_window_close 直接 dispatch，不再先存数组
 5. **on_window_close 收到的是 title 不是 topic**：dispatch 的 topic 参数是 title 字符串，目前没有通过 ID 查找正确 topic 的映射（待 v2 完成后修复）
+6. **config 存储用全局对象方案**：`__kwcc_config` 挂在 JS global 上，避免 JSGCRef 手动管理
 
 ## JS 框架 API（main.js）
 
@@ -166,10 +207,9 @@ ui.svg(path_or_svg, x, y, w, h)
 | `initEvents()` | 遍历模块调用 initEvents() → 注册 $bus handler |
 | `onFrame()` | 每帧调用，遍历模块 render，自动 ui.sync |
 
-## mquickjs C API 速查（基于 `mquickjs.h` + `jsapi.c` 验证）
+## mquickjs C API 速查
 
 ### JSValue 类型与创建
-
 | 用途 | API | 说明 |
 |------|-----|------|
 | 创建字符串 | `JS_NewString(ctx, buf)` 或 `JS_NewStringLen(ctx, buf, len)` | |
@@ -181,7 +221,6 @@ ui.svg(path_or_svg, x, y, w, h)
 | JSValue 本质 | `uint64_t` (64 位平台) | 不是结构体 |
 
 ### JSValue → C 值
-
 | 用途 | API | 说明 |
 |------|-----|------|
 | 转 C 字符串 | `JS_ToCString(ctx, val, &cbuf)` | 返回 `const char*`，`cbuf` 是 `JSCStringBuf[5]` 栈缓冲 |
@@ -191,7 +230,6 @@ ui.svg(path_or_svg, x, y, w, h)
 | 转字符串 | `JS_ToString(ctx, val)` | 返回 JSValue |
 
 ### 对象/数组操作
-
 | 用途 | API |
 |------|-----|
 | 获取属性 | `JS_GetPropertyStr(ctx, obj, "key")` → JSValue |
@@ -200,7 +238,6 @@ ui.svg(path_or_svg, x, y, w, h)
 | 获取数组长度 | `JS_GetPropertyStr(ctx, arr, "length")` + `JS_ToInt32` |
 
 ### 类型判断
-
 | 用途 | API |
 |------|-----|
 | 判断字符串 | `JS_IsString(ctx, val)` |
@@ -212,7 +249,6 @@ ui.svg(path_or_svg, x, y, w, h)
 | 判断错误 | `JS_IsError(ctx, val)` |
 
 ### C 函数注册
-
 | 步骤 | 说明 |
 |------|------|
 | 函数签名 | `JSValue js_func(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)` |
@@ -220,10 +256,9 @@ ui.svg(path_or_svg, x, y, w, h)
 | 宏 | `JS_CFUNC_DEF("name", argc, func)` |
 | 不要重复注册 | 不在 `js_c_function_decl[]` 中注册 |
 | Makefile | `HOST_CFLAGS` 加 `-DCONFIG_KWCC` |
-| 函数实现 | `src/jsapi.c` 或 `src/mquickjs_stubs.c` |
+| 函数实现 | `src/kwcc_js.c` |
 
 ### C 函数调用（C→JS）
-
 | 方式 | 说明 |
 |------|------|
 | `JS_Eval(ctx, code, len, filename, JS_EVAL_REPL)` | 执行 JS 字符串，REPL 模式可创建全局变量 |
@@ -232,7 +267,6 @@ ui.svg(path_or_svg, x, y, w, h)
 | `JS_GetException(ctx)` | 获取异常（调用失败后检查） |
 
 ### 关键陷阱
-
 | 陷阱 | 说明 |
 |------|------|
 | `JS_ToCString` 返回 NULL | 必须 NULL 检查后再使用（如传字符串给 microui 函数） |

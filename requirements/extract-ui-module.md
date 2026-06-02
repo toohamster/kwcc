@@ -1,138 +1,145 @@
-# 提取 UI 模块 + JS 命名统一
+# 提取 UI 模块 + config JSValue 存储
 
-> 目标：将 UI 代码从 `kwcc.c` 拆分到 `kwcc_ui.c`，统一文件命名规范，为模块化架构打基础。
+> 目标：`kwcc.c` 不含 microui，只做 config JSValue 存储。UI 归 `kwcc_ui.c`，JS 归 `kwcc_js.c`。
 
 ---
 
 ## 背景
 
-当前 `kwcc.c`（660+ 行）混了三块功能：
-1. microui/UI 桥接（`js_ui_dispatch`、svg cache、topic map、窗口挡板、input 事件）
-2. config 系统（固定数组存储，`entries[16]` 有数量上限）
-3. JS 生命周期（`kwcc_create_js()` 同时创建 JSContext + 注册 UI）
-
-**问题**：
-- `kwcc_create_js()` 强依赖 `g_mu`（microui）初始化，导致 JSContext 无法提前创建
-- config 存 C 字符串 + 固定数组，JS Object 的动态特性被浪费
-- UI 代码无法独立编译，未来加 TUI/无 UI 模式需要重写整个文件
+当前 `kwcc.c` 混了 microui（`g_mu` + `mu_init`）和 config 存储，文件拆分后仍依赖 microui，毫无意义。
 
 ---
 
-## 目标架构
+## 目标架构：文件职责彻底分离
 
-```
-核心层（必须）：JSContext + config 存储（kwcc.c/h + kwcc_base.h）
-  ├─ 模块：UI   → kwcc_ui.c/h（microui + nanovg + sokol）→ GUI
-  ├─ 模块：HTTP → kwcc_http.c/h（curl + picohttpparser）
-  └─ 模块：IO   → kwcc_io.c/h（select reactor）
-```
-
-**初始化顺序变为：**
-```c
-kwcc_create_js();       // 1. 创建 JSContext（不依赖 microui）
-kwcc_config("io", ...); // 2. 设置各模块配置
-kwcc_config("ui", ...);
-kwcc_init();            // 3. microui 初始化
-kwcc_register_ui();     // 4. UI 方法注册（依赖 g_mu）
-kwcc_io_init();         // 5. IO 模块初始化（读 config）
-```
+| 文件 | 职责 | 不含 |
+|------|------|------|
+| `kwcc_base.h` | config getter 声明（纯 C 类型） | 无 JS/microui 类型 |
+| `kwcc.c` | config JSValue 存储（内部实现） | 无 microui |
+| `kwcc_ui.c` | `mu_Context g_mu` + `kwcc_init()` + `kwcc_process_js()` + UI 桥接 + input + svg + register_ui | 无 JS lifecycle |
+| `kwcc_ui.h` | UI 模块声明 + SVG cache extern + `g_mu` extern | |
+| `kwcc_js.c` | `kwcc_create_js()` + `kwcc_destroy_js()` + JS stubs + `kwcc_set_ui_callback` + `js_kwcc_ui` | 无 microui |
+| `kwcc_js.h` | JS lifecycle + stubs + UI bridge 声明 | 无 microui |
+| `kwcc.h` | 公共 API：`kwcc_init` / `kwcc_free` / `kwcc_process_js` / `kwcc_get_mu` | 无 JS 类型 |
+| `kwcc_io.c` | I/O reactor（已有） | |
 
 ---
 
 ## 改动清单
 
-### 1. 拆分 `kwcc_create_js()` — `src/kwcc.c`
+### 1. `kwcc_base.h` — 纯 C 基础设施
 
-**当前**：一个函数同时做 JSContext 创建 + ui 对象注册。
-
-**拆为**：
 ```c
-JSContext *kwcc_create_js(void);   // 只创建 JSContext + 内置函数
-void         kwcc_register_ui(JSContext *ctx);  // UI 对象 + methods_js
+#define KWCC_CONFIG_MAX_MODULES 64
+#define KWCC_CONFIG_MAX_KEY_LEN 64
+
+const char *kwcc_config_get(const char *module, const char *key, const char *default_value);
+int         kwcc_config_get_int32(const char *module, const char *key, int default_value);
 ```
 
-**影响**：`main.m` 的 `init()` 需调整调用顺序。
+- **不含 JSValue/JSGCRef/microui 类型**
+- 去掉 struct 定义（移到 kwcc.c 内部）
+- 去掉 `kwcc_config_set` 声明（内部使用）
 
-### 2. 提取 UI 模块 — `src/kwcc_ui.c`（新建）、`src/kwcc_ui.h`（新建）
+### 2. `kwcc.c` — config JSValue 存储（唯一职责）
 
-**迁移内容**（从 `kwcc.c` 移到 `kwcc_ui.c`）：
-- `js_ui_dispatch()` — UI 方法调度
-- `methods_js` 字符串 — JS wrapper 定义
-- SVG cache：`g_svg_cache`、`g_svg_cache_next`、`g_frame_counter`、`fnv1a()`、`svg_resolve()`、`kwcc_queue_svg()`
-- topic map：`g_topic_map`、`kwcc_bind_topic()`、`kwcc_dispatch_event()`
-- 窗口挡板：`g_sync_table`、`g_win_intercepted`、`g_win_topics`、`g_win_top`、`g_current_mod_key`、`kwcc_sync_module()`、`kwcc_get_current_visibility()`、`kwcc_on_window_close()`
-- 字体系统：`g_current_font`、`kwcc_load_font_dir()`、`is_cjk_hint()`
-- input 事件：`kwcc_input_mousemove()`、`mousedown()`、`mouseup()`、`scroll()`、`text()`
-- microui 回调：`mu_text_width()`、`mu_text_height()`
-
-**对外暴露**：
 ```c
-void kwcc_register_ui(JSContext *ctx);
-void kwcc_ui_init(void);  /* microui text 回调设置 */
-```
-
-### 3. config 存储改为 JSValue — `src/kwcc.c`
-
-**当前**：固定 C 字符串数组，每个模块最多 16 个 key-value。
-
-**改为**：存 JSValue，动态读取。
-```c
+/* 内部结构，不暴露给外部 */
 typedef struct {
-    char     module[KWCC_CONFIG_MAX_KEY_LEN];
-    JSValue  options;       /* JS Object，直接存储 */
-    JSGCRef  options_ref;   /* GC 保护，永久不过期 */
-    int      in_use;
+    char      module[KWCC_CONFIG_MAX_KEY_LEN];
+    JSValue   options;
+    JSGCRef   options_ref;
+    int       in_use;
 } kwcc_config_module_t;
 
-kwcc_config_set("http", options_jsvalue);  // 存整个 Object
-kwcc_config_get("http", "bin_path");       // 内部 JS_GetPropertyStr
+/* 内部函数 */
+void kwcc_config_set_jsctx(JSContext *ctx);        // 设置 JSContext
+void kwcc_config_set_object(const char *m, JSValue obj);  // 存 JS Object + JS_AddGCRef
+
+/* 公共函数 */
+const char *kwcc_config_get(...);    // JS_GetPropertyStr + JS_ToCString
+int         kwcc_config_get_int32(...);  // JS_GetPropertyStr + JS_ToInt32
 ```
 
-**关键设计**：
-- `JS_AddGCRef` 永久保护 config JSValue，**运行期间不过期**
-- 整个程序生命周期有效，退出时 `JS_FreeContext` 自动清理
-- 不需要手动 `JS_DeleteGCRef` 或 `free`
-- 运行时 config 只增不改（或覆盖 value），不存在"过期"概念
+- **无 microui**（不含 `g_mu` / `mu_init`）
+- `kwcc_init()` / `kwcc_free()` 为空实现（或移除，由 `kwcc_ui.c` 负责）
+- 旋转 buffer 存 config_get 返回值
 
-**好处**：
-- JS Object 有多少 key 存多少，不设上限
-- 读的时候 `JS_GetPropertyStr` 直接拿，类型不丢失
-- 零运行时内存管理开销
-- 需要 `JSContext`，所以 JSContext 必须提前创建
+### 3. `kwcc_ui.c` — 拥有 `mu_Context g_mu` + UI 全职责
 
-### 4. 更新 `src/kwcc.h`
+新增/迁移：
+- `mu_Context g_mu;`（从 kwcc.c 移入）
+- `kwcc_ui_init()` — `mu_init(&g_mu)` + text 回调 + close 回调（合并原有两个函数）
+- `kwcc_ui_free()` — 清理 UI 资源（当前为空，备用）
+- `kwcc_process_js()` — JS 帧处理（调 `g_frame_counter` / `kwcc_begin_frame()` / `mu_begin/end`）
+- `kwcc_get_mu()` — 返回 `&g_mu`
+- `js_ui_dispatch()` — UI 方法调度
+- `kwcc_register_ui()` — UI 对象 + methods_js
+- 原有所有 UI 内容不变
 
-- 迁移 UI 相关内容到 `kwcc_ui.h`
-- 保留 core API + config + SVG cache extern
-- include `kwcc_base.h`
+**`kwcc.c` 不含 `kwcc_init()` / `kwcc_free()`**，只做 config 存储。
 
-### 5. 重命名 `jsapi.h/c` → `kwcc_js.h/c`
-
-统一命名规范，所有 kwcc 相关源文件以 `kwcc_` 开头。
-
-| 旧文件 | 新文件 |
-|--------|--------|
-| `src/jsapi.h` | `src/kwcc_js.h` |
-| `src/jsapi.c` | `src/kwcc_js.c` |
-
-**需同步更新**：
-- `src/kwcc.c` 的 `#include "jsapi.h"` → `#include "kwcc_js.h"`
-- `src/main.m` 不需要引用此文件（无直接引用）
-- `Makefile` 的 `MQJS_SRCS` + build rule
-- `deps/mquickjs/mqjs_stdlib.c` 的 `#include "jsapi.h"` → `#include "kwcc_js.h"`
-- 所有函数名不变（已符合 `js_*` / `kwcc_*` 命名）
-
-### 6. 更新 `main.m`
+### 4. `kwcc.h` — 公共 API
 
 ```c
-/* 旧 */
-kwcc_init();
-js_ctx = kwcc_create_js();
+#include "kwcc_base.h"
+void          kwcc_process_js(JSContext *ctx, const char *js_text);
+mu_Context   *kwcc_get_mu(void);
+```
 
-/* 新 */
-js_ctx = kwcc_create_js();     // JSContext 先有
-kwcc_io_init();                // IO 初始化
-kwcc_register_ui(js_ctx);      // UI 注册
+- 不含 `kwcc_init()` / `kwcc_free()`（已归 kwcc_ui.c）
+- 不含 `kwcc_create_js()` / `kwcc_destroy_js()`（归 kwcc_js.h）
+- 不含 config struct 声明
+
+### 5. `kwcc_js.c` — JS lifecycle + stubs
+
+新增/迁移：
+- `kwcc_create_js()` — `JS_NewContext` + `kwcc_config_set_jsctx(ctx)`
+- `kwcc_destroy_js()` — `JS_FreeContext`
+- `kwcc_set_ui_callback()` + `js_kwcc_ui()`
+- `js_kwcc_config_set()` — 传 JSValue 到 `kwcc_config_set_object()`（不再拆字符串）
+- 原有 stubs 不变
+
+### 6. `kwcc_js.h` — JS 声明
+
+```c
+JSContext *kwcc_create_js(void);
+void       kwcc_destroy_js(JSContext *ctx);
+/* stubs + UI bridge 声明 */
+```
+
+### 7. `kwcc_ui.h` — UI 声明
+
+```c
+extern mu_Context g_mu;
+extern svg_cache_t g_svg_cache[SVG_CACHE_SIZE];
+extern int         g_frame_counter;
+void kwcc_ui_init(void);
+void kwcc_ui_free(void);
+void kwcc_register_ui(JSContext *ctx);
+void kwcc_process_js(JSContext *ctx, const char *js_text);
+mu_Context *kwcc_get_mu(void);
+```
+
+### 8. JS wrapper 更新 — `kwcc_ui.c` methods_js
+
+```javascript
+kwcc_config = function(module, options) {
+    kwcc_config_set(module, options);
+};
+```
+
+### 9. `main.m` 初始化 + 清理顺序
+
+```c
+/* init */
+js_ctx = kwcc_create_js();     /* 1. JSContext + config JSContext 注册 */
+kwcc_ui_init();                /* 2. microui 初始化（不再叫 kwcc_init） */
+kwcc_register_ui(js_ctx);      /* 3. UI 对象注册 */
+
+/* cleanup */
+kwcc_ui_free();                /* 1. 清理 UI 资源 */
+kwcc_destroy_js(js_ctx);       /* 2. 释放 JS 上下文 */
 ```
 
 ---
@@ -140,22 +147,23 @@ kwcc_register_ui(js_ctx);      // UI 注册
 ## 文件依赖关系
 
 ```
-kwcc_base.h    ← config struct（无框架依赖）
-kwcc.h         ← kwcc_base.h + mquickjs + microui（对外 API）
-kwcc_ui.h      ← kwcc.h（UI 模块声明）
-kwcc_io.h      ← kwcc_base.h（纯 POSIX + config）
-kwcc_js.h      ← mquickjs（JS binding 声明）
+kwcc_base.h  ← 纯 C，无框架依赖
+kwcc.h       ← kwcc_base.h + mquickjs + microui（公共 API）
+kwcc_ui.h    ← mquickjs + microui（UI 声明）
+kwcc_js.h    ← mquickjs（JS 声明）
+kwcc_io.h    ← kwcc_base.h（纯 POSIX）
 ```
 
 | 源文件 | 依赖头文件 |
 |--------|-----------|
-| `kwcc.c` | kwcc.h + kwcc_base.h + kwcc_js.h |
-| `kwcc_ui.c` | kwcc_ui.h + kwcc.h |
+| `kwcc.c` | kwcc_base.h + mquickjs.h |
+| `kwcc_ui.c` | kwcc_ui.h + kwcc_core.h + kwcc_js.h |
+| `kwcc_js.c` | kwcc_js.h + kwcc_base.h + mqjs_stdlib.h |
 | `kwcc_io.c` | kwcc_io.h + kwcc_base.h |
-| `kwcc_js.c` | kwcc_js.h + kwcc.h |
+| `main.m` | kwcc.h + kwcc_ui.h + kwcc_js.h |
 
 ---
 
 ## 验证
 
-每个改动完成后 `make` 验证编译通过。
+编译通过：`make clean && make`

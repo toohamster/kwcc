@@ -16,6 +16,10 @@
 /* Extern: NVG context set in main.m */
 extern NVGcontext *vg;
 
+/* ── Owned microui context ─────────────────────────────────── */
+
+mu_Context g_mu;
+
 /* ── Persistent UI state ─────────────────────────────────────── */
 
 static mu_Real    g_slider_val = 0.5f;
@@ -43,9 +47,6 @@ static int         g_win_top = 0;
 
 /* JS context — for close callback */
 static JSContext *g_js_ctx = NULL;
-
-/* ── Extern microui context (owned by kwcc.c) ───────────────── */
-extern mu_Context g_mu;
 
 void kwcc_set_js_context(JSContext *ctx) {
     g_js_ctx = ctx;
@@ -550,14 +551,40 @@ void kwcc_input_text(const char *text) {
 /* ── Registration ──────────────────────────────────────────── */
 
 void kwcc_ui_init(void) {
+    mu_init(&g_mu);
     g_mu.text_width  = mu_text_width;
     g_mu.text_height = mu_text_height;
     g_mu.on_window_close = kwcc_on_window_close;
 }
 
+void kwcc_ui_free(void) {
+    /* Reserved for future UI resource cleanup */
+}
+
+void kwcc_process_js(JSContext *ctx, const char *js_text) {
+    if (!js_text) return;
+    g_frame_counter++;
+    kwcc_begin_frame();
+
+    mu_begin(&g_mu);
+
+    JSValue result = JS_Eval(ctx, js_text, strlen(js_text), "<main.js>", 0);
+    if (JS_IsException(result)) {
+        JSValue exc = JS_GetException(ctx);
+        JSCStringBuf buf;
+        const char *s = JS_ToCString(ctx, exc, &buf);
+        log_error("JS: %s", s ? s : "(none)");
+    }
+
+    mu_end(&g_mu);
+}
+
+mu_Context *kwcc_get_mu(void) {
+    return &g_mu;
+}
+
 void kwcc_register_ui(JSContext *ctx) {
     kwcc_set_js_context(ctx);
-    kwcc_ui_init();
 
     /* Set microui UI callback */
     kwcc_set_ui_callback(js_ui_dispatch);
@@ -586,7 +613,7 @@ void kwcc_register_ui(JSContext *ctx) {
         "ui.setFont = function(n) { kwcc_ui('setFont',n); };\n"
         "ui.loadFontDir = function(d) { kwcc_ui('loadFontDir',d); };\n"
         "ui.svg = function(p,x,y,w,h) { kwcc_ui('svg',p,x||0,y||0,w||100,h||100); };\n"
-        "kwcc_config = function(module, options) {\n"
+        "var kwcc_config = function(module, options) {\n"
         "    var keys = Object.keys(options);\n"
         "    for (var i = 0; i < keys.length; i++) {\n"
         "        var key = keys[i];\n"

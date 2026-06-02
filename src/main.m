@@ -10,7 +10,6 @@
 #include "nanovg/nanovg_gl.h"
 
 #include "kwcc.h"
-#include "kwcc_ui.h"
 #include "microui/microui.h"
 #include "llog.h"
 
@@ -174,9 +173,9 @@ static void init(void) {
         }
     }
 
-    js_ctx = kwcc_create_js();    /* 1. JSContext */
-    kwcc_init();                   /* 2. microui */
-    kwcc_register_ui(js_ctx);      /* 3. UI methods */
+    js_ctx = kwcc_create_js();    /* 1. JSContext + config init */
+    kwcc_ui_init();               /* 2. microui text callbacks */
+    kwcc_register_ui(js_ctx);     /* 3. UI methods */
 
     /* Load and eval main.js once during init (register modules, init store/events) */
     js_text = load_file("app/main.js");
@@ -213,7 +212,7 @@ static void cleanup(void) {
     if (log_fp) { fflush(log_fp); fclose(log_fp); log_fp = NULL; }
     if (vg) { nvgDeleteGL3(vg); vg = NULL; }
     kwcc_destroy_js(js_ctx);
-    kwcc_free();
+    kwcc_ui_free();
     sg_shutdown();
 }
 
