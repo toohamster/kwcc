@@ -1,7 +1,7 @@
 # Async I/O 实施计划
 
 > 基于已确认的方案：`requirements/async-io-promise.md`（含 11 个 Defensive Fixes）
-> 状态：待确认
+> 状态：进行中 — Step 1/2/3 已完成 ✅
 
 ---
 

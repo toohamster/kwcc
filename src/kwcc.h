@@ -2,6 +2,7 @@
 #ifndef KWCC_H
 #define KWCC_H
 
+#include "kwcc_base.h"
 #include <stdint.h>
 #include "mquickjs/mquickjs.h"
 #include "microui/microui.h"

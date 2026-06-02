@@ -375,6 +375,7 @@ static const JSPropDef js_global_object[] = {
     JS_CFUNC_DEF("print", 1, js_print),
 #ifdef CONFIG_KWCC
     JS_CFUNC_DEF("kwcc_ui", 3, js_kwcc_ui),
+    JS_CFUNC_DEF("kwcc_config_set", 3, js_kwcc_config_set),
 #endif
 #ifdef CONFIG_CLASS_EXAMPLE
     JS_PROP_CLASS_DEF("Rectangle", &js_rectangle_class),

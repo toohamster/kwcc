@@ -4,6 +4,7 @@
 #include <string.h>
 #include "mquickjs/mquickjs.h"
 #include "llog.h"
+#include "kwcc.h"
 
 /* ── js_print: print all arguments to stdout and log ─────────── */
 JSValue js_print(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
@@ -100,4 +101,21 @@ JSValue js_kwcc_ui(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
     const char *method = JS_ToCString(ctx, argv[0], &buf);
     JSValue result = g_ui_callback(ctx, method, argc - 1, argv + 1);
     return result;
+}
+
+/* ── kwcc config set: C binding for kwcc_config_set ─────────── */
+
+JSValue js_kwcc_config_set(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 3) return JS_UNDEFINED;
+
+    JSCStringBuf mbuf, kbuf, vbuf;
+    const char *module = JS_ToCString(ctx, argv[0], &mbuf);
+    const char *key    = JS_ToCString(ctx, argv[1], &kbuf);
+    const char *value  = JS_ToCString(ctx, argv[2], &vbuf);
+
+    if (module && key && value) {
+        kwcc_config_set(module, key, value);
+    }
+    return JS_UNDEFINED;
 }

@@ -19,7 +19,7 @@ DEP_SRCS = deps/nanovg/nanovg.c \
            deps/log/log.c \
            deps/picohttpparser/picohttpparser.c
 
-MQJS_SRCS = $(MQJS_CORE) $(DEP_SRCS) src/main.m src/kwcc.c src/jsapi.c
+MQJS_SRCS = $(MQJS_CORE) $(DEP_SRCS) src/main.m src/kwcc.c src/jsapi.c src/kwcc_io.c
 
 # Build directories
 BUILD_DIR = build
@@ -80,6 +80,9 @@ $(OBJ_DIR)/src/kwcc.o: src/kwcc.c $(MQJS_HEADERS) | $(OBJ_DIR)/src
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(OBJ_DIR)/src/jsapi.o: src/jsapi.c $(MQJS_HEADERS) | $(OBJ_DIR)/src
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJ_DIR)/src/kwcc_io.o: src/kwcc_io.c src/kwcc_io.h $(MQJS_HEADERS) | $(OBJ_DIR)/src
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # ── Create build directories ────────────────────────────────────

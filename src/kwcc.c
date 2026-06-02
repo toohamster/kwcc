@@ -60,6 +60,76 @@ void kwcc_set_js_context(JSContext *ctx) {
 
 static void kwcc_dispatch_event(JSContext *ctx, const char *topic, const char *action);
 
+/* ── Config system: C↔JS configuration management ───────────── */
+
+static kwcc_config_module_t g_config_modules[KWCC_CONFIG_MAX_MODULES];
+
+void kwcc_config_set(const char *module, const char *key, const char *value) {
+    if (!module || !key || !value) return;
+
+    /* Find existing module */
+    int mod_idx = -1;
+    for (int i = 0; i < KWCC_CONFIG_MAX_MODULES; i++) {
+        if (g_config_modules[i].in_use &&
+            strcmp(g_config_modules[i].module, module) == 0) {
+            mod_idx = i;
+            break;
+        }
+    }
+
+    /* Create new module slot if not found */
+    if (mod_idx < 0) {
+        for (int i = 0; i < KWCC_CONFIG_MAX_MODULES; i++) {
+            if (!g_config_modules[i].in_use) {
+                mod_idx = i;
+                g_config_modules[i].in_use = 1;
+                g_config_modules[i].entry_count = 0;
+                strncpy(g_config_modules[i].module, module, KWCC_CONFIG_MAX_KEY_LEN - 1);
+                g_config_modules[i].module[KWCC_CONFIG_MAX_KEY_LEN - 1] = '\0';
+                break;
+            }
+        }
+    }
+    if (mod_idx < 0) return;  /* No slots available */
+
+    kwcc_config_module_t *mod = &g_config_modules[mod_idx];
+
+    /* Update existing key or add new */
+    for (int i = 0; i < mod->entry_count; i++) {
+        if (strcmp(mod->entries[i].key, key) == 0) {
+            strncpy(mod->entries[i].value, value, KWCC_CONFIG_MAX_VALUE_LEN - 1);
+            mod->entries[i].value[KWCC_CONFIG_MAX_VALUE_LEN - 1] = '\0';
+            return;
+        }
+    }
+
+    /* Add new key */
+    if (mod->entry_count < 16) {
+        int idx = mod->entry_count++;
+        strncpy(mod->entries[idx].key, key, KWCC_CONFIG_MAX_KEY_LEN - 1);
+        mod->entries[idx].key[KWCC_CONFIG_MAX_KEY_LEN - 1] = '\0';
+        strncpy(mod->entries[idx].value, value, KWCC_CONFIG_MAX_VALUE_LEN - 1);
+        mod->entries[idx].value[KWCC_CONFIG_MAX_VALUE_LEN - 1] = '\0';
+    }
+}
+
+const char *kwcc_config_get(const char *module, const char *key, const char *default_value) {
+    if (!module || !key) return default_value;
+
+    for (int i = 0; i < KWCC_CONFIG_MAX_MODULES; i++) {
+        if (g_config_modules[i].in_use &&
+            strcmp(g_config_modules[i].module, module) == 0) {
+            kwcc_config_module_t *mod = &g_config_modules[i];
+            for (int j = 0; j < mod->entry_count; j++) {
+                if (strcmp(mod->entries[j].key, key) == 0) {
+                    return mod->entries[j].value;
+                }
+            }
+        }
+    }
+    return default_value;
+}
+
 static void kwcc_sync_module(const char *key, int visible) {
     g_current_mod_key = key;
     for (int i = 0; i < g_sync_count; i++) {
@@ -595,7 +665,14 @@ JSContext *kwcc_create_js(void) {
         "ui.loadFont = function(n,p) { kwcc_ui('loadFont',n,p); };\n"
         "ui.setFont = function(n) { kwcc_ui('setFont',n); };\n"
         "ui.loadFontDir = function(d) { kwcc_ui('loadFontDir',d); };\n"
-        "ui.svg = function(p,x,y,w,h) { kwcc_ui('svg',p,x||0,y||0,w||100,h||100); };\n";
+        "ui.svg = function(p,x,y,w,h) { kwcc_ui('svg',p,x||0,y||0,w||100,h||100); };\n"
+        "kwcc_config = function(module, options) {\n"
+        "    var keys = Object.keys(options);\n"
+        "    for (var i = 0; i < keys.length; i++) {\n"
+        "        var key = keys[i];\n"
+        "        kwcc_config_set(module, key, options[key]);\n"
+        "    }\n"
+        "};\n";
     JSValue meth_result = JS_Eval(ctx, methods_js, strlen(methods_js), "<kwcc>", 0);
     if (JS_IsException(meth_result)) {
         JSValue exc = JS_GetException(ctx);
