@@ -166,12 +166,14 @@ kwcc_mem_init(&spec);
 
 单槽位方案下，10 字节字符串占 512B 槽位 → 浪费 98%。采用 Redis 风格的 **slab 分配器**：每池内部分 3 个 size class，分配时选"刚好装得下"的桶，**浪费从 98% 降到 <50%**。
 
-### 防御性规则（4 条）
+### 防御性规则（6 条）
 
 1. **Fallback 仅限同池内部**：Small 满了 → 试 Medium → 试 Large。最大桶也满了 → 返回 NULL，**绝不跨池越界**抢其他池的内存。
 2. **Free List 必须是隐式链表**：每个空闲 chunk 的前 2 字节存下一个空闲块的 idx。分配从链表头拿，释放插回链表头，**任意顺序释放都是真 O(1)**。不能简单用 `free_list[--free_head]`（那要求严格 LIFO，实际释放顺序是随机的）。
 3. **Pool 函数原子化（不含 yield 点）**：所有 slab 操作（alloc/get/release/GC）是纯 C 函数，不包含阻塞或 yield，天然兼容 protothread。不需要加锁，调用方只需确保不在两次 pool 操作之间 yield 后跨 protothread 释放同一个 slot。
 4. **内存对齐**：`raw_memory` 使用 `aligned_alloc(16, size)` 确保 16 字节对齐（macOS `malloc` 默认 16 字节对齐，但显式声明更安全）。`chunk_size` 均为 2 的幂次方，天然对齐。
+5. **ref_count 语义（reentrancy 防护）**：`alloc()` 时 `ref_count = 0`（初始无人引用）。`acquire()` 加 1，`release()` 减 1。只有 `ref_count` 从 1 变为 0 时才真正回收槽位。无论 C 或 JS 侧调用，语义一致。**这防止单线程重入 bug**：C 侧持有数据时 JS_Eval 回调中提前 release，ref_count 不会立即归零（因为 C 侧也 acquire 了），slot 不会被立即释放。
+6. **内存泄漏防护（三层兜底）**：`alloc()` 后不调 `acquire()` 的槽位（ref=0）由 GC 回收。具体规则见「Reentrancy 与泄漏防护」专节。
 
 ### kwcc_slab_t（单个 slab）
 
@@ -232,10 +234,8 @@ typedef struct {
     uint8_t *data;              // 指向 slab chunk 的数据区
     uint32_t capacity;          // 该 chunk 固定配额大小
     uint32_t size;              // 当前实际装载的字节数
-    int16_t next_slot;          // 链式指针：大对象跨槽拼接（-1 = 无）
-    int16_t area_type;          // 0=CONFIG, 1=UI, 2=IO（仅 Core 池用）
     uint8_t in_use;             // 槽位占用标志
-    uint8_t ref_count;          // 引用计数（max 255）
+    uint8_t ref_count;          // 引用计数（max 255，0 = 无引用，等待 GC 回收）
     uint32_t alloc_time;        // 分配时的 time(NULL) 秒级时间戳
     uint32_t last_access;       // 最后一次 get/set 的 time(NULL)
     uint32_t timeout_sec;       // 超时秒数（0 = 永不超时，用于 EventSource 等持久连接）
@@ -332,19 +332,19 @@ void kwcc_pool_gc_force(kwcc_mem_pool_t *pool) {
     kwcc_pool_gc(pool);
 }
 
-/* 内部 GC 逻辑 */
+/* 内部 GC 逻辑 — 三层兜底 */
 static void _pool_gc_internal(kwcc_mem_pool_t *pool, uint32_t now) {
     for (uint32_t i = 0; i < pool->total_slot_count; i++) {
         kwcc_slot_t *s = &pool->slots[i];
         if (!s->in_use) continue;
 
-        // 1. 正常淘汰：ref=0 且 30 秒未访问
-        if (s->ref_count <= 0 && (now - s->last_access) > 30) {
+        // 第一层：ref=0 的孤儿槽位立即回收（无人认领的内存）
+        if (s->ref_count == 0) {
             _pool_free_slot(pool, s);
             continue;
         }
 
-        // 2. 超时回收：timeout_sec > 0 且已超时
+        // 第二层：超时强制回收（timeout_sec > 0 且已超时）
         if (s->timeout_sec > 0 && (now - s->alloc_time) >= s->timeout_sec) {
             log_warn("pool: slot %d (key=%s) expired after %ds, forcing reclaim",
                      i, s->key_buf, now - s->alloc_time);
@@ -358,10 +358,111 @@ static void _pool_gc_internal(kwcc_mem_pool_t *pool, uint32_t now) {
 
 | 操作 | 自动处理 | 开发者需要 |
 |------|---------|-----------|
-| 分配时 | `alloc_time`, `last_access` 自动设 | 指定 `timeout_sec`（0=不超时） |
+| 分配时 | `alloc_time`, `last_access` 自动设，`ref_count = 0` | 需要持久持有则调 `acquire()` |
 | 读取时 | `get()` 内自动更新 `last_access` | 无 |
-| 引用计数 | `acquire/release` 自动维护 | 调 `acquire`/`release` |
-| GC 清理 | 每 5 秒自动扫描 + 兜底回收 | 可选调 `gc_force` |
+| 引用计数 | `acquire/release` 自动维护，ref=0 时 GC 回收 | 调 `acquire`/`release` |
+| GC 清理 | 每 5 秒自动扫描：ref=0 立即回收 + timeout 兜底 | 可选调 `gc_force` |
+
+### Reentrancy 与内存泄漏防护
+
+#### 问题背景
+
+kwcc 是单线程架构，C→JS 的 Bridge 调用是**同步嵌套**：`JS_Eval()` 阻塞执行 JS 回调，完成后才返回 C 层。这导致经典的**单线程重入 bug**：
+
+```
+C: http_on_read()
+  ├─ slot = kwcc_pool_alloc()    → 分配槽位
+  ├─ recv(fd, slot->data)         → 接收数据中
+  ├─ kwcc_dispatch_event()        ← 同步调 JS_Eval("$bus.emit(...)")
+  │   └─ JS 回调:
+  │       $config.releaseUser()   ← JS 侧释放槽位
+  │   ← JS_Eval 返回
+  ├─ slot->data 继续使用...       ← 💥 slot 已被 JS 侧提前释放
+  └─ kwcc_pool_release()          ← 💥 二次释放 / 踩踏
+```
+
+从 `c_architecture.md` 确认的调用链：`frame() → kwcc_io_poll_once() → slot->callback() → kwcc_dispatch_event() → JS_Eval()`。
+
+#### 防护机制：ref_count + acquire/release 语义
+
+**核心规则**：
+
+| 操作 | ref_count 变化 | 说明 |
+|------|---------------|------|
+| `alloc()` | `ref_count = 0` | 初始无人引用 |
+| `acquire()` | `ref_count++` | 声明"我需要持有这个槽位" |
+| `release()` | `ref_count--` | 释放引用 |
+| `release()` 后 ref=0 | **不立即回收** | 等待 GC 回收（安全，不在嵌套栈上释放） |
+
+**C 侧标准用法**：
+
+```c
+http_on_read(int fd, void *user_data) {
+    kwcc_slot_t *s = kwcc_pool_alloc(pool, "http", 4096, 0);
+    if (!s) return;
+
+    kwcc_pool_acquire(pool, s);   // ← 声明 C 侧持有
+    recv(fd, s->data, s->capacity, 0);
+
+    // dispatch 给 JS（JS 侧 setUser 也会 acquire）
+    kwcc_dispatch_event(ctx, "http/data", s->key);
+
+    kwcc_pool_release(pool, s);   // ← C 侧放手，ref_count--
+    // 如果 JS 也 release 了，ref_count=0，下一轮 GC 回收
+    // 如果 JS 没 release，ref_count=1，由 timeout 兜底
+}
+```
+
+**即使 C 侧忘记 release**：
+
+```
+alloc → ref=0
+JS setUser → ref=1
+JS release → ref=0
+GC 扫到 ref=0 → 回收 ✅（不会泄漏）
+```
+
+#### 三层泄漏防护
+
+| 层级 | 条件 | 动作 | 处理场景 |
+|------|------|------|---------|
+| **第一层** | `ref_count == 0` | GC 立即回收 | C 忘记 release、early return 等 |
+| **第二层** | `timeout_sec > 0` 且超时 | 强制回收 + warn 日志 | 长期持有者忘记释放 |
+| **第三层** | `timeout_sec == 0` | 永不超时 | EventSource 等长连接，开发者需自行管理生命周期 |
+
+**关键设计**：
+
+- `alloc()` 后不调 `acquire()` 的槽位（ref=0），**下一轮 GC 自动回收**（最多 5 秒延迟）
+- `release()` 只减 ref_count，**不在调用栈上直接回收**，避免 reentrancy 踩踏
+- GC 是独立函数，不在 `http_on_read` 的调用栈上回收——即使 ref 归零，槽位也等到下一轮 GC 才标记空闲
+- EventSource 长连接：`timeout_sec=0` + C 侧主动 `acquire` 持有，不会被误杀
+
+#### 典型场景 ref_count 变化
+
+```
+场景：HTTP 响应
+  alloc()              → ref=0
+  C acquire()          → ref=1   （C 持有）
+  JS setUser()         → ref=2   （JS 持有）
+  C release()          → ref=1
+  JS release()         → ref=0
+  GC 扫到 ref=0        → 回收 ✅
+
+场景：C 忘记 release
+  alloc()              → ref=0
+  C acquire()          → ref=1
+  JS setUser()         → ref=2
+  JS release()         → ref=1
+  （C 忘记 release）   → ref=1
+  GC 扫到 ref=1        → 不回收
+  timeout 到期         → 强制回收 + warn ✅
+
+场景：不持有任何引用（一次性数据）
+  alloc()              → ref=0
+  JS setUser()         → ref=1
+  JS release()         → ref=0
+  GC 扫到 ref=0        → 回收 ✅
+```
 
 ### 全局声明
 
@@ -513,7 +614,7 @@ void kwcc_pool_dump_all(kwcc_mem_pool_t *pool, const char *filepath, int show_co
 
 1. ~~槽位查找算法~~ ✅ 线性扫描 + hash 预过滤
 2. ~~key 存储位置~~ ✅ 内联 32B + raw_memory fallback
-3. ~~超时/生命周期管理~~ ✅ 引用计数 + timeout_sec + 双 GC（节流 5s + 强制）
+3. ~~超时/生命周期管理~~ ✅ 引用计数 + timeout_sec + 三层兜底（ref=0 回收 + timeout 强制）
 4. ~~GC 与帧率解耦~~ ✅ 真实时间戳 + 独立函数 + 自动节流
 5. ~~分配时 slab 满 fallback~~ ✅ 试下一个更大的桶
 6. ~~分配时自动更新时间~~ ✅ alloc/last_access 在 alloc 时自动设
@@ -524,6 +625,8 @@ void kwcc_pool_dump_all(kwcc_mem_pool_t *pool, const char *filepath, int show_co
    - `__kwcc_config` → ✅ 迁移到 **App 池**，替代旧的 JS `__kwcc_config` 全局对象方案
 9. ~~错误处理~~ ✅ 分配失败返回 NULL + warn 日志，不返回错误码；JS 层返回 undefined 静默失败
 10. ~~文件拆分~~ ✅ 独立 `kwcc_pool.c/h`，不塞入 `kwcc_base.h`
+11. ~~单线程 Reentrancy 防护~~ ✅ ref_count + acquire/release 语义，release 不直接回收
+12. ~~内存泄漏防护~~ ✅ 三层兜底：ref=0 GC 回收 + timeout 强制 + 开发者自行管理（timeout=0）
 
 ---
 
@@ -559,3 +662,9 @@ void kwcc_pool_dump_all(kwcc_mem_pool_t *pool, const char *filepath, int show_co
 | Free List 栈结构 | ❌ 随机释放会踩踏 → 改为 chunk 内嵌隐式链表（任意顺序真 O(1)） |
 | Pool 函数原子化 | ✅ 纯 C 函数不含 yield，天然兼容 protothread，不加锁 |
 | 内存对齐 | ✅ macOS malloc 天然 16 字节对齐，非 macOS 用 aligned_alloc(16) 兜底 |
+| alloc 时 ref_count 初始值 | ✅ `ref_count = 0`（不是 1），需要持久持有则显式 `acquire()` |
+| release 语义 | ✅ 只减 ref_count，不直接回收槽位（防 reentrancy 踩踏） |
+| ref=0 何时回收 | ✅ 由 GC 统一回收，不在 release 调用点回收 |
+| 内存泄漏防护 | ✅ 三层：ref=0 GC 回收 + timeout 强制 + 开发者管理（timeout=0） |
+| C 忘记 release | ✅ 不会泄漏，JS release 后 ref=0 由 GC 回收，或 timeout 兜底 |
+| early return 泄漏 | ✅ timeout_sec > 0 时不会永久泄漏，GC 强制回收 |
