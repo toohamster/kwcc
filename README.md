@@ -56,6 +56,7 @@ make && ./kwcc
 │   ├── kwcc.c       # config JSValue 存储实现
 │   ├── kwcc_ui.c/h  # UI 模块（g_mu、microui 桥接、input、SVG、字体）
 │   ├── kwcc_js.c/h  # JS lifecycle（create/destroy JSContext、stdlib stubs）
+│   ├── kwcc_bus.c/h # C→JS 消息总线桥接（topic map + dispatch_event + bind_topic）
 │   ├── kwcc.h       # 入口 umbrella header（聚合各模块头文件）
 │   └── kwcc_io.h    # I/O 模块声明
 ├── app/

@@ -56,7 +56,8 @@
 │   ├── kwcc.c       # config JSValue 存储实现（无 microui）
 │   ├── kwcc_ui.c/h  # UI 模块（g_mu、microui 桥接、input、SVG、字体、register_ui）
 │   ├── kwcc_js.c/h  # JS lifecycle（create/destroy JSContext、stdlib stubs、kwcc_ui 桥接）
-│   ├── kwcc.h       # 入口 umbrella header（聚合 kwcc_base/ui/js/io 头文件）
+│   ├── kwcc_bus.c/h # C→JS 消息总线桥接（topic map + dispatch_event + bind_topic）
+│   ├── kwcc.h       # 入口 umbrella header（聚合 kwcc_base/ui/bus/js/io 头文件）
 │   ├── kwcc_io.h    # I/O 模块声明
 │   └── llog.h       # 日志包装器 (解决 macOS syslog.h 宏冲突)
 ├── app/             # 脚本层
@@ -147,7 +148,7 @@ loadJs("app/modules/examples/calc/calc_view.js"); // 注册视图
 
 **每帧渲染**：`onFrame()` 遍历所有已注册模块，自动调用 `ui.sync(key, visible)` + `render(state)`。
 
-**事件流**：用户操作 → microui → C 层全局回调 → `kwcc_dispatch_event` → `$bus.emit(topic, action, data)` → JS handler → `$store.dispatch(module, action, payload)` → state 更新 → 下一帧 `onFrame` 刷新。
+**事件流**：用户操作 → microui → C 层全局回调 → `kwcc_bus.c` → `kwcc_dispatch_event` → `$bus.emit(topic, action, data)` → JS handler → `$store.dispatch(module, action, payload)` → state 更新 → 下一帧 `onFrame` 刷新。
 
 **状态持久化**：`$loadedFiles` 记录 JS 文件加载次数，防止重复加载。`registerModule/View/Topic` 内部去重，防止重复注册。
 
@@ -161,7 +162,7 @@ loadJs("app/modules/examples/calc/calc_view.js"); // 注册视图
   - `#define NANOVG_GL3_IMPLEMENTATION`
 - **两阶段构建**:
   1. 编译 host tool (`mquickjs_build.c` + `mqjs_stdlib.c`) → 生成 `mqjs_stdlib.h`
-  2. 编译主二进制 (mquickjs.c + cutils.c + dtoa.c + libm.c + bridge.c + main.m)
+  2. 编译主二进制 (mquickjs.c + cutils.c + dtoa.c + libm.c + main.m + kwcc.c + kwcc_ui.c + kwcc_js.c + kwcc_bus.c)
 - **链接框架**:
   - `-framework Cocoa -framework OpenGL -framework IOKit -framework QuartzCore`
 - **静态集成**: 仅将核心 4 个 .c 文件编译进最终的可执行文件。
@@ -230,6 +231,15 @@ loadJs("app/modules/examples/calc/calc_view.js"); // 注册视图
 - **窗口挡板**：`ui.sync(key, visible)` + C 层可见性拦截，支持状态驱动窗口显隐
 - **示例迁移**：calculator、test、svg 全部迁移到 `app/modules/examples/` 目录
 - **加载保护**：`loadJs(path)` 防止重复加载，`register*` 内部去重防止重复注册
+
+### 第十步：提取 EventBus 到 kwcc_bus 独立模块 ✅
+
+将 C→JS 消息总线桥接从 `kwcc_ui.c` 提取到独立 `kwcc_bus.c/h` 模块：
+
+- `kwcc_bus.c`：topic map + `kwcc_dispatch_event` + `kwcc_bind_topic` + `kwcc_bus_begin_frame`
+- `kwcc_bus.h`：纯消息总线声明，无 microui 类型
+- `kwcc_ui.c`：移除 bus 代码，include `kwcc_bus.h`，`kwcc_begin_frame` 内部调 `kwcc_bus_begin_frame`
+- topic map 的 ID 类型从 `mu_Id` 改为 `int`，通用分发服务
 
 ---
 

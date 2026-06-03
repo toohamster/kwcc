@@ -39,7 +39,7 @@ make run
 
 **Two-stage build:**
 1. Stage 1 compiles a host tool (`mquickjs_build.c` + `mqjs_stdlib.c`) -> generates `mqjs_stdlib.h` and `mquickjs_atom.h` at build time
-2. Stage 2 compiles the main binary using only 4 mquickjs core .c files + project .c files: `mquickjs.c`, `cutils.c`, `dtoa.c`, `libm.c` + `main.m` + `kwcc.c` + `kwcc_ui.c` + `kwcc_js.c` + `kwcc_io.c`
+2. Stage 2 compiles the main binary using only 4 mquickjs core .c files + project .c files: `mquickjs.c`, `cutils.c`, `dtoa.c`, `libm.c` + `main.m` + `kwcc.c` + `kwcc_ui.c` + `kwcc_js.c` + `kwcc_io.c` + `kwcc_bus.c`
 
 **Key compiler flags:** `clang`, `-Wall -Wextra -fobjc-arc -O0 -D_GNU_SOURCE -fno-math-errno -fno-trapping-math`. macOS requires `main.m` (Objective-C) for Sokol.
 
@@ -64,6 +64,8 @@ make run
 │   ├── kwcc_ui.h       # UI module declarations + SVG cache extern
 │   ├── kwcc_js.c       # JS lifecycle: kwcc_create/destroy_js + stdlib stubs + kwcc_ui bridge
 │   ├── kwcc_js.h       # JS lifecycle + stubs declarations
+│   ├── kwcc_bus.c      # C→JS message bus: topic map + dispatch_event + bind_topic
+│   ├── kwcc_bus.h      # Message bus declarations (no microui types)
 │   ├── kwcc.h          # Umbrella header (includes all module headers)
 │   └── llog.h          # Logging wrapper (wraps rxi/log.h, handles syslog.h conflicts)
 ├── app/
@@ -103,6 +105,13 @@ The `ui` object is injected via `kwcc_ui()` global function + JS wrapper in `kwc
 - `ui.loadFont(name, path)` / `ui.setFont(name)` / `ui.loadFontDir(dir)` — font management
 
 **Framework globals**: `$store`, `$bus`, `$topics`, `$modules`, `registerModule()`, `registerModuleView()`, `registerTopic()`, `loadJs(path, once)`
+
+### C→JS Message Bus
+
+`kwcc_bus.c/h` provides a C→JS message bus bridge for any module:
+- `kwcc_dispatch_event(ctx, topic, action)` — emits `$bus.emit(topic, action, new Object())` to JS
+- `kwcc_bind_topic(id, topic)` — registers ID→topic mapping in the per-frame topic map
+- `kwcc_bus_begin_frame()` — resets topic map at start of each frame
 
 ### Logging
 Use `llog.h` — provides `log_trace()`, `log_debug()`, `log_info()`, `log_warn()`, `log_error()`, `log_fatal()`. Wraps rxi/log.h and handles macOS syslog.h macro conflicts (`LOG_INFO` etc.). Logs to both `output.log` and stdout.
