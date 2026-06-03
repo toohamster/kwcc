@@ -32,6 +32,12 @@
 - **nanosvg (SVG 解析)**: `nanosvg.h`
   - 来源: `https://github.com/memononen/nanosvg`
   - 目录: `deps/nanosvg/`
+- **log (日志库)**: `log.c`, `log.h`
+  - 来源: `https://github.com/rxi/log.c`
+  - 目录: `deps/log/`
+- **picohttpparser (HTTP 解析器)**: `picohttpparser.c`, `picohttpparser.h`
+  - 来源: `https://github.com/h2o/picohttpparser`
+  - 目录: `deps/picohttpparser/`
 - **mquickjs (轻量脚本引擎)**: 核心解释器 + 两阶段构建工具
   - 核心 (4 个 .c，链接到最终二进制): `mquickjs.c`, `cutils.c`, `dtoa.c`, `libm.c`
   - 构建工具 (2 个 .c，仅在 make 时运行): `mquickjs_build.c`, `mqjs_stdlib.c`
@@ -49,6 +55,8 @@
 │   ├── nanovg/      #   NanoVG 核心 + GL 后端
 │   ├── nanosvg/     #   nanosvg SVG 解析器 (单头库)
 │   ├── microui/     #   microui IMGUI
+│   ├── log/         #   rxi/log.c 日志库
+│   ├── picohttpparser/ # picohttpparser HTTP 响应解析器
 │   └── mquickjs/    #   mquickjs 解释器核心 + 构建工具
 ├── src/             # 项目 C 源码
 │   ├── main.m       # Sokol 窗口生命周期与渲染主循环 (Objective-C)
