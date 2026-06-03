@@ -173,6 +173,7 @@ static void init(void) {
         }
     }
 
+    kwcc_mem_init_defaults();   /* 0. memory pool */
     js_ctx = kwcc_create_js();    /* 1. JSContext + config init */
     kwcc_ui_init();               /* 2. microui text callbacks */
     kwcc_register_ui(js_ctx);     /* 3. UI methods */
@@ -213,6 +214,7 @@ static void cleanup(void) {
     if (vg) { nvgDeleteGL3(vg); vg = NULL; }
     kwcc_destroy_js(js_ctx);
     kwcc_ui_free();
+    kwcc_mem_shutdown();
     sg_shutdown();
 }
 

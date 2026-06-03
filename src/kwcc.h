@@ -3,6 +3,7 @@
 #define KWCC_H
 
 #include "kwcc_base.h"
+#include "kwcc_pool.h"
 #include "kwcc_bus.h"
 #include "kwcc_ui.h"
 #include "kwcc_js.h"
