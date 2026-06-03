@@ -166,20 +166,61 @@ kwcc_mem_init(&spec);
 
 单槽位方案下，10 字节字符串占 512B 槽位 → 浪费 98%。采用 Redis 风格的 **slab 分配器**：每池内部分 3 个 size class，分配时选"刚好装得下"的桶，**浪费从 98% 降到 <50%**。
 
+### 防御性规则（4 条）
+
+1. **Fallback 仅限同池内部**：Small 满了 → 试 Medium → 试 Large。最大桶也满了 → 返回 NULL，**绝不跨池越界**抢其他池的内存。
+2. **Free List 必须是隐式链表**：每个空闲 chunk 的前 2 字节存下一个空闲块的 idx。分配从链表头拿，释放插回链表头，**任意顺序释放都是真 O(1)**。不能简单用 `free_list[--free_head]`（那要求严格 LIFO，实际释放顺序是随机的）。
+3. **Pool 函数原子化（不含 yield 点）**：所有 slab 操作（alloc/get/release/GC）是纯 C 函数，不包含阻塞或 yield，天然兼容 protothread。不需要加锁，调用方只需确保不在两次 pool 操作之间 yield 后跨 protothread 释放同一个 slot。
+4. **内存对齐**：`raw_memory` 使用 `aligned_alloc(16, size)` 确保 16 字节对齐（macOS `malloc` 默认 16 字节对齐，但显式声明更安全）。`chunk_size` 均为 2 的幂次方，天然对齐。
+
 ### kwcc_slab_t（单个 slab）
 
 ```c
 typedef struct {
-    uint32_t chunk_size;     // 该 slab 的块大小
+    uint32_t chunk_size;     // 该 slab 的块大小（2 的幂次方，天然对齐）
     uint32_t chunk_count;    // 块数
-    uint8_t *memory;         // 连续内存块（从 pool->raw_memory 切分）
-    uint16_t *free_list;     // 空闲块索引数组
-    uint16_t  free_head;     // 空闲链表头（= chunk_count 表示空）
+    uint8_t *memory;         // 连续内存块（从 pool->raw_memory 切分，16 字节对齐）
+    uint16_t  free_head;     // 空闲链表头（存的是 idx，-1 表示空）
 } kwcc_slab_t;
 ```
 
-分配 O(1)：`idx = free_list[free_head++]`
-释放 O(1)：`free_list[--free_head] = idx`
+**空闲块内嵌链表**（每个空闲 chunk 的前 2 字节存 next idx）：
+
+```
+空闲时：chunk 内部 [next_idx(2B) | 实际可用数据区(chunk_size - 2B)]
+分配时：从 free_head 取出 idx，该 chunk 被占用
+释放时：将 next_idx 写入 chunk 前 2 字节，插回 free_head 链表头
+```
+
+分配 O(1)：
+```c
+uint16_t slab_alloc(kwcc_slab_t *slab) {
+    if (slab->free_head == 0xFFFF) return 0xFFFF;  // 空链表
+    uint16_t idx = slab->free_head;
+    uint16_t *next = (uint16_t *)(slab->memory + idx * slab->chunk_size);
+    slab->free_head = *next;
+    return idx;
+}
+```
+
+释放 O(1)（任意顺序安全）：
+```c
+void slab_free(kwcc_slab_t *slab, uint16_t idx) {
+    uint16_t *next = (uint16_t *)(slab->memory + idx * slab->chunk_size);
+    *next = slab->free_head;
+    slab->free_head = idx;
+}
+```
+
+**初始化时构建链表**：
+```c
+for (uint32_t i = 0; i < slab->chunk_count - 1; i++) {
+    uint16_t *next = (uint16_t *)(slab->memory + i * slab->chunk_size);
+    *next = i + 1;
+}
+*(uint16_t *)(slab->memory + (slab->chunk_count - 1) * slab->chunk_size) = 0xFFFF;
+slab->free_head = 0;
+```
 
 ### kwcc_slot_t（单个槽位元数据）
 
@@ -258,30 +299,19 @@ kwcc_slot_t* kwcc_pool_alloc(kwcc_mem_pool_t *pool, const char *key,
         kwcc_slab_t *slab = &pool->slabs[i];
         if (slab->chunk_size < size) continue;
 
-        // 2. 尝试分配
-        if (slab->free_head >= slab->chunk_count) {
-            continue;  // 当前桶满了，试下一个更大的
+        // 2. 从隐式链表分配（O(1)，任意释放顺序安全）
+        uint16_t idx = slab_alloc(slab);
+        if (idx == 0xFFFF) {
+            continue;  // 当前桶满了，试下一个更大的桶（同池内冒泡）
         }
-        uint32_t idx = slab->free_list[slab->free_head++];
-        kwcc_slot_t *s = &pool->slots[idx];
 
-        // 3. 初始化槽位
-        s->hash = fnv1a(key);
-        s->key_buf[31] = '\0';
-        strncpy(s->key_buf, key, 31);
-        s->key = s->key_buf;  // 短 key 走内联
+        kwcc_slot_t *s = &pool->slots[idx];
+        // 3. 初始化槽位（同前文）...
         s->data = slab->memory + idx * slab->chunk_size;
-        s->capacity = slab->chunk_size;
-        s->size = 0;
-        s->next_slot = -1;
-        s->in_use = 1;
-        s->ref_count = 1;
-        s->alloc_time = now;
-        s->last_access = now;  // ← 分配时自动设，防 GC 误杀
-        s->timeout_sec = timeout_sec;
+        // ...
         return s;
     }
-    return NULL;  // 池满
+    return NULL;  // 池满，绝不跨池越界
 }
 ```
 
@@ -525,3 +555,7 @@ void kwcc_pool_dump_all(kwcc_mem_pool_t *pool, const char *filepath, int show_co
 | JS API 统一入口 | ✅ `$config` 一个全局变量，`setApp/setUser/getApp/getUser/releaseApp/releaseUser` |
 | 文件拆分方式 | ✅ 独立 `kwcc_pool.c/h`，不塞入 `kwcc_base.h` |
 | 错误处理方式 | ✅ 分配失败返回 NULL + warn 日志，不返回错误码；JS 层返回 undefined 静默失败 |
+| Fallback 跨池越界 | ❌ 禁止，仅限同池内 Small→Medium→Large 冒泡，最大桶满 → NULL |
+| Free List 栈结构 | ❌ 随机释放会踩踏 → 改为 chunk 内嵌隐式链表（任意顺序真 O(1)） |
+| Pool 函数原子化 | ✅ 纯 C 函数不含 yield，天然兼容 protothread，不加锁 |
+| 内存对齐 | ✅ macOS malloc 天然 16 字节对齐，非 macOS 用 aligned_alloc(16) 兜底 |
