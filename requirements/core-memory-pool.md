@@ -91,6 +91,11 @@ void kwcc_pool_configure(kwcc_mem_pool_t *pool, size_t size);
 每块内部按 3 个 size class 分 slab，分配时选最小适配桶
 ```
 
+**注意**：每个池内部有两块独立的 malloc：
+- `pool->slots` → `kwcc_slot_t` 元数据数组（独立小 malloc，管理索引）
+- `pool->raw_memory` → slab 数据区（大内存块，存 chunk）
+- 两者互不干扰，元数据增减字段不影响 chunk 数量。
+
 ### 各段规格与 Slab 划分
 
 #### Core 池 (32 KB) — 引擎内部状态
@@ -254,6 +259,7 @@ void kwcc_pool_slab_free(kwcc_slab_t *slab, uint16_t idx) {
 **初始化时构建链表**：
 ```c
 void kwcc_pool_slab_init(kwcc_slab_t *slab) {
+    assert(slab->chunk_size > 0 && (slab->chunk_size & (slab->chunk_size - 1)) == 0);  // 必须 2 的幂
     for (uint32_t i = 0; i < slab->chunk_count - 1; i++) {
         uint16_t *next = (uint16_t *)(slab->memory + i * slab->chunk_size);
         *next = i + 1;
@@ -281,6 +287,13 @@ static void *kwcc_pool_aligned_malloc(size_t size, size_t align) {
 #endif
 }
 
+static void *kwcc_pool_aligned_malloc_checked(size_t size, size_t align) {
+    void *ptr = kwcc_pool_aligned_malloc(size, align);
+    if (!ptr) return NULL;
+    assert(((uintptr_t)ptr & (align - 1)) == 0);  // 验证对齐
+    return ptr;
+}
+
 static void kwcc_pool_aligned_free(void *ptr) {
 #ifdef _WIN32
     _aligned_free(ptr);
@@ -301,10 +314,12 @@ typedef struct {
     uint32_t capacity;          // 该 chunk 固定配额大小
     uint32_t size;              // 当前实际装载的字节数
     uint8_t in_use;             // 槽位占用标志
+    uint8_t slab_idx;           // 所属 slab 索引（0=Small, 1=Medium, 2=Large）
     uint16_t ref_count;         // 引用计数（max 65535，0 = 无引用，等待 GC 回收；acquire 时检查溢出）
     uint32_t alloc_time;        // 分配时的 time(NULL) 秒级时间戳
     uint32_t last_access;       // 最后一次 get/set 的 time(NULL)
     uint32_t timeout_sec;       // 超时秒数（0 = 永不超时，用于 EventSource 等持久连接）
+                                // 注意：超时是「分配后多久强制回收」，非「最后访问后多久」
 } kwcc_slot_t;
 ```
 
@@ -472,9 +487,20 @@ C: http_on_read()
 | 操作 | ref_count 变化 | 说明 |
 |------|---------------|------|
 | `alloc()` | `ref_count = 0` | 初始无人引用 |
-| `acquire()` | `ref_count++` | 声明"我需要持有这个槽位"。溢出时打 error 日志并忽略 |
+| `acquire()` | `ref_count++`（溢出时打 error 日志并忽略递增，避免回绕为 0） | 声明"我需要持有这个槽位" |
 | `release()` | `ref_count--` | 释放引用 |
 | `release()` 后 ref=0 | **不立即回收** | 等待 GC 回收（安全，不在嵌套栈上释放） |
+
+**acquire 溢出处理**：
+```c
+void kwcc_pool_acquire(kwcc_mem_pool_t *pool, kwcc_slot_t *slot) {
+    if (slot->ref_count == UINT16_MAX) {
+        log_error("pool: slot %s ref_count overflow (max %d)", slot->key, UINT16_MAX);
+        return;  // 溢出时不递增，避免回绕为 0 导致误回收
+    }
+    slot->ref_count++;
+}
+```
 
 **C 侧标准用法**：
 
@@ -591,16 +617,16 @@ void         kwcc_pool_dump_stats(kwcc_mem_pool_t *pool);
 
 ```javascript
 // App 池：模块配置（永久，timeout=0）
-$config.setApp(key, val)      // 写入 App 池
+$config.setApp(key, val)      // 写入 App 池；分配失败时 console.warn + 返回 undefined
 $config.setApp(key, null)     // 释放 App 池（等同于 releaseApp，与 setUser 语义一致）
-$config.getApp(key)            // 从 App 池读取
+$config.getApp(key)            // 从 App 池读取；未找到返回 undefined
 $config.releaseApp(key)        // 手动释放 App 池
 
 // User 池：临时数据（可指定超时秒数）
-$config.setUser(key, val)      // 写入 User 池（默认不超时）
-$config.setUser(key, val, 30)  // 写入 User 池，30 秒超时
+$config.setUser(key, val)      // 写入 User 池；分配失败时 console.warn + 返回 undefined
+$config.setUser(key, val, 30)  // 写入 User 池，30 秒超时；分配失败时 console.warn + 返回 undefined
 $config.setUser(key, null)     // 释放 User 池（等同于 releaseUser，与 setApp 语义一致）
-$config.getUser(key)           // 从 User 池读取
+$config.getUser(key)           // 从 User 池读取；未找到返回 undefined
 $config.releaseUser(key)       // 手动释放 User 池
 
 // 调试
@@ -688,6 +714,38 @@ void kwcc_pool_dump_all(kwcc_mem_pool_t *pool, const char *filepath, int show_co
 - JS 正常 `var` 变量继续用 mquickjs 堆
 - `$config` 只给需要跨帧持久化 / 大缓冲的场景（**可选使用**）
 - 方法名直接体现池子，一目了然
+
+### 编译宏管控
+
+调试功能通过 `KWCC_DEBUG` 编译宏控制，不影响发布包体积：
+
+```c
+/* kwcc_base.h 中定义 */
+#ifndef KWCC_DEBUG
+#define KWCC_DEBUG 0
+#endif
+```
+
+**受控内容**：
+| 函数/功能 | 条件编译 |
+|-----------|---------|
+| `kwcc_pool_dump_stats()` | `#ifdef KWCC_DEBUG` |
+| `kwcc_pool_dump_all()` | `#ifdef KWCC_DEBUG` |
+| JS `$config.dump()` / `$config.dumpAll()` | `#ifdef KWCC_DEBUG` |
+| 所有 `log_warn` / `log_error` 调试日志 | 不受控（生产也需要） |
+
+发布时 `-DKWCC_DEBUG=0` 编译，调试函数被剔除。
+
+### JS Bridge 错误处理
+
+| 场景 | C 层行为 | JS 层行为 |
+|------|---------|----------|
+| 分配成功 | 返回 slot 指针 | 返回 key（成功标识） |
+| 池满 | 返回 NULL + `log_warn` | `console.warn("pool: {pool_name} full, alloc failed key=%s", key)` + 返回 `undefined` |
+| key 不存在 | 返回 NULL | 返回 `undefined` |
+| key 为 null/undefined | 返回 NULL | 返回 `undefined` |
+
+**业务层兜底建议**：JS 侧检查返回值是否为 `undefined`，可做 fallback（如 User 池满 → 尝试 Core 池，或降级到 mquickjs 堆）。
 
 ### 旧 `__kwcc_config` 迁移与清理步骤
 
@@ -802,6 +860,11 @@ void kwcc_pool_dump_all(kwcc_mem_pool_t *pool, const char *filepath, int show_co
 | 内存对齐 | ✅ 封装 kwcc_pool_aligned_malloc 跨平台函数 |
 | 函数命名规范 | ✅ 三段式 `kwcc_{模块}_{动作}`，内部函数用 `static` + 统一前缀 |
 | JS API 一致性 | ✅ setApp/setUser(key, null) 语义统一为释放 |
+| slot slab_idx | ✅ 槽位加 uint8_t slab_idx，释放时 O(1) 定位所属 slab |
+| 内存对齐断言 | ✅ slab_init 加 assert 检查 2 的幂，aligned_malloc 返回后校验对齐 |
+| KWCC_DEBUG 编译宏 | ✅ dump 函数包裹 #ifdef KWCC_DEBUG，发布时剔除 |
+| JS Bridge 错误处理 | ✅ 分配失败 console.warn + undefined，文档明确 fallback 规则 |
+| timeout_sec 语义 | ✅ 文档明确"分配后多久强制回收"，非"最后访问后多久" |
 | GC 80% 阈值 | ✅ 池使用率 >80% 自动触发强制 GC，不等节流 |
 | 旧 __kwcc_config 清理 | ✅ 迁移验证后执行 6 步清理（C/JS/Makefile 全面移除） |
 | hash 桶表扩展 | ❌ 不需要，最大池 832 槽线性扫描 ≈ 1~3 微秒 |
