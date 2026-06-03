@@ -107,9 +107,9 @@ void kwcc_pool_configure(kwcc_mem_pool_t *pool, size_t size);
 
 | Slab | 块数 × 块大小 | 合计 | 用途 |
 |------|-------------|------|------|
-| Small | 64 × 256B | 16 KB | 小缓冲 |
-| Medium | 64 × 1KB | 64 KB | SVG path 数据、UI 文本 |
-| Large | 11 × 16KB | 176 KB | IO/HTTP 接收缓冲 |
+| Small | 256 × 256B | 64 KB | 小缓冲 |
+| Medium | 128 × 1KB | 128 KB | SVG path 数据、UI 文本 |
+| Large | 4 × 16KB | 64 KB | IO/HTTP 接收缓冲 |
 
 #### User 池 (1 MB 默认，运行时可配) — JS 业务层
 
@@ -118,6 +118,16 @@ void kwcc_pool_configure(kwcc_mem_pool_t *pool, size_t size);
 | Small | 256 × 256B | 64 KB | JS 短数据 |
 | Medium | 512 × 1KB | 512 KB | JS 正常数据 |
 | Large | 64 × 4KB | 256 KB | JS 大缓冲 |
+
+#### 各池槽位总数汇总
+
+| 池 | 槽位总数 | 最大 chunk | 说明 |
+|---|---------|-----------|------|
+| Core (32 KB) | 64 + 64 + 12 = **140** | 1 KB | 引擎内部 |
+| App (256 KB) | 256 + 128 + 4 = **388** | 16 KB | 模块缓冲 / IO / HTTP |
+| User (1 MB) | 256 + 512 + 64 = **832** | 4 KB | JS 业务层 |
+
+**最大池 832 槽，线性扫描 ≈ 1~3 微秒**，hash 桶表不需要。
 
 ### 配置方式
 
@@ -171,9 +181,36 @@ kwcc_mem_init(&spec);
 1. **Fallback 仅限同池内部**：Small 满了 → 试 Medium → 试 Large。最大桶也满了 → 返回 NULL，**绝不跨池越界**抢其他池的内存。
 2. **Free List 必须是隐式链表**：每个空闲 chunk 的前 2 字节存下一个空闲块的 idx。分配从链表头拿，释放插回链表头，**任意顺序释放都是真 O(1)**。不能简单用 `free_list[--free_head]`（那要求严格 LIFO，实际释放顺序是随机的）。
 3. **Pool 函数原子化（不含 yield 点）**：所有 slab 操作（alloc/get/release/GC）是纯 C 函数，不包含阻塞或 yield，天然兼容 protothread。不需要加锁，调用方只需确保不在两次 pool 操作之间 yield 后跨 protothread 释放同一个 slot。
-4. **内存对齐**：`raw_memory` 使用 `aligned_alloc(16, size)` 确保 16 字节对齐（macOS `malloc` 默认 16 字节对齐，但显式声明更安全）。`chunk_size` 均为 2 的幂次方，天然对齐。
+4. **内存对齐**：封装 `kwcc_aligned_malloc(size, align)` 跨平台函数，macOS/Linux 用 `aligned_alloc`，Windows 用 `_aligned_malloc`，其他平台 fallback 到 malloc + 手动对齐。`raw_memory` 统一用此函数分配，确保 16 字节对齐。`chunk_size` 均为 2 的幂次方，天然对齐。
 5. **ref_count 语义（reentrancy 防护）**：`alloc()` 时 `ref_count = 0`（初始无人引用）。`acquire()` 加 1，`release()` 减 1。只有 `ref_count` 从 1 变为 0 时才真正回收槽位。无论 C 或 JS 侧调用，语义一致。**这防止单线程重入 bug**：C 侧持有数据时 JS_Eval 回调中提前 release，ref_count 不会立即归零（因为 C 侧也 acquire 了），slot 不会被立即释放。
 6. **内存泄漏防护（三层兜底）**：`alloc()` 后不调 `acquire()` 的槽位（ref=0）由 GC 回收。具体规则见「Reentrancy 与泄漏防护」专节。
+
+### Pool 内部函数命名规范
+
+所有函数严格遵循 `kwcc_{模块}_{动作}` 三段式命名：
+
+| 层级 | 前缀 | 可见性 | 示例 |
+|------|------|--------|------|
+| 公开 API | `kwcc_pool_*` | 外部可见 | `kwcc_pool_alloc`, `kwcc_pool_release` |
+| 内部辅助 | `kwcc_pool_*` 或 `pool_*` | `static`（仅 kwcc_pool.c） | `kwcc_pool_slab_alloc`, `kwcc_pool_gc_internal` |
+
+```
+模块前缀: kwcc_pool_
+            ↓
+  slab 底层操作:
+    kwcc_pool_slab_alloc(slab)      → 从隐式链表分配一个 chunk
+    kwcc_pool_slab_free(slab, idx)  → 归还 chunk 到链表
+    kwcc_pool_slab_init(slab)       → 初始化空闲链表
+
+  内存对齐辅助:
+    kwcc_pool_aligned_malloc(size, align)
+    kwcc_pool_aligned_free(ptr)
+
+  GC 内部:
+    kwcc_pool_gc_internal(pool, now)    → 核心扫描逻辑
+    kwcc_pool_free_slot(pool, slot)     → 释放单个槽位
+    kwcc_pool_force_invalidate(pool, s) → 强制回收超时槽位
+```
 
 ### kwcc_slab_t（单个 slab）
 
@@ -196,7 +233,7 @@ typedef struct {
 
 分配 O(1)：
 ```c
-uint16_t slab_alloc(kwcc_slab_t *slab) {
+uint16_t kwcc_pool_slab_alloc(kwcc_slab_t *slab) {
     if (slab->free_head == 0xFFFF) return 0xFFFF;  // 空链表
     uint16_t idx = slab->free_head;
     uint16_t *next = (uint16_t *)(slab->memory + idx * slab->chunk_size);
@@ -207,7 +244,7 @@ uint16_t slab_alloc(kwcc_slab_t *slab) {
 
 释放 O(1)（任意顺序安全）：
 ```c
-void slab_free(kwcc_slab_t *slab, uint16_t idx) {
+void kwcc_pool_slab_free(kwcc_slab_t *slab, uint16_t idx) {
     uint16_t *next = (uint16_t *)(slab->memory + idx * slab->chunk_size);
     *next = slab->free_head;
     slab->free_head = idx;
@@ -216,12 +253,41 @@ void slab_free(kwcc_slab_t *slab, uint16_t idx) {
 
 **初始化时构建链表**：
 ```c
-for (uint32_t i = 0; i < slab->chunk_count - 1; i++) {
-    uint16_t *next = (uint16_t *)(slab->memory + i * slab->chunk_size);
-    *next = i + 1;
+void kwcc_pool_slab_init(kwcc_slab_t *slab) {
+    for (uint32_t i = 0; i < slab->chunk_count - 1; i++) {
+        uint16_t *next = (uint16_t *)(slab->memory + i * slab->chunk_size);
+        *next = i + 1;
+    }
+    *(uint16_t *)(slab->memory + (slab->chunk_count - 1) * slab->chunk_size) = 0xFFFF;
+    slab->free_head = 0;
 }
-*(uint16_t *)(slab->memory + (slab->chunk_count - 1) * slab->chunk_size) = 0xFFFF;
-slab->free_head = 0;
+```
+
+### 跨平台内存对齐分配
+
+```c
+static void *kwcc_pool_aligned_malloc(size_t size, size_t align) {
+#ifdef __APPLE__
+    return malloc(size);
+#elif defined(__linux__)
+    return aligned_alloc(align, size);
+#elif defined(_WIN32)
+    return _aligned_malloc(size, align);
+#else
+    void *ptr = malloc(size + align + sizeof(void *));
+    void *aligned = (void *)(((uintptr_t)ptr + align + sizeof(void *)) & ~(align - 1));
+    ((void **)aligned)[-1] = ptr;
+    return aligned;
+#endif
+}
+
+static void kwcc_pool_aligned_free(void *ptr) {
+#ifdef _WIN32
+    _aligned_free(ptr);
+#else
+    free(ptr);
+#endif
+}
 ```
 
 ### kwcc_slot_t（单个槽位元数据）
@@ -235,7 +301,7 @@ typedef struct {
     uint32_t capacity;          // 该 chunk 固定配额大小
     uint32_t size;              // 当前实际装载的字节数
     uint8_t in_use;             // 槽位占用标志
-    uint8_t ref_count;          // 引用计数（max 255，0 = 无引用，等待 GC 回收）
+    uint16_t ref_count;         // 引用计数（max 65535，0 = 无引用，等待 GC 回收；acquire 时检查溢出）
     uint32_t alloc_time;        // 分配时的 time(NULL) 秒级时间戳
     uint32_t last_access;       // 最后一次 get/set 的 time(NULL)
     uint32_t timeout_sec;       // 超时秒数（0 = 永不超时，用于 EventSource 等持久连接）
@@ -284,7 +350,7 @@ kwcc_slot_t* kwcc_pool_get(kwcc_mem_pool_t *pool, const char *key) {
 **为什么不用 hash 桶表**：
 - FNV-1a 是 32 位 hash，几千 key 量级下碰撞概率趋近于零
 - 即使碰撞，`strcmp` 回退也能正确区分，数据不会丢
-- Core 64 槽、User 256 槽，线性扫描 ≈ 100~400 纳秒
+- Core 140 槽、App 388 槽、User 832 槽，线性扫描 ≈ 100 纳秒~3 微秒
 - hash 桶表需要额外维护链表，多 ~200 行 C 代码，收益不值得
 
 ### 分配算法
@@ -323,7 +389,7 @@ void kwcc_pool_gc(kwcc_mem_pool_t *pool) {
     uint32_t now = time(NULL);
     if (now - pool->last_gc_time < 5) return;  // 节流跳过
     pool->last_gc_time = now;
-    _pool_gc_internal(pool, now);
+    kwcc_pool_gc_internal(pool, now);
 }
 
 /* 强制 GC（重置节流，立即执行） */
@@ -333,14 +399,14 @@ void kwcc_pool_gc_force(kwcc_mem_pool_t *pool) {
 }
 
 /* 内部 GC 逻辑 — 三层兜底 */
-static void _pool_gc_internal(kwcc_mem_pool_t *pool, uint32_t now) {
+static void kwcc_pool_gc_internal(kwcc_mem_pool_t *pool, uint32_t now) {
     for (uint32_t i = 0; i < pool->total_slot_count; i++) {
         kwcc_slot_t *s = &pool->slots[i];
         if (!s->in_use) continue;
 
         // 第一层：ref=0 的孤儿槽位立即回收（无人认领的内存）
         if (s->ref_count == 0) {
-            _pool_free_slot(pool, s);
+            kwcc_pool_free_slot(pool, s);
             continue;
         }
 
@@ -348,9 +414,25 @@ static void _pool_gc_internal(kwcc_mem_pool_t *pool, uint32_t now) {
         if (s->timeout_sec > 0 && (now - s->alloc_time) >= s->timeout_sec) {
             log_warn("pool: slot %d (key=%s) expired after %ds, forcing reclaim",
                      i, s->key_buf, now - s->alloc_time);
-            _pool_force_invalidate(pool, s);
+            kwcc_pool_force_invalidate(pool, s);
         }
     }
+}
+
+/* 自动节流 + 80% 使用率强制 GC */
+void kwcc_pool_gc_auto(kwcc_mem_pool_t *pool) {
+    // 先算使用率
+    int used = 0;
+    for (uint32_t i = 0; i < pool->total_slot_count; i++) {
+        if (pool->slots[i].in_use) used++;
+    }
+    float usage = (float)used / pool->total_slot_count;
+    if (usage > 0.8f) {
+        // 池快满了，不管节流，强制 GC
+        kwcc_pool_gc_force(pool);
+        return;
+    }
+    kwcc_pool_gc(pool);
 }
 ```
 
@@ -361,7 +443,7 @@ static void _pool_gc_internal(kwcc_mem_pool_t *pool, uint32_t now) {
 | 分配时 | `alloc_time`, `last_access` 自动设，`ref_count = 0` | 需要持久持有则调 `acquire()` |
 | 读取时 | `get()` 内自动更新 `last_access` | 无 |
 | 引用计数 | `acquire/release` 自动维护，ref=0 时 GC 回收 | 调 `acquire`/`release` |
-| GC 清理 | 每 5 秒自动扫描：ref=0 立即回收 + timeout 兜底 | 可选调 `gc_force` |
+| GC 清理 | 每 5 秒自动扫描：ref=0 立即回收 + timeout 兜底；使用率 >80% 强制 GC | 可选调 `gc_force` |
 
 ### Reentrancy 与内存泄漏防护
 
@@ -390,7 +472,7 @@ C: http_on_read()
 | 操作 | ref_count 变化 | 说明 |
 |------|---------------|------|
 | `alloc()` | `ref_count = 0` | 初始无人引用 |
-| `acquire()` | `ref_count++` | 声明"我需要持有这个槽位" |
+| `acquire()` | `ref_count++` | 声明"我需要持有这个槽位"。溢出时打 error 日志并忽略 |
 | `release()` | `ref_count--` | 释放引用 |
 | `release()` 后 ref=0 | **不立即回收** | 等待 GC 回收（安全，不在嵌套栈上释放） |
 
@@ -510,14 +592,15 @@ void         kwcc_pool_dump_stats(kwcc_mem_pool_t *pool);
 ```javascript
 // App 池：模块配置（永久，timeout=0）
 $config.setApp(key, val)      // 写入 App 池
+$config.setApp(key, null)     // 释放 App 池（等同于 releaseApp，与 setUser 语义一致）
 $config.getApp(key)            // 从 App 池读取
 $config.releaseApp(key)        // 手动释放 App 池
 
 // User 池：临时数据（可指定超时秒数）
 $config.setUser(key, val)      // 写入 User 池（默认不超时）
 $config.setUser(key, val, 30)  // 写入 User 池，30 秒超时
+$config.setUser(key, null)     // 释放 User 池（等同于 releaseUser，与 setApp 语义一致）
 $config.getUser(key)           // 从 User 池读取
-$config.setUser(key, null)     // 释放 User 池（等同于 releaseUser）
 $config.releaseUser(key)       // 手动释放 User 池
 
 // 调试
@@ -606,6 +689,48 @@ void kwcc_pool_dump_all(kwcc_mem_pool_t *pool, const char *filepath, int show_co
 - `$config` 只给需要跨帧持久化 / 大缓冲的场景（**可选使用**）
 - 方法名直接体现池子，一目了然
 
+### 旧 `__kwcc_config` 迁移与清理步骤
+
+内存池上线后，旧的 JS 全局对象方案（`kwcc.c` 中的 `__kwcc_config`）需要逐步淘汰：
+
+**迁移步骤**：
+
+1. **C 层**：`kwcc.c` 保留现有 `__kwcc_config` 实现不变，确保现有代码不崩溃
+2. **JS 层**：在 `main.js` 中将 `__kwcc_config` 的读写全部迁移到 `$config.setApp/getApp`
+3. **验证**：确认所有 config 读写都走 App 池后，进行清理
+
+**清理步骤**（迁移完成后执行）：
+
+```
+1. kwcc.c — 删除内容：
+   - g_js_ctx 全局变量
+   - g_configs[] 数组 + JSGCRef 管理
+   - kwcc_config_set_jsctx()
+   - kwcc_config_set_object()
+   - kwcc_config_set() / kwcc_config_get() / kwcc_config_get_int32()
+   - __kwcc_config JS 全局对象创建代码
+
+2. kwcc_base.h — 删除内容：
+   - kwcc_config_get() 声明
+   - kwcc_config_get_int32() 声明
+
+3. kwcc_js.c — 删除内容：
+   - js_kwcc_config_set stub 函数
+   - CONFIG_KWCC 中的 "kwcc_config_set" 注册
+
+4. mqjs_stdlib.c — 删除内容：
+   - #ifdef CONFIG_KWCC 中的 JS_CFUNC_DEF("kwcc_config_set", ...) 注册行
+
+5. main.m — 删除内容：
+   - kwcc_config_set_jsctx() 调用
+
+6. app/main.js — 更新内容：
+   - 替换所有 kwcc_config(module, options) 为 $config.setApp(key, val)
+   - 替换所有 __kwcc_config 直接访问为 $config.getApp(key)
+```
+
+**注意**：清理步骤在迁移验证通过后执行，不急于一次性完成。清理期间可以先保留旧代码作为 fallback。
+
 ---
 
 ## 后续待推演事项
@@ -627,6 +752,11 @@ void kwcc_pool_dump_all(kwcc_mem_pool_t *pool, const char *filepath, int show_co
 10. ~~文件拆分~~ ✅ 独立 `kwcc_pool.c/h`，不塞入 `kwcc_base.h`
 11. ~~单线程 Reentrancy 防护~~ ✅ ref_count + acquire/release 语义，release 不直接回收
 12. ~~内存泄漏防护~~ ✅ 三层兜底：ref=0 GC 回收 + timeout 强制 + 开发者自行管理（timeout=0）
+13. ~~ref_count 类型~~ ✅ uint16_t + acquire 溢出检查
+14. ~~跨平台内存对齐~~ ✅ kwcc_aligned_malloc 封装函数
+15. ~~JS API 一致性~~ ✅ setApp/setUser(key, null) 语义统一
+16. ~~GC 80% 阈值~~ ✅ 使用率 >80% 自动强制 GC
+17. ~~旧 __kwcc_config 迁移清理~~ ✅ 6 步清理清单（C/JS/Makefile）
 
 ---
 
@@ -661,10 +791,19 @@ void kwcc_pool_dump_all(kwcc_mem_pool_t *pool, const char *filepath, int show_co
 | Fallback 跨池越界 | ❌ 禁止，仅限同池内 Small→Medium→Large 冒泡，最大桶满 → NULL |
 | Free List 栈结构 | ❌ 随机释放会踩踏 → 改为 chunk 内嵌隐式链表（任意顺序真 O(1)） |
 | Pool 函数原子化 | ✅ 纯 C 函数不含 yield，天然兼容 protothread，不加锁 |
-| 内存对齐 | ✅ macOS malloc 天然 16 字节对齐，非 macOS 用 aligned_alloc(16) 兜底 |
+| 内存对齐（旧版） | ✅ macOS malloc 天然 16 字节对齐 → 改为封装 kwcc_aligned_malloc 跨平台函数（见下方） |
 | alloc 时 ref_count 初始值 | ✅ `ref_count = 0`（不是 1），需要持久持有则显式 `acquire()` |
 | release 语义 | ✅ 只减 ref_count，不直接回收槽位（防 reentrancy 踩踏） |
 | ref=0 何时回收 | ✅ 由 GC 统一回收，不在 release 调用点回收 |
 | 内存泄漏防护 | ✅ 三层：ref=0 GC 回收 + timeout 强制 + 开发者管理（timeout=0） |
 | C 忘记 release | ✅ 不会泄漏，JS release 后 ref=0 由 GC 回收，或 timeout 兜底 |
 | early return 泄漏 | ✅ timeout_sec > 0 时不会永久泄漏，GC 强制回收 |
+| ref_count 类型 | ✅ uint16_t（max 65535），acquire 时检查溢出 |
+| 内存对齐 | ✅ 封装 kwcc_pool_aligned_malloc 跨平台函数 |
+| 函数命名规范 | ✅ 三段式 `kwcc_{模块}_{动作}`，内部函数用 `static` + 统一前缀 |
+| JS API 一致性 | ✅ setApp/setUser(key, null) 语义统一为释放 |
+| GC 80% 阈值 | ✅ 池使用率 >80% 自动触发强制 GC，不等节流 |
+| 旧 __kwcc_config 清理 | ✅ 迁移验证后执行 6 步清理（C/JS/Makefile 全面移除） |
+| hash 桶表扩展 | ❌ 不需要，最大池 832 槽线性扫描 ≈ 1~3 微秒 |
+| 超大数据自动拆分 | ❌ 不需要，最大 chunk 16KB 足够，超限由调用方处理 |
+| 毫秒级超时 | ❌ 不需要，秒级够用，文档说明即可 |
