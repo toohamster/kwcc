@@ -1,6 +1,6 @@
 # C 层完整架构状态
 
-> 基于 UI 模块拆分后的多文件架构（`kwcc_ui.c` + `kwcc_js.c` + `kwcc.c`）
+> 基于 bus 模块拆分后的多文件架构（`kwcc_ui.c` + `kwcc_js.c` + `kwcc_bus.c` + `kwcc.c`）
 
 ## 文件职责分布
 
@@ -12,6 +12,8 @@
 | `kwcc_ui.h` | UI 模块声明 + SVG cache extern + `g_mu` extern | |
 | `kwcc_js.c` | `kwcc_create/destroy_js` + stdlib stubs + kwcc_ui 桥接 | 无 microui |
 | `kwcc_js.h` | JS lifecycle + stubs 声明 | 无 microui |
+| `kwcc_bus.c` | C→JS 消息总线桥接：topic map + dispatch_event + bind_topic + frame 重置 | 无 microui、无 JS lifecycle |
+| `kwcc_bus.h` | 消息总线声明 | 无 microui 类型 |
 | `kwcc.h` | 入口 umbrella header（#include 各模块头文件） | 无实现代码 |
 
 ## 全局变量
@@ -22,8 +24,6 @@
 | `g_mu` | `mu_Context` | microui 主上下文（**定义**，非 extern） |
 | `g_slider_val` | `mu_Real` | 持久化 slider 值（static，避免局部地址陷阱） |
 | `g_current_font` | `const char*` | 当前激活字体名称 |
-| `g_topic_map[256]` | struct { mu_Id, topic[128] } | 每帧 ID→topic 映射（Zero-Alloc） |
-| `g_topic_map_count` | `int` | topic map 计数 |
 | `g_sync_table[32]` | `mod_state_t` { key[64], visible } | 模块状态同步表 |
 | `g_sync_count` | `int` | sync 计数 |
 | `g_current_mod_key` | `const char*` | 当前模块 key（ui.sync 设置） |
@@ -34,6 +34,12 @@
 | `g_svg_cache[128]` | `svg_cache_t` | SVG 缓存（extern，共享给 main.m） |
 | `g_svg_cache_next` | `int` | SVG 缓存轮转指针 |
 | `g_frame_counter` | `int` | 帧计数器 |
+
+### kwcc_bus.c
+| 变量 | 类型 | 用途 |
+|------|------|------|
+| `g_topic_map[256]` | struct { int id, topic[128] } | 每帧 ID→topic 映射（Zero-Alloc） |
+| `g_topic_map_count` | `int` | topic map 计数 |
 
 ### kwcc_js.c
 | 变量 | 类型 | 用途 |
@@ -54,16 +60,17 @@
 | `kwcc_ui_free()` | kwcc_ui.c | 清理 UI 资源（当前空，备用） |
 | `kwcc_create_js()` | kwcc_js.c | 创建 JSContext + 调 `kwcc_config_set_jsctx` |
 | `kwcc_destroy_js()` | kwcc_js.c | 释放 JSContext |
-| `kwcc_begin_frame()` | kwcc_ui.c | 每帧重置：topic_map_count=0, sync_count=0, win_top=0 |
+| `kwcc_begin_frame()` | kwcc_ui.c | 每帧重置：sync_count=0, win_top=0 + 调 kwcc_bus_begin_frame |
 | `kwcc_process_js()` | kwcc_ui.c | 帧入口：frame++ → begin_frame → mu_begin → JS_Eval → mu_end |
 | `kwcc_get_mu()` | kwcc_ui.c | 返回 g_mu 指针 |
 | `kwcc_get_font()` | kwcc_ui.c | 返回当前字体名称 |
 
-### 事件系统（kwcc_ui.c）
+### 事件系统（kwcc_bus.c）
 | 函数 | 功能 |
 |------|------|
 | `kwcc_bind_topic(id, topic)` | 存入 g_topic_map（id→topic） |
 | `kwcc_dispatch_event(ctx, topic, action)` | JS_Eval 调用 `$bus.emit(topic, action, new Object())` |
+| `kwcc_bus_begin_frame()` | 每帧重置 g_topic_map_count = 0 |
 | `kwcc_on_window_close(ctx, title)` | X 按钮回调：dispatch(title, "close") |
 
 ### 窗口挡板（kwcc_ui.c）
