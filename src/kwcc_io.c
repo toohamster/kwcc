@@ -7,7 +7,7 @@
  * Compile-time upper bound: KWCC_IO_MAX_FDS (128).
  */
 #include "kwcc_io.h"
-#include "kwcc_base.h"
+#include "kwcc_pool.h"
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
@@ -20,9 +20,7 @@ static int            g_io_max_fds = 16;
 void kwcc_io_init(void) {
     memset(g_io_slots, 0, sizeof(g_io_slots));
 
-    /* Read runtime max_fds from config (default "16") */
-    const char *val = kwcc_config_get("io", "max_fds", "16");
-    int max = atoi(val);
+    int max = atoi(kwcc_pool_get_str(&g_app_pool, "io/max_fds", "16"));
     if (max < 1) max = 1;
     if (max > KWCC_IO_MAX_FDS) max = KWCC_IO_MAX_FDS;
     g_io_max_fds = max;

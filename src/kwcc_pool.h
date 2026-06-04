@@ -65,6 +65,8 @@ void kwcc_pool_configure(kwcc_mem_pool_t *pool, size_t size);
 kwcc_slot_t *kwcc_pool_alloc(kwcc_mem_pool_t *pool, const char *key,
                               uint32_t size, uint32_t timeout_sec);
 kwcc_slot_t *kwcc_pool_get(kwcc_mem_pool_t *pool, const char *key);
+const char  *kwcc_pool_get_str(kwcc_mem_pool_t *pool, const char *key,
+                                const char *default_value);
 void         kwcc_pool_set(kwcc_mem_pool_t *pool, kwcc_slot_t *slot,
                            const void *data, uint32_t size);
 void         kwcc_pool_acquire(kwcc_mem_pool_t *pool, kwcc_slot_t *slot);

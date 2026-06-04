@@ -393,7 +393,6 @@ static const JSPropDef js_global_object[] = {
     JS_CFUNC_DEF("print", 1, js_print),
 #ifdef CONFIG_KWCC
     JS_CFUNC_DEF("kwcc_ui", 3, js_kwcc_ui),
-    JS_CFUNC_DEF("kwcc_config_set", 3, js_kwcc_config_set),
     JS_CFUNC_DEF("kwcc_config_set_app", 2, js_config_set_app),
     JS_CFUNC_DEF("kwcc_config_set_user", 3, js_config_set_user),
     JS_CFUNC_DEF("kwcc_config_get_app", 1, js_config_get_app),

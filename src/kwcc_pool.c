@@ -290,6 +290,22 @@ kwcc_slot_t *kwcc_pool_get(kwcc_mem_pool_t *pool, const char *key) {
     return NULL;
 }
 
+const char *kwcc_pool_get_str(kwcc_mem_pool_t *pool, const char *key,
+                               const char *default_value) {
+    kwcc_slot_t *s = kwcc_pool_get(pool, key);
+    if (!s || !s->data || !s->size) return default_value;
+    /* Ensure null-terminated */
+    if (s->data[s->size - 1] != '\0') {
+        if (s->size < s->capacity) {
+            s->data[s->size] = '\0';
+            s->size++;
+        } else {
+            s->data[s->size - 1] = '\0';
+        }
+    }
+    return (const char *)s->data;
+}
+
 /* ═══════════════════════════════════════════════════════════
  * Set data
  * ═══════════════════════════════════════════════════════════ */

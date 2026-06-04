@@ -16,7 +16,6 @@ JSValue js_clearTimeout(JSContext *ctx, JSValue *this_val, int argc, JSValue *ar
 JSValue js_date_now(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_performance_now(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue js_kwcc_ui(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-JSValue js_kwcc_config_set(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 
 /* $config JS API handlers (registered in mqjs_stdlib.c via CONFIG_KWCC) */
 JSValue js_config_set_app(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);

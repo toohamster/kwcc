@@ -10,9 +10,6 @@
 
 #define KWCC_MEM_SIZE (4 * 1024 * 1024)
 
-/* Extern from kwcc.c */
-void kwcc_config_set_jsctx(JSContext *ctx);
-
 /* Forward declaration */
 void kwcc_register_config_js(JSContext *ctx);
 
@@ -25,7 +22,6 @@ JSContext *kwcc_create_js(void) {
         log_fatal("kwcc: JS_NewContext failed (not enough memory?)");
         return NULL;
     }
-    kwcc_config_set_jsctx(ctx);
     kwcc_register_config_js(ctx);
     return ctx;
 }
@@ -131,23 +127,6 @@ JSValue js_kwcc_ui(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
     const char *method = JS_ToCString(ctx, argv[0], &buf);
     JSValue result = g_ui_callback(ctx, method, argc - 1, argv + 1);
     return result;
-}
-
-/* ── kwcc config set: C binding for kwcc_config_set ─────────── */
-
-JSValue js_kwcc_config_set(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
-    (void)this_val;
-    if (argc < 3) return JS_UNDEFINED;
-
-    JSCStringBuf mbuf, kbuf, vbuf;
-    const char *module = JS_ToCString(ctx, argv[0], &mbuf);
-    const char *key    = JS_ToCString(ctx, argv[1], &kbuf);
-    const char *value  = JS_ToCString(ctx, argv[2], &vbuf);
-
-    if (module && key && value) {
-        kwcc_config_set(module, key, value);
-    }
-    return JS_UNDEFINED;
 }
 
 /* ── $config JS API ────────────────────────────────────────── */

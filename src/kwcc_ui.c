@@ -578,14 +578,7 @@ void kwcc_register_ui(JSContext *ctx) {
         "ui.loadFont = function(n,p) { kwcc_ui('loadFont',n,p); };\n"
         "ui.setFont = function(n) { kwcc_ui('setFont',n); };\n"
         "ui.loadFontDir = function(d) { kwcc_ui('loadFontDir',d); };\n"
-        "ui.svg = function(p,x,y,w,h) { kwcc_ui('svg',p,x||0,y||0,w||100,h||100); };\n"
-        "var kwcc_config = function(module, options) {\n"
-        "    var keys = Object.keys(options);\n"
-        "    for (var i = 0; i < keys.length; i++) {\n"
-        "        var key = keys[i];\n"
-        "        kwcc_config_set(module, key, options[key]);\n"
-        "    }\n"
-        "};\n";
+        "ui.svg = function(p,x,y,w,h) { kwcc_ui('svg',p,x||0,y||0,w||100,h||100); };\n";
     JSValue meth_result = JS_Eval(ctx, methods_js, strlen(methods_js), "<kwcc>", 0);
     if (JS_IsException(meth_result)) {
         JSValue exc = JS_GetException(ctx);
