@@ -471,6 +471,89 @@ frame() — 每帧
   └─ kwcc_mempool_gc_auto()                 → GC 自动节流
 ```
 
+## 调试 Dump 功能
+
+通过 `#ifdef KWCC_DEBUG` 编译宏控制，发布包剔除。
+
+### JS API
+
+```javascript
+$config.dump();                              // 各池概要 → 控制台
+$config.dumpAll("path");                     // 槽位元信息 → 写到文件
+$config.dumpAll("path", true);               // 元信息 + 数据内容明细 → 写到文件
+```
+
+### C 层对应函数
+
+```c
+/* 概要 dump（打印到 log） */
+void kwcc_mempool_dump_stats(void);
+
+/* 详情 dump + 可选数据内容（写入文件） */
+void kwcc_mempool_dump_all(const char *filepath, int show_content);
+```
+
+### `dump()` — 各池概要（控制台输出）
+
+```
+=== Memory Pool Dump ===
+L0 (8B):  2 pools  [ 512/1024 slots used ]
+L1 (32B): 1 pool   [ 64/256 slots used ]
+L2 (128B): 1 pool  [ 32/256 slots used ]
+L3 (512B): 1 pool  [ 10/256 slots used ]
+L4 (1KB): 1 pool   [ 5/128 slots used ]
+L5 (4KB): 1 pool   [ 2/16 slots used ]
+L6 (16KB): 1 pool  [ 1/8 slots used ]
+L7 (dynamic): 0 pools [ 0/128 slots used ]
+```
+
+用途：快速判断哪个池满了、使用率如何、是否需要调整 max_pools。
+
+### `dumpAll(filepath, show_content)` — 逐槽位详情（写入文件）
+
+```javascript
+$config.dumpAll("pool_dump.txt")         // 元信息（不含数据内容）
+$config.dumpAll("pool_dump.txt", true)   // 元信息 + 数据内容明细
+```
+
+**无第 2 参时**：只输出槽位元信息（key/size/ref/timeout/age/pool_type）。
+**第 2 参 = true 时**：输出数据内容明细（按文本/二进制分段规则）。
+
+```
+=== L0 Pool 0 (8B chunks, 512/512 slots) ===
+slot 0: key="a.io/port", size=4/8B, ref=1, timeout=0, age=120s, type=CONST
+  data: CONST[0] (KWCC_MEMPOOL_CONST_ONE)
+
+slot 1: key="a.enabled", size=4/8B, ref=1, timeout=0, age=120s, type=INT32
+  data: 42
+
+=== L2 Pool 0 (128B chunks, 32/256 slots used) ===
+slot 5: key="a.name", size=5/128B, ref=1, timeout=0, age=45s, type=STRING
+  data: "myapp"
+
+=== L4 Pool 0 (1KB chunks, 5/128 slots used) ===
+slot 0: key="a.io/config", size=512/1024B, ref=1, timeout=0, age=30s, type=TLV
+  content (text, 512 bytes):
+    {"io":{"timeout":{"user":"v1"},"max_fds":"16"}}
+```
+
+**数据内容输出规则**：
+
+| 类型 | 判定 | 输出方式 |
+|------|------|---------|
+| **纯文本** | 全部是可打印 ASCII/UTF8 | 前 128 字节原样输出 + `... [truncated, total X bytes]` |
+| **TLV 二进制** | slot->type=TLV | 先尝试 `tlv_to_json()` 转 JSON 输出，失败则 hex dump |
+| **CONST** | slot->type=CONST | 输出常量表索引和值 |
+| **二进制** | 含不可打印字节 | hex dump，每行 16 字节，最多 4 行（64 字节）+ `... [X more bytes, not shown]` |
+
+**设计约束**：
+- 单个 slot 的 dump 内容最多占 ~10 行，不会刷屏
+- 开发者调试时 `cat pool_dump.txt | grep "a.io"` 即可定位
+- 两个 dump 方法可被 `#ifdef KWCC_DEBUG` 编译宏去掉，不影响发布包体积
+- 遍历所有池类型 × 所有池实例 × 所有槽位，过滤 in_use 的
+
+---
+
 ## 验证
 
 - 编译通过（`make clean && make`）

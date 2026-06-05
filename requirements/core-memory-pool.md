@@ -1,3 +1,37 @@
+> [DEPRECATED — 2026-06-05]
+>
+> 本方案已被 `mempool-design.md`（v7）取代。
+>
+> ## 为什么用新方案替代
+>
+> | 维度 | 旧方案（本文件） | 新方案（mempool-design.md v7） | 为什么更好 |
+> |------|----------------|------|------|
+> | **池架构** | Core/App/User 三池业务分层，每池固定 3 个 size class | L0-L7 按数据长度分层，每池单一 chunk 大小 | 旧方案小字符串可能占大槽浪费空间；新方案数据自动路由到最匹配池，内存利用率更高 |
+> | **池扩展** | 固定大小，JS 启动时一次性指定，不可动态扩容 | 每种池类型独立扩缩容，满即扩，最多 max_pools | 旧方案预估不准容易浪费或不够用；新方案自适应业务负载 |
+> | **查找性能** | 线性扫描 O(n)，最大池 832 槽 ≈ 1~3μs | key_map 32768 条目 hash 表，O(1) ≈ 100ns | 数据量增长时旧方案线性退化，新方案性能稳定 |
+> | **大值处理** | 最大 chunk 16KB，超限返回 NULL 由调用方处理 | L7 动态 malloc 无上限，固定 128 元信息槽 | 旧方案大值无处安放；新方案原生支持任意大小 |
+> | **值编码** | 纯字符串，对象需 JS 手动 JSON.stringify | 内置 TLV 二进制序列化，比 JSON 省 30% 空间 | 旧方案对象数据冗余；新方案原生支持树形层级数据 + 路径查询 |
+> | **高频值** | 每次 alloc 占用真实 slab chunk | 16 高频常量表，slot 引用常量区，零消耗 slab | 旧方案 true/false/"0"/"1" 等重复值浪费空间；新方案共享引用 |
+> | **JS API** | setApp/setUser/setCore，语义模糊，类型不区分 | appSetInt/appSetString/appSetBool/appSetJson/appSetTlv 扁平按类型 | 旧方案无法区分 int/bool，统一当字符串处理；新方案类型明确，基础类型自动走常量表 |
+> | **领域模型** | Core + App + User 三个域 | App（读写）+ Core（只读），去掉 User | User 和 App 本质相同，多一层域增加复杂度无收益；Core 只读保护引擎内部配置 |
+> | **分隔符语义** | 不清晰 | `.` 是业务命名空间，`/` 是前缀分组和 TLV 路径 | 旧方案 `/` 语义混用；新方案职责分明 |
+> | **ref_count** | uint16_t + acquire/release，三层兜底 | 保留但简化 | 新方案不需要三层兜底，TLV/常量表减少了内存泄漏场景 |
+> | **两阶段初始化** | C 层建 Core 池，JS 层建 App/User 池 | L0-L7 统一初始化 ~550KB | 旧方案初始化复杂，JS 未就绪时 App 池不存在；新方案一步到位，简单可靠 |
+>
+> **总结**：旧方案解决了"把 config 从 JS 堆移到 C 堆"的第一步，但池架构僵化、查找慢、大值无解、类型不区分。新方案通过 L0-L7 分层 + key_map + TLV + 常量表 + 类型化 API，在内存利用率、查找性能、API 清晰度上全面升级。
+>
+> **废弃原因**：
+> 1. 池架构从业务分层（Core/App/User 三池）重构为按池类型分层（L0-L7 共 8 种池类型）
+> 2. 新增 TLV 二进制序列化替代旧的对象展开方案
+> 3. JS API 从 setApp/setUser/setCore 扁平化为 appSetInt/appSetString/appSetBool/appSetJson/appSetTlv
+> 4. 新增常量表（16 高频值）和通用 const_lookup 函数
+> 5. 新增 key_map 多池管理和独立扩缩容策略
+> 6. 移除 User 域，Core 改为只读
+> 7. 业务前缀（a./c.）由 JS wrapper 自动添加
+>
+> 完整执行计划见 `mempool-design.md`。
+>
+
 # KWCC 核心层重构与三段式 Slab 内存池实施方案
 
 ## Context
