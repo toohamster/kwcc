@@ -87,7 +87,7 @@ $config.appSetJson("io", { max_fds: "16", port: "8080" });
 ```js
 $config.appSetTlv("io", { max_fds: "16", port: "8080" });
 ```
-→ `$config` 内部调用 `kwcc_mempool_tlv_pack()` 将 JSValue 对象编码为 TLV 二进制存 slot。
+→ `$config` 内部调用 `kwcc_mempool_tlv_build()` 将 JSValue 对象编码为 TLV 二进制存 slot。
 → 读取时 C 侧 TLV 路径查询，返回字符串/JSON 字符串。
 → **比 JSON 省 30% 空间**，适合大量层级配置。
 
@@ -95,7 +95,7 @@ $config.appSetTlv("io", { max_fds: "16", port: "8080" });
 
 ### TLV 条目格式
 ```
-Type(1B) + TotalLen(2B) + Name(str) + Value(data)
+Type(1B) + TotalLen(2B, 小端) + Name(str) + Value(data)
 ```
 
 ### 类型定义
@@ -116,33 +116,56 @@ TLV 块：slot[42]->data = [io.timeout.user = "v1", io.timeout.enabled = true]
   [FIELD "version"    len=3]  "2.0"
 ```
 
-### TLV API（kwcc_js.c，使用 mquickjs_priv.h 内部 API）
+### TLV API（纯 C，无 JS 依赖）
+
+**架构原则**：`kwcc_mempool` 是纯 C 基础设施，不依赖 `JSContext`/`JSValue`。
+所有 JS 相关逻辑放在 `kwcc_js.c`，通过回调钩子与 mempool 交互。
+
 ```c
-uint8_t *kwcc_mempool_tlv_pack(JSContext *ctx, JSValue obj, size_t *out_len);
-  // JSValue 对象 → TLV 字节缓冲区（malloc）
-  // 使用 js_object_keys + JS_GetPropertyStr 递归遍历
-  // 返回 malloc 的缓冲区，调用者用完 free
+/* ═══ kwcc_mempool（纯 C，不依赖 JS）═══ */
 
+/* 回调：构建 TLV 时，调用方提供 key/value 对 */
+typedef int (*kwcc_mempool_tlv_pack_cb)(const char *key, const char *value,
+                                         uint8_t type, void *user_data);
+
+/* 回调：遍历 TLV 时，通知每个条目 */
+typedef int (*kwcc_mempool_tlv_iter_cb)(const char *name, const uint8_t *value,
+                                         size_t value_len, uint8_t type, void *user_data);
+
+/* 构建 TLV：调用方通过回调驱动，mempool 负责序列化 */
+uint8_t *kwcc_mempool_tlv_build(kwcc_mempool_tlv_pack_cb cb, void *user_data,
+                                 size_t *out_len);
+
+/* 遍历 TLV：解析字节，逐条回调 */
+int kwcc_mempool_tlv_iter(const uint8_t *tlv_data, size_t tlv_len,
+                           kwcc_mempool_tlv_iter_cb cb, void *user_data);
+
+/* 路径查询：返回 TLV 内部字节指针（不 malloc） */
+const char *kwcc_mempool_tlv_get_path(const uint8_t *tlv_data, size_t tlv_len,
+                                       const char *path, size_t *out_len);
+
+/* TLV → JSON 字符串（malloc） */
 char *kwcc_mempool_tlv_to_json(const uint8_t *tlv_data, size_t tlv_len, size_t *out_len);
-  // TLV 字节块 → JSON 字符串（malloc）
-  // 遍历 TLV 树，递归构建 JSON 字符串
-  // 返回 malloc 的字符串缓冲区，调用者用完 free
+void  kwcc_mempool_tlv_free_json(char *ptr);
+```
 
-JSValue kwcc_mempool_tlv_get_path(JSContext *ctx, const uint8_t *tlv_data,
-                                   size_t tlv_len, const char *path);
-  // 路径查询语法糖：tlv_get_path(tlv, "timeout/user") → "v1"
-  // 拆路径 → 逐层查 TLV → 返回 JSValue，只查 1 次 hashmap
+```c
+/* ═══ kwcc_js.c（JS 层，依赖 mquickjs）═══ */
+
+/* JSValue → TLV：遍历 JS keys，通过 tlv_build 回调逐个转换 */
+/* TLV → JSValue：用 tlv_get_path 拿到 C 字符串 → JS_NewStringLen */
+/* TLV → JSON：用 tlv_to_json 拿到 JSON 字符串 → JS_NewStringLen */
 ```
 
 ### TLV 读写转换流程
 ```
-set: JS对象 → C侧 kwcc_mempool_tlv_pack() → TLV字节 → 存slot
+set: JS对象 → C侧 kwcc_mempool_tlv_build() → TLV字节 → 存slot
 get: 读slot → TLV字节
   → 无path: kwcc_mempool_tlv_to_json() → JSON字符串给JS → JSON.parse()
   → 有path: kwcc_mempool_tlv_get_path(tlv, "timeout/user") → 直接返回值
 
 $config.appSetTlv("io", { timeout: { user: "v1" } })
-  → C 侧 kwcc_mempool_tlv_pack() → 打包 TLV → 存slot
+  → C 侧 kwcc_mempool_tlv_build() → 打包 TLV → 存slot
 
 $config.appGetTlv("io")
   → C侧读slot → TLV块 → tlv_to_json() → JSON字符串给JS
@@ -169,7 +192,7 @@ static int tlv_parse_entry(const uint8_t *ptr, const uint8_t *end, ...) {
 **必须加边界检查的函数**：
 - `kwcc_mempool_tlv_get_path()` — 路径查询，每次跳子节点前校验
 - `kwcc_mempool_tlv_to_json()` — JSON 转换，遍历所有条目时校验
-- `kwcc_mempool_tlv_pack()` — 输出缓冲区满时校验（防内存溢出）
+- `kwcc_mempool_tlv_build()` — 输出缓冲区满时校验（防内存溢出）
 - 任何直接读 TLV 字节的内部辅助函数
 
 ## 数据类型（slot->type，uint8_t）
@@ -264,7 +287,7 @@ C 层：kwcc_mempool（按 数据类型+长度 分池的 KV 存储）
   TLV 值存储（可选编码）：JS 对象 ↔ TLV 二进制转换
 
 C 层 API（纯 KV，无默认值）：
-  kwcc_mempool_alloc(type, key, size, timeout)         // 按类型+长度路由 L0-L6
+  kwcc_mempool_alloc(data_type, key, size, timeout)      // 按 data_type + size 自动路由 L0-L6
   kwcc_mempool_alloc_dynamic(key, cap, timeout)         // 直走 L7（动态 malloc）
   kwcc_mempool_get(pool_id, key)                        // 返回 slot*
   kwcc_mempool_set(pool_id, slot, data, size)           // 写数据
@@ -272,6 +295,11 @@ C 层 API（纯 KV，无默认值）：
   kwcc_mempool_get_keys(pool_id, prefix)                // 前缀扫描
   kwcc_mempool_get_str(pool_id, key, default_value)     // 返回 null-terminated 字符串
   kwcc_mempool_const_lookup(data, len, type)            // 常量表查找
+
+Key 前缀拼接（`$config` 层业务逻辑）：
+  在 `kwcc_js.c` 中实现，负责给 key 拼 `a.` / `c.` 前缀。
+  用途：JS wrapper 自动加业务前缀，防止 JS 注入恶意 key。
+  例：`$config.appSetInt("io/port", 8080)` → C 侧 `"a.io/port"`
 
 JS 层：$config（唯一公开的配置工具）
   分隔符约定：
@@ -290,8 +318,12 @@ JS 层：$config（唯一公开的配置工具）
     appRelease(key)          // 释放单个 key
     appReleasePrefix(key)    // 释放 key/ 开头的所有 key
 
-  Core 域（只读，JS wrapper 自动加 c. 前缀）：
-    coreGet(key, default)    // 通用读取
+  Core 域（JS 可写、C 可读）：
+    JS 写：只允许 coreSetTlv(key, obj) → 存 TLV 到 "c." 前缀
+    C 读：直接调 `kwcc_mempool_get()` 拿 slot，根据 `slot->type` 调对应工具：
+      - type=TLV → 调 `kwcc_mempool_tlv_get_path()` 解析
+      - type=STRING → 直接读 `slot->data`
+      - 无简化封装，C 模块直接用 mempool 提供的纯 C 工具
 
   池管理：
     setMaxPools(type, n)     // 调整某池类型最大池数
@@ -307,6 +339,9 @@ $config.appSetBool("enabled", true);               // 存 bool（走常量表）
 $config.appSetJson("io", { max_fds: "16" });       // JS对象 → JSON字符串
 $config.appSetTlv("io", { max_fds: "16" });        // JS对象 → TLV二进制
 
+// Core — JS 设置（只允许 TLV）
+$config.coreSetTlv("io", { max_fds: "16" });       // JS对象 → TLV → 存 "c.io"
+
 // App — 读取
 $config.appGet("name", "default");                 // 返回字符串
 $config.appGet("io/port", 0);                      // 返回 int
@@ -317,8 +352,8 @@ $config.appGetTlv("io", "max_fds");                // 有path → "16"
 $config.appRelease("io/port");                     // 释放 a.io/port
 $config.appReleasePrefix("io");                    // 释放 a.io/ 前缀所有
 
-// Core — 只读
-$config.coreGet("version", "unknown");             // 读取 c.version
+// Core — JS 端可写，C 端可读
+// C 模块直接调 kwcc_mempool_get("c.io") 拿 slot，根据 type 调 tlv_get_path 解析
 
 // 池管理
 $config.setMaxPools("l5", 4);                      // L5 最大 4 池
@@ -342,7 +377,7 @@ $config.appRelease = function(k) { kwcc_config_release("a." + k); };
 $config.appReleasePrefix = function(k) { kwcc_config_release_prefix("a." + k + "/"); };
 
 // Core 域 — 自动加 "c." 前缀
-$config.coreGet = function(k, d) { return kwcc_config_get("c." + k, d); };
+$config.coreSetTlv = function(k, v) { kwcc_config_set_tlv("c." + k, v); };
 
 // 池管理
 $config.setMaxPools = function(t, n) { kwcc_config_set_max_pools(t, n); };
@@ -385,8 +420,8 @@ typedef struct {
 
 | 文件 | 作用 | 本次改动 |
 |------|------|---------|
-| `src/kwcc_mempool.h` | 新建 | 类型定义 + API 声明 |
-| `src/kwcc_mempool.c` | 新建 | 核心实现（多池管理 + key_map + TLV + 常量表） |
+| `src/kwcc_mempool.h` | 重命名自 kwcc_pool.h | 类型定义 + API 声明 |
+| `src/kwcc_mempool.c` | 重命名自 kwcc_pool.c | 核心实现（多池管理 + key_map + TLV + 常量表） |
 | `src/kwcc.h` | umbrella header | 加 `#include "kwcc_mempool.h"` |
 | `src/kwcc_js.c` | JS lifecycle | 添加 `$config` JS API + C handler + TLV pack/unpack/to_json |
 | `src/kwcc_ui.c` | UI bridge | 在 `kwcc_register_ui` 中加 `$config` JS wrapper |
@@ -395,65 +430,34 @@ typedef struct {
 | `app/main.js` | JS entry | 加 `$config.setMaxPools` 调用 |
 | `Makefile` | build | 加 `kwcc_mempool.c` 编译规则 |
 | `deps/mquickjs/mqjs_stdlib.c` | stdlib | 加 C 函数注册（CONFIG_KWCC） |
-| `src/kwcc_io.c` | I/O reactor | 迁移到 `kwcc_mempool_get_str` |
+| `src/kwcc_io.c` | I/O reactor | 迁移到 `kwcc_mempool_*` API |
 
 ## 清理步骤（旧 `__kwcc_config` 系统）
 
-1. **`src/kwcc.c`** — 清空全部旧实现（已完成）
-2. **`src/kwcc_base.h`** — 删除旧 config 声明（已完成）
-3. **`src/kwcc_io.c`** — 用 `kwcc_mempool_get_str`（已完成）
-4. **`src/kwcc_js.c`** — 删除 `kwcc_config_set_jsctx` + `js_kwcc_config_set`（已完成）
-5. **`src/kwcc_js.h`** — 删除旧声明（已完成）
-6. **`src/kwcc_ui.c`** — 删除 `kwcc_config` JS wrapper（已完成）
-7. **`deps/mquickjs/mqjs_stdlib.c`** — 删除 `kwcc_config_set` 注册（已完成）
+1. **`src/kwcc.c`** — 清空全部旧实现
+2. **`src/kwcc_base.h`** — 删除旧 config 声明
+3. **`src/kwcc_io.c`** — 迁移到 mempool API
+4. **`src/kwcc_js.c`** — 删除 `kwcc_config_set_jsctx` + `js_kwcc_config_set`
+5. **`src/kwcc_js.h`** — 删除旧声明
+6. **`src/kwcc_ui.c`** — 删除 `kwcc_config` JS wrapper
+7. **`deps/mquickjs/mqjs_stdlib.c`** — 删除 `kwcc_config_set` 注册
 
-## 实施步骤（待执行）
+> **注意**：代码已回滚，所有清理步骤待重新执行。
 
-### Step 1: 重命名现有文件
-- `kwcc_pool.h` → `kwcc_mempool.h`
-- `kwcc_pool.c` → `kwcc_mempool.c`
-- 所有函数 `kwcc_pool_*` → `kwcc_mempool_*`
-- 全局变量 `g_*_pool` → `g_*_mempool`
+## 当前状态
 
-### Step 2: 重构内存池分层结构
-- L0（8B）、L1（32B）、L2（128B）、L3（512B）、L4（1KB）、L5（4KB）、L6（16KB）、L7（动态 malloc）
-- 新增数据类型标记（uint8_t：string/int32/int64/float/double/json/tlv/const）
-- 新增常量表（g_kwcc_mempool_const_table[16]），slot->type=CONST 时引用常量区
-- 每种池类型单一 chunk 大小，无内部子 slab
-- 新增 `kwcc_mempool_alloc_dynamic` 快速通道（L7 动态 malloc）
-- 新增 `kwcc_mempool_const_lookup()` 通用常量查找
+- 代码在 `kwcc_pool.h/c`（旧命名）
+- Phase 1-7 均未开始，待从零执行
 
-### Step 3: 多池管理
-- 新增 `kwcc_mempool_manager`：每种池类型的池数组 + key_map（32768 条目）
-- 初始化开 1 池/类型 + 满即扩策略
-- 满即扩，最多 max_pools[type]
-- `max_pools` 编译时默认 `{16, 8, 8, 4, 4, 4, 2, 2}`，运行时可配
-
-### Step 4: 新增 TLV 序列化
-- `kwcc_js.c` 实现 `kwcc_mempool_tlv_pack()`（返回 uint8_t* + out_len）
-- `kwcc_js.c` 实现 `kwcc_mempool_tlv_to_json()`（返回 JSON 字符串）
-- `kwcc_js.c` 实现 `kwcc_mempool_tlv_get_path()`（路径查询）
-- TLV 格式：Type(1B) + TotalLen(2B) + Name + Value
-- JS ↔ TLV 转换：JS 对象 → TLV 存 slot，读 slot → JSON字符串或路径值
-
-### Step 5: 新增 `kwcc_mempool_get_keys` 和 `kwcc_mempool_get_str`
-- 前缀扫描 key_map，返回 JS 数组
-- get_str 返回 null-terminated 字符串 + 默认值
-
-### Step 6: 重写 `$config` JS API
-- C handler：`kwcc_config_set_int/string/bool/json/tlv` + `kwcc_config_get` + `kwcc_config_get_tlv_path/json` + `kwcc_config_release/release_prefix` + `kwcc_config_set_max_pools`
-- JS wrapper 在 `JS_Eval` 中注入，扁平方法名（appSetInt / appGet / coreGet / setMaxPools 等）
-- 处理：`a.` / `c.` 业务前缀自动添加、TLV 打包/解包、常量表查找、默认值、前缀释放
-
-### Step 7-11: 更新相关文件 + 编译验证
+## 实施步骤（待执行，见下方 Phase 1-6）
 
 ## 关键设计决策
 
 - **命名规范**：所有 C 符号统一 `kwcc_mempool_` 前缀；枚举/宏大写 `KWCC_MEMPOOL_*`；全局变量 `g_kwcc_mempool_*`
-- **业务前缀**：JS wrapper 自动加 `a.`（App）/ `c.`（Core）；Core 只读无 set
+- **业务前缀**：JS wrapper 自动加 `a.`（App）/ `c.`（Core），在 `kwcc_js.c` 中实现；Core 可写可读
 - **分隔符**：`.` 是业务命名空间分隔符，`/` 是前缀分组和 TLV 路径分隔符
 - **key 语义**：扁平字符串，`/` 只是人为约定的前缀分隔符
-- **JS API**：扁平方法名 `appSetInt/appSetString/appSetBool/appSetJson/appSetTlv/appGet/appGetTlv/appRelease/appReleasePrefix` + `coreGet` + `setMaxPools`
+- **JS API**：扁平方法名 `appSetInt/appSetString/appSetBool/appSetJson/appSetTlv/appGet/appGetTlv/appRelease/appReleasePrefix` + `coreSetTlv` + `setMaxPools`
 - **常量查找**：`kwcc_mempool_const_lookup(data, len, type)` 通用函数，替代 if/else
 - **ref_count**：`uint16_t`，`alloc()` 时 = 0，`acquire()` 时++，溢出打 error 忽略
 - **GC 80% 阈值**：自动检测，超过立即强制 GC
@@ -464,13 +468,13 @@ typedef struct {
 - **L7 动态 malloc**：不设硬上限，跟踪总用量 `g_kwcc_mempool_l7_used`（dump 可见），timeout 使用者自理
 - **总内存**：初始化 ~530KB（1 池/类型），满载 ~2.1MB
 - **池扩展**：满即扩，直到 max_pools，不预留
-- **TLV pack**：返回 uint8_t* 字节缓冲区，供 mempool 直接 memcpy
+- **TLV build**：返回 `uint8_t*` 字节缓冲区，供 mempool 直接 `memcpy`
 - **TLV to_json**：无 path 时返回 JSON 字符串给 JS，JS 侧 JSON.parse()
 - **常量表**：16 个高频值（null/空串/true/false/0/1/-1），引用不占 slot chunk
 - **key_map**：32768 条目 hash 表，单 key O(1)，前缀扫描 ~3μs
 - **mquickjs ES5 限制**：JS wrapper 用 `var`，无展开参数
 - **JS_ToCString NULL 保护**
-- **TLV 实现位置**：kwcc_js.c，include mquickjs_priv.h，使用 js_object_keys 内部 API
+- **TLV 实现位置**：纯 C 工具在 `kwcc_mempool.c`，JS 转换在 `kwcc_js.c`，include mquickjs_priv.h，使用 js_object_keys 内部 API
 - **生命周期**：L0-L7 统一初始化（~550KB），App/Core 只是业务前缀
 
 ## 生命周期流程
@@ -592,9 +596,9 @@ slot 0: key="a.io/config", size=512/1024B, ref=1, timeout=0, age=30s, type=TLV
 
 ## 执行计划
 
-### Phase 1: 基础骨架（重命名 + 新头文件 + 编译通过）
+### Phase 1: 基础骨架（重命名 + 新头文件 + 常量表 + 编译通过）
 
-**目标**：文件重命名 + 新头文件定义 + Makefile 更新 + 编译通过
+**目标**：文件重命名 + 新头文件定义 + 常量表 + Makefile 更新 + 编译通过
 
 **改动文件**：
 | 文件 | 操作 |
@@ -607,59 +611,44 @@ slot 0: key="a.io/config", size=512/1024B, ref=1, timeout=0, age=30s, type=TLV
 | `src/kwcc.h` | `#include "kwcc_mempool.h"` |
 | `src/kwcc_js.c` | 更新所有 `#include` 和符号引用 |
 | `src/kwcc_io.c` | 更新所有符号引用（`kwcc_pool_*` → `kwcc_mempool_*`） |
+| `src/kwcc_base.h` | 删除旧 config 声明 |
+| `src/kwcc.c` | 清空全部旧实现 |
+| `src/kwcc_ui.c` | 删除 `kwcc_config` JS wrapper |
+| `deps/mquickjs/mqjs_stdlib.c` | 删除 `kwcc_config_set` 注册 |
 
 **编译验证**：`make clean && make` 必须通过
 
----
-
-### Phase 2: 运行时验证（基础 API + 窗口正常显示）
-
-**目标**：确保重命名后程序行为不变，窗口正常显示，无 crash
-
-**测试点**：
-- `make run` 窗口正常显示
-- `kwcc.log` 无错误日志
-- 现有的 `$config.setApp / setString` 等 JS API 仍可用（旧 wrapper 暂时保留）
+**常量表（Phase 1 内做）**：
+- `g_kwcc_mempool_const_table[16]` 初始化（null/空串/0/1/true/false/-1 等高频值）
+- `kwcc_mempool_const_lookup(data, len, type)` — alloc 存 int/bool 时自动匹配常量表
+- 匹配到常量时 slot->type = CONST，data 指向常量区，不占 slab chunk
+- 这是 alloc 的必经路径，必须在 Phase 1 就做
 
 ---
 
-### Phase 3: 常量表实现
+### Phase 2: TLV 序列化
 
-**目标**：`g_kwcc_mempool_const_table[16]` 初始化 + `kwcc_mempool_const_lookup()` 函数
+**目标**：TLV 打包/解包/路径查询 + to_json 转换 + JS ↔ TLV 集成
 
 **改动文件**：
 | 文件 | 内容 |
 |------|------|
-| `src/kwcc_mempool.c` | 常量表定义 + `kwcc_mempool_const_init()` + `kwcc_mempool_const_lookup()` |
-| `src/kwcc_mempool.h` | 常量表声明 + `KWCC_MEMPOOL_CONST_*` 枚举 + `kwcc_mempool_const_t` 结构体 |
-
-**测试点**：
-- `kwcc_mempool_const_lookup("true", 4, STRING)` → 返回 `KWCC_MEMPOOL_CONST_TRUE`
-- `kwcc_mempool_const_lookup(NULL, 0, INT32)` → 返回匹配值
-
----
-
-### Phase 4: TLV 序列化
-
-**目标**：TLV 打包/解包/路径查询 + to_json 转换
-
-**改动文件**：
-| 文件 | 内容 |
-|------|------|
-| `src/kwcc_mempool.c` | `kwcc_mempool_tlv_pack()` / `tlv_to_json()` / `tlv_get_path()` 实现 |
-| `src/kwcc_mempool.h` | TLV 相关 API 声明 |
+| `src/kwcc_mempool.c` | `kwcc_mempool_tlv_build()` / `tlv_iter()` / `tlv_get_path()` / `tlv_to_json()` — 纯 C，无 JS 依赖 |
+| `src/kwcc_mempool.h` | TLV 类型 + API 声明 |
+| `src/kwcc_js.c` | JSValue → TLV 打包（遍历 JS keys + 回调驱动） + TLV → JSValue 解包（调用 tlv_get_path / tlv_to_json） |
 
 **关键约束**：
-- `kwcc_mempool_tlv_pack()` 返回 `uint8_t*` + `out_len`（malloc 缓冲区）
-- `tlv_to_json()` 返回 JSON 字符串（malloc），供 JS 侧 `JSON.parse()`
+- `kwcc_mempool` 层：纯 C 回调钩子，不碰 `JSContext`/`JSValue`
+- `kwcc_js.c` 层：JS 转换逻辑，通过回调调用 mempool 的纯 C 函数
 - 使用 `mquickjs_priv.h` 内部 API（`js_object_keys`）
 - `tlv_get_path()` 按 `/` 分隔符逐层查找
+- TLV 安全边界：所有解析函数必须有边界检查
 
 ---
 
-### Phase 5: $config JS API 重写
+### Phase 3: $config JS API 重写
 
-**目标**：新扁平 API + 业务前缀自动添加 + TLV 集成
+**目标**：新扁平 API + 业务前缀自动添加 + TLV + 常量表集成
 
 **改动文件**：
 | 文件 | 内容 |
@@ -670,29 +659,34 @@ slot 0: key="a.io/config", size=512/1024B, ref=1, timeout=0, age=30s, type=TLV
 
 **C handler 新增/替换**：
 ```
-kwcc_config_set_int      → js_config_set_int (C handler)
-kwcc_config_set_string   → js_config_set_string (C handler)
-kwcc_config_set_bool     → js_config_set_bool (C handler, 内部调用 const_lookup)
-kwcc_config_set_json     → js_config_set_json (C handler, JS对象→JSON字符串)
-kwcc_config_set_tlv      → js_config_set_tlv (C handler, JS对象→TLV二进制)
-kwcc_config_get          → js_config_get (C handler, 通用读取)
-kwcc_config_get_tlv_path → js_config_get_tlv_path (C handler)
-kwcc_config_get_tlv_json → js_config_get_tlv_json (C handler, 无path→JSON)
-kwcc_config_release      → js_config_release (C handler)
-kwcc_config_release_prefix → js_config_release_prefix (C handler)
-kwcc_config_set_max_pools → js_config_set_max_pools (C handler)
+js_config_set_int / js_config_set_string / js_config_set_bool / js_config_set_json / js_config_set_tlv
+js_config_get
+js_config_get_tlv_path / js_config_get_tlv_json
+js_config_release / js_config_release_prefix
+js_config_set_max_pools
+js_config_core_set_tlv
 ```
 
 **JS wrapper**（通过 `JS_Eval` 注入，mquickjs ES5 语法）：
-- 扁平方法名：`appSetInt / appSetString / appSetBool / appSetJson / appSetTlv / appGet / appGetTlv / appRelease / appReleasePrefix / coreGet / setMaxPools`
-- 内部自动加 `"a."` / `"c."` 前缀
+- 扁平方法名：`appSetInt / appSetString / appSetBool / appSetJson / appSetTlv / appGet / appGetTlv / appRelease / appReleasePrefix / coreSetTlv / setMaxPools`
+- App 域内部自动加 `"a."` 前缀，Core 域自动加 `"c."` 前缀
 - 使用 `var` 声明，无箭头函数/展开参数
 
 **删除**：旧的 `setApp / setUser / setCore / getApp / getUser / getCore / releaseApp / releaseUser` 相关 C handler 和 JS wrapper
 
 ---
 
-### Phase 6: 集成验证
+### Phase 4: 运行时验证（基础 API + 窗口正常显示）
+
+**目标**：确保重命名 + TLV + 新 API 后程序行为正常，窗口正常显示，无 crash
+
+**测试点**：
+- `make run` 窗口正常显示
+- `kwcc.log` 无错误日志
+
+---
+
+### Phase 5: 集成验证
 
 **目标**：完整功能端到端测试
 
@@ -706,13 +700,14 @@ kwcc_config_set_max_pools → js_config_set_max_pools (C handler)
 - `$config.appGet("name", "default")` → 返回 `"myapp"`
 - `$config.appRelease("io/port")` → 释放 `a.io/port`
 - `$config.appReleasePrefix("io")` → 释放 `a.io/` 前缀所有
-- `$config.coreGet("version", "unknown")` → 返回 `c.version`
+- `$config.coreSetTlv("io", { max_fds: "16" })` → 存 TLV 到 `c.io`
+- C 模块 `kwcc_mempool_get("c.io")` → 拿 slot → 根据 type 调 `kwcc_mempool_tlv_get_path()` 解析 max_fds
 - `$config.setMaxPools("l5", 4)` → 运行时调整
 - 编译通过 + 窗口正常显示 + 无日志错误
 
 ---
 
-### Phase 7: 清理 + 提交
+### Phase 6: 清理 + 提交
 
 - 删除所有旧 `kwcc_config_set_app` 等残留声明
 - 确认 `kwcc.log` 无错误
