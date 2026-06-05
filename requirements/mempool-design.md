@@ -46,12 +46,12 @@ alloc 时按数据类型 + 长度自动路由到对应池类型：
 
 | 池类型 | chunk 大小 | 槽数/池 | 数据内存 | 元数据(80B/槽) | 合计/池 | 用途 |
 |--------|------------|---------|----------|----------------|---------|------|
-| L0 | 8B | 512 | 4KB | 41KB | ~45KB | int/float/bool |
-| L1 | 32B | 256 | 8KB | 20KB | ~28KB | keys, IDs, 开关 |
-| L2 | 128B | 256 | 32KB | 20KB | ~52KB | 配置值, URL |
-| L3 | 512B | 256 | 128KB | 20KB | ~148KB | 错误消息, JSON片段 |
+| L0 | 8B | 128 | 1KB | 10KB | ~11KB | int/float/bool |
+| L1 | 32B | 128 | 4KB | 10KB | ~14KB | keys, IDs, 开关 |
+| L2 | 128B | 128 | 16KB | 10KB | ~26KB | 配置值, URL |
+| L3 | 512B | 128 | 64KB | 10KB | ~74KB | 错误消息, JSON片段 |
 | L4 | 1KB | 128 | 128KB | 10KB | ~138KB | 短JSON响应, 配置对象 |
-| L5 | 4KB | 16 | 64KB | 1.3KB | ~65KB | HTTP body, 日志 |
+| L5 | 4KB | 32 | 128KB | 2.5KB | ~131KB | HTTP body, 日志 |
 | L6 | 16KB | 8 | 128KB | 0.6KB | ~129KB | SVG, 大文本 |
 | L7 | 动态 | 128 | — | 10KB | ~10KB | 非 slab |
 
@@ -60,10 +60,10 @@ alloc 时按数据类型 + 长度自动路由到对应池类型：
 max_pools[KWCC_MEMPOOL_MAX_TYPES] = { 16, 8, 8, 4, 4, 4, 2, 2 };
 ```
 
-L0 最多 16 池（8192 个 key），L3 最多 4 池，L6/L7 最多 2 池。
+L0 最多 16 池（2048 个 key），L3 最多 4 池（512 个 key），L6/L7 最多 2 池。
 
-**初始化（1 池/类型，8 种）**：~550KB
-**满载（max_pools 全部展开）**：~3.0MB
+**初始化（1 池/类型，8 种）**：~530KB
+**满载（max_pools 全部展开）**：~2.1MB
 
 ## 值编码方式
 
@@ -150,6 +150,27 @@ $config.appGetTlv("io")
 $config.appGetTlv("io", "timeout/user")
   → C侧读slot → TLV块 → tlv_get_path("timeout/user") → "v1"
 ```
+
+### TLV 安全边界（强制）
+
+TLV 数据可能来自外部不可信源（HTTP 响应、文件读取等），解析时 **绝不信任数据内的 Length 声明**，所有 TLV 解析函数必须在每次指针移动前做边界检查：
+
+```c
+// 安全解析模板：每次偏移前必须校验
+static int tlv_parse_entry(const uint8_t *ptr, const uint8_t *end, ...) {
+    if (ptr + 3 > end) return TLV_ERROR_TRUNCATED;          // Type(1B) + Len(2B) 不完整
+    uint16_t total_len = read_le16(ptr + 1);
+    if (total_len < 3) return TLV_ERROR_INVALID_LEN;         // 长度异常
+    if (ptr + total_len > end) return TLV_ERROR_OVERRUN;     // 越界保护
+    ...
+}
+```
+
+**必须加边界检查的函数**：
+- `kwcc_mempool_tlv_get_path()` — 路径查询，每次跳子节点前校验
+- `kwcc_mempool_tlv_to_json()` — JSON 转换，遍历所有条目时校验
+- `kwcc_mempool_tlv_pack()` — 输出缓冲区满时校验（防内存溢出）
+- 任何直接读 TLV 字节的内部辅助函数
 
 ## 数据类型（slot->type，uint8_t）
 
@@ -333,6 +354,9 @@ $config.setMaxPools = function(t, n) { kwcc_config_set_max_pools(t, n); };
 - `$config.setMaxPools()` 可指定每种类型的上限，n < 4 自动修正为 4
 - **池扩展策略**：每种类型初始化开 1 池，满即扩，直到该类型的 max_pools
 - **L7 动态数据**：固定 128 元信息槽，不占 slab 空间，通过独立 malloc 分配
+  - 不设硬上限，信任业务调用者（alloc_dynamic 本身就是要大内存的场景）
+  - 但跟踪 L7 总物理内存用量（`g_kwcc_mempool_l7_used` 全局变量），dump 中可见
+  - timeout 不强制，使用者自己传，不设兜底
 - **key_map**：key → pool_id 映射（扁平 hash 表，32768 条目，O(1) 查找）
   - 前缀扫描：遍历匹配 "prefix/" ≈ 3μs（50 个实际条目）
   - 单 key 查找：hash 一次，O(1) ≈ 100ns
@@ -436,8 +460,9 @@ typedef struct {
 - **$config 是唯一公开 API**，`$memory` 不暴露
 - **类型标记**：uint8_t，0-7（STRING/INT32/INT64/FLOAT/DOUBLE/JSON/TLV/CONST）
 - **L0-L7 按池类型分层**：每种池独立 chunk 大小 + 独立槽数 + 独立扩缩容
-- **单池规格**：L0 ~45KB/512槽 到 L6 ~129KB/8槽，L7 仅 128 元信息槽
-- **总内存**：初始化 ~550KB（1 池/类型），满载 ~3.0MB
+- **单池规格**：L0 ~11KB/128槽 到 L6 ~129KB/8槽，L7 仅 128 元信息槽
+- **L7 动态 malloc**：不设硬上限，跟踪总用量 `g_kwcc_mempool_l7_used`（dump 可见），timeout 使用者自理
+- **总内存**：初始化 ~530KB（1 池/类型），满载 ~2.1MB
 - **池扩展**：满即扩，直到 max_pools，不预留
 - **TLV pack**：返回 uint8_t* 字节缓冲区，供 mempool 直接 memcpy
 - **TLV to_json**：无 path 时返回 JSON 字符串给 JS，JS 侧 JSON.parse()
@@ -453,7 +478,7 @@ typedef struct {
 ```
 init() — main.m
   │
-  ├─ 1. kwcc_mempool_init()        → L0-L7 各开 1 池（~550KB）
+  ├─ 1. kwcc_mempool_init()        → L0-L7 各开 1 池（~530KB）
   │                                    max_pools = 编译时默认值
   │
   ├─ 2. kwcc_create_js()           → JSContext 就绪，注入 $config
@@ -497,14 +522,14 @@ void kwcc_mempool_dump_all(const char *filepath, int show_content);
 
 ```
 === Memory Pool Dump ===
-L0 (8B):  2 pools  [ 512/1024 slots used ]
-L1 (32B): 1 pool   [ 64/256 slots used ]
-L2 (128B): 1 pool  [ 32/256 slots used ]
-L3 (512B): 1 pool  [ 10/256 slots used ]
+L0 (8B):  2 pools  [ 100/256 slots used ]
+L1 (32B): 1 pool   [ 64/128 slots used ]
+L2 (128B): 1 pool  [ 32/128 slots used ]
+L3 (512B): 1 pool  [ 10/128 slots used ]
 L4 (1KB): 1 pool   [ 5/128 slots used ]
-L5 (4KB): 1 pool   [ 2/16 slots used ]
+L5 (4KB): 1 pool   [ 2/32 slots used ]
 L6 (16KB): 1 pool  [ 1/8 slots used ]
-L7 (dynamic): 0 pools [ 0/128 slots used ]
+L7 (dynamic): 0 pools [ 0/128 slots used, total 0MB ]
 ```
 
 用途：快速判断哪个池满了、使用率如何、是否需要调整 max_pools。
@@ -520,7 +545,7 @@ $config.dumpAll("pool_dump.txt", true)   // 元信息 + 数据内容明细
 **第 2 参 = true 时**：输出数据内容明细（按文本/二进制分段规则）。
 
 ```
-=== L0 Pool 0 (8B chunks, 512/512 slots) ===
+=== L0 Pool 0 (8B chunks, 128/128 slots) ===
 slot 0: key="a.io/port", size=4/8B, ref=1, timeout=0, age=120s, type=CONST
   data: CONST[0] (KWCC_MEMPOOL_CONST_ONE)
 
