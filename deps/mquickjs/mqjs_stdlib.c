@@ -29,21 +29,10 @@
 #include "mquickjs_build.h"
 
 #ifdef CONFIG_KWCC
-/* Declarations for kwcc JS handlers (defined in kwcc_js.c) */
+/* kwcc JS handler declarations — defined in kwcc_js.c */
 typedef struct JSContext JSContext;
 typedef unsigned long long JSValue;
-JSValue js_config_set_app(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-JSValue js_config_set_user(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-JSValue js_config_get_app(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-JSValue js_config_get_user(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-JSValue js_config_release_app(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-JSValue js_config_release_user(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-JSValue js_config_set_app_size(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-JSValue js_config_set_user_size(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-#ifdef KWCC_DEBUG
-JSValue js_config_dump(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-JSValue js_config_dump_all(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-#endif
+JSValue js_kwcc_ui(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 #endif
 
 /* defined in mqjs_example.c */
@@ -393,18 +382,6 @@ static const JSPropDef js_global_object[] = {
     JS_CFUNC_DEF("print", 1, js_print),
 #ifdef CONFIG_KWCC
     JS_CFUNC_DEF("kwcc_ui", 3, js_kwcc_ui),
-    JS_CFUNC_DEF("kwcc_config_set_app", 2, js_config_set_app),
-    JS_CFUNC_DEF("kwcc_config_set_user", 3, js_config_set_user),
-    JS_CFUNC_DEF("kwcc_config_get_app", 1, js_config_get_app),
-    JS_CFUNC_DEF("kwcc_config_get_user", 1, js_config_get_user),
-    JS_CFUNC_DEF("kwcc_config_release_app", 1, js_config_release_app),
-    JS_CFUNC_DEF("kwcc_config_release_user", 1, js_config_release_user),
-    JS_CFUNC_DEF("kwcc_config_set_app_size", 1, js_config_set_app_size),
-    JS_CFUNC_DEF("kwcc_config_set_user_size", 1, js_config_set_user_size),
-#ifdef KWCC_DEBUG
-    JS_CFUNC_DEF("kwcc_config_dump", 0, js_config_dump),
-    JS_CFUNC_DEF("kwcc_config_dump_all", 2, js_config_dump_all),
-#endif
 #endif
 #ifdef CONFIG_CLASS_EXAMPLE
     JS_PROP_CLASS_DEF("Rectangle", &js_rectangle_class),

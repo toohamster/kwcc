@@ -289,12 +289,35 @@ C 层：kwcc_mempool（按 数据类型+长度 分池的 KV 存储）
 C 层 API（纯 KV，无默认值）：
   kwcc_mempool_alloc(data_type, key, size, timeout)      // 按 data_type + size 自动路由 L0-L6
   kwcc_mempool_alloc_dynamic(key, cap, timeout)         // 直走 L7（动态 malloc）
-  kwcc_mempool_get(pool_id, key)                        // 返回 slot*
-  kwcc_mempool_set(pool_id, slot, data, size)           // 写数据
-  kwcc_mempool_release(pool_id, slot)                   // ref--
-  kwcc_mempool_get_keys(pool_id, prefix)                // 前缀扫描
-  kwcc_mempool_get_str(pool_id, key, default_value)     // 返回 null-terminated 字符串
+  kwcc_mempool_get(key)                                 // 返回 slot*（按 key 精确匹配）
+  kwcc_mempool_set(slot, data, size)                    // 写数据
+  kwcc_mempool_release(slot)                            // ref--
+  kwcc_mempool_get_keys(prefix, out_keys, max)          // 前缀扫描
+  kwcc_mempool_get_str(key, default_value)              // 返回 null-terminated 字符串
   kwcc_mempool_const_lookup(data, len, type)            // 常量表查找
+
+Config 层（kwcc_config.h + kwcc_config.c，C 模块的存取接口，无 mquickjs 依赖）：
+  App 域（自动拼 "a." 前缀）：
+    kwcc_config_set_app_int(key, val)                   // 写 int，走常量表
+    kwcc_config_set_app_string(key, val)                // 写字符串
+    kwcc_config_set_app_bool(key, val)                  // 写 bool，走常量表
+    kwcc_config_set_app_tlv(key, tlv_data, tlv_len)     // 写 TLV 二进制
+    kwcc_config_get_app(key, default)                   // 读，返回字符串或 NULL
+    kwcc_config_release_app(key)                        // 释放单个 key
+    kwcc_config_release_app_prefix(key)                 // 释放 key/ 前缀所有
+
+  Core 域（自动拼 "c." 前缀）：
+    kwcc_config_set_core_tlv(key, tlv_data, tlv_len)    // 写 TLV（Core 只允许 TLV）
+    kwcc_config_get_core(key, default)                  // 读，返回字符串或 NULL
+    kwcc_config_get_core_slot(key)                      // 读，返回 slot*（C 模块可解析 TLV）
+    kwcc_config_release_core(key)                       // 释放单个 key
+
+  通用：
+    kwcc_config_set_max_pools(type, max)                // 池管理
+
+  用途：C 业务模块（如 kwcc_io.c）不需要知道前缀拼接和 mempool 底层。
+  例：kwcc_config_get_core("io/max_fds") → mempool 中查找 "c.io/max_fds"
+  例：kwcc_config_set_app_int("port", 8080) → mempool 中存 "a.port"
 
 Key 前缀拼接（`$config` 层业务逻辑）：
   在 `kwcc_js.c` 中实现，负责给 key 拼 `a.` / `c.` 前缀。
@@ -320,10 +343,8 @@ JS 层：$config（唯一公开的配置工具）
 
   Core 域（JS 可写、C 可读）：
     JS 写：只允许 coreSetTlv(key, obj) → 存 TLV 到 "c." 前缀
-    C 读：直接调 `kwcc_mempool_get()` 拿 slot，根据 `slot->type` 调对应工具：
-      - type=TLV → 调 `kwcc_mempool_tlv_get_path()` 解析
-      - type=STRING → 直接读 `slot->data`
-      - 无简化封装，C 模块直接用 mempool 提供的纯 C 工具
+    C 读：调 `kwcc_config_get_core(key)`，自动拼 "c." 前缀并返回字符串。
+          TLV 解析时：C 模块先拿到 slot，再调 `kwcc_mempool_tlv_get_path()` 解析。
 
   池管理：
     setMaxPools(type, n)     // 调整某池类型最大池数
@@ -444,12 +465,88 @@ typedef struct {
 
 > **注意**：代码已回滚，所有清理步骤待重新执行。
 
-## 当前状态
+## 当前状态（2026-06-13 更新）
 
-- 代码在 `kwcc_pool.h/c`（旧命名）
-- Phase 1-7 均未开始，待从零执行
+- Phase 1（基础骨架）：已完成但有 bug — `kwcc_mempool_alloc` 中 const_lookup 为空操作
+- Phase 2（TLV）：已完成但有 bug — `tlv_to_json` 缺 JSON 转义
+- Phase 3（$config JS API）：未执行，仍为旧 setApp/setUser API
+- Phase 4-6：未执行
+- **决定**：推倒重做，删除现有旧代码，按四层顺序从头写
 
-## 实施步骤（待执行，见下方 Phase 1-6）
+## 实施步骤（推倒重做）
+
+### 步骤一：删除旧代码
+1. 删除 `src/kwcc_mempool.c`、`src/kwcc_mempool.h`
+2. 删除 `src/kwcc_config.h`
+3. 删除 `src/kwcc_js.c` 中所有 $config 相关旧代码（`kwcc_config_get_core/get_app`、`kwcc_register_config_js`、旧 8 个 C handler、TLV 集成函数）
+4. 删除 `src/kwcc_js.h` 中所有 $config 旧声明
+5. 删除 `deps/mquickjs/mqjs_stdlib.c` 中 CONFIG_KWCC 区域所有旧注册
+6. 恢复 `app/main.js` 到无 $config 调用状态（删除 setAppSize/setUserSize）
+
+### 步骤二：第1层 — 纯 C mempool 内存管理（新建 `src/kwcc_mempool.h` + `src/kwcc_mempool.c`）
+1. 重写 `kwcc_mempool.h`：L0-L7 池类型、slot 结构体(88B)、key_map(32768)、常量表(16)、数据类型 enum、TLV 类型、API 声明
+2. 重写 `kwcc_mempool.c`：
+   - 常量表初始化 `kwcc_mempool_const_init()` + `kwcc_mempool_const_lookup()`
+   - FNV-1a hash、key_map 查找/插入/删除
+   - Slab 操作（init/alloc/free）、池创建
+   - `kwcc_mempool_init()` — 初始化所有层，各开 1 池，max_pools = {16,8,8,4,4,4,2,2}
+   - `kwcc_mempool_shutdown()` — 释放所有资源
+   - `kwcc_mempool_alloc(data_type, key, size, timeout)` — **包含 const_lookup**：INT32/INT64 匹配常量表 → 分配 const slot（不占 slab），未匹配 → 按 size 路由 L0-L6
+   - `kwcc_mempool_alloc_dynamic(key, cap, timeout)` — L7 动态 malloc
+   - `kwcc_mempool_get(key)` — key_map 查找返回 slot
+   - `kwcc_mempool_set(slot, data, size)` — 写数据（含 const_lookup 兜底）
+   - `kwcc_mempool_acquire/release` — ref_count 管理
+   - `kwcc_mempool_get_keys(prefix, out_keys, max)` — 前缀扫描
+   - `kwcc_mempool_get_str(key, default)` — 返回字符串
+   - `kwcc_mempool_set_max_pools(type, max)` — 运行时调整
+   - GC 三层：`kwcc_mempool_gc()` / `kwcc_mempool_gc_force()` / `kwcc_mempool_gc_auto()`（80% 阈值）
+   - `kwcc_mempool_expand(type)` — 满即扩
+   - `g_kwcc_mempool_l7_used` 全局变量跟踪 L7 用量
+
+### 步骤三：第2层 — Config 层（新建 `src/kwcc_config.h`）
+1. 声明 `kwcc_config_get_core(key)` / `kwcc_config_get_app(key)`
+2. 实现在 `kwcc_mempool.c` 中（或单独 `kwcc_config.c`）：自动拼 "c."/"a." 前缀，调 `kwcc_mempool_get_str`
+
+### 步骤四：第3层 — TLV 序列化（写在 `kwcc_mempool.c` 中，纯 C）
+1. `kwcc_mempool_tlv_build(pack_cb, user_data, out_len)` — 回调驱动构建
+2. `kwcc_mempool_tlv_iter(tlv_data, tlv_len, iter_cb, user_data)` — 遍历解析
+3. `kwcc_mempool_tlv_get_path(tlv_data, tlv_len, path, out_len)` — 路径查询，**每次偏移前边界检查**
+4. `kwcc_mempool_tlv_to_json(tlv_data, tlv_len, out_len)` — TLV→JSON，**字符串转义 `"` `\` 控制字符**
+5. `kwcc_mempool_tlv_free_json(ptr)` — 释放 JSON 缓冲
+
+### 步骤五：第4层 — C-JS 接口（`src/kwcc_js.c` + `src/kwcc_js.h`）
+1. 实现 `kwcc_config_get_core/get_app`（调 mempool）
+2. 实现 12 个 C handler：`js_config_set_int` / `set_string` / `set_bool` / `set_json` / `set_tlv` / `get` / `get_tlv_path` / `get_tlv_json` / `release` / `release_prefix` / `set_max_pools` / `core_set_tlv`
+3. 实现 TLV 集成函数：`kwcc_js_value_to_tlv` / `kwcc_tlv_to_js_value` / `kwcc_tlv_path_to_js_value`
+4. `kwcc_register_config_js()` — 注入 JS wrapper（`var` 声明，无箭头/展开）
+5. 更新 `kwcc_js.h` — 所有新声明
+6. 更新 `deps/mquickjs/mqjs_stdlib.c` — `#ifdef CONFIG_KWCC` 区域 12 个 `JS_CFUNC_DEF`（只在 `js_global_object[]` 注册，不在 `js_c_function_decl[]` 重复）
+7. 更新 `app/main.js` — 删除旧调用
+
+### 步骤六：编译 + 运行时验证
+1. `make clean && make` 编译通过
+2. `make run` 窗口正常显示，`kwcc.log` 无错误
+3. 按方案第 696-709 行逐个功能验证
+
+### 步骤七：清理 + 提交
+- 删除所有旧残留声明
+- 确认 `kwcc.log` 无错误
+- 提交 git
+
+### 改动文件汇总
+| 文件 | 操作 |
+|------|------|
+| `src/kwcc_mempool.h` | 删除旧文件，重写 |
+| `src/kwcc_mempool.c` | 删除旧文件，重写（含 TLV + const + key_map + GC + config_get） |
+| `src/kwcc_config.h` | 删除旧文件，重写 |
+| `src/kwcc_js.c` | 删除所有旧 $config 代码，重写 12 个 C handler + JS wrapper + TLV 集成 |
+| `src/kwcc_js.h` | 删除旧声明，写新声明 |
+| `deps/mquickjs/mqjs_stdlib.c` | 删除旧 CONFIG_KWCC，写新 12 个注册 |
+| `app/main.js` | 删除旧调用 |
+| `src/kwcc.h` | 确认包含 `kwcc_mempool.h` + `kwcc_config.h` |
+| `Makefile` | 确认依赖正确 |
+
+## 实施步骤（待执行，见上方步骤一至七）
 
 ## 关键设计决策
 
@@ -603,18 +700,17 @@ slot 0: key="a.io/config", size=512/1024B, ref=1, timeout=0, age=30s, type=TLV
 **改动文件**：
 | 文件 | 操作 |
 |------|------|
-| `src/kwcc_pool.h` | 重命名为 `src/kwcc_mempool.h` |
-| `src/kwcc_pool.c` | 重命名为 `src/kwcc_mempool.c` |
+| `src/kwcc_pool.h` | 重命名为 `src/kwcc_mempool.h`（删除旧文件） |
+| `src/kwcc_pool.c` | 重命名为 `src/kwcc_mempool.c`（删除旧文件） |
 | `src/kwcc_mempool.h` | 全面重写：L0-L7 池类型 + slot 结构体 + key_map + 常量表 + API 声明 |
 | `src/kwcc_mempool.c` | 全面重写：多池管理 + alloc/get/set/release + key_map + GC + 常量表 + L7 动态分配 |
+| `src/kwcc_config.h` | 新建：Config 层 C 接口声明（无 mquickjs 依赖），`kwcc_config_get_core/get_app` |
+| `src/kwcc_js.c` | 更新所有 `#include` 和符号引用 + 实现 `kwcc_config_get_core/get_app` |
+| `src/kwcc_js.h` | 添加 `kwcc_config_get_core/get_app` 声明 |
+| `src/kwcc_io.c` | 改为 `kwcc_config_get_core("io/max_fds")`，不直接调 mempool |
 | `Makefile` | `kwcc_pool.c` → `kwcc_mempool.c`，头文件依赖更新 |
-| `src/kwcc.h` | `#include "kwcc_mempool.h"` |
-| `src/kwcc_js.c` | 更新所有 `#include` 和符号引用 |
-| `src/kwcc_io.c` | 更新所有符号引用（`kwcc_pool_*` → `kwcc_mempool_*`） |
-| `src/kwcc_base.h` | 删除旧 config 声明 |
-| `src/kwcc.c` | 清空全部旧实现 |
-| `src/kwcc_ui.c` | 删除 `kwcc_config` JS wrapper |
-| `deps/mquickjs/mqjs_stdlib.c` | 删除 `kwcc_config_set` 注册 |
+| `src/kwcc.h` | `#include "kwcc_mempool.h"` + `#include "kwcc_config.h"` |
+| `src/main.m` | `kwcc_mem_init_defaults()` → `kwcc_mempool_init()` |
 
 **编译验证**：`make clean && make` 必须通过
 

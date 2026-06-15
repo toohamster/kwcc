@@ -4,10 +4,6 @@
 load("app/runtime/store.js");
 load("app/runtime/bus.js");
 
-/* ── configure memory pools ── */
-$config.setAppSize(256 * 1024);
-$config.setUserSize(1 * 1024 * 1024);
-
 /* ── framework global variables ($ prefix) ── */
 var $modules = new Object();
 var $moduleKeys = [];
