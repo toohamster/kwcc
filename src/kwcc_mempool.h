@@ -1,6 +1,11 @@
 /* kwcc_mempool.h — multi-pool Slab memory pool with TLV serialization
  * Pure C, no mquickjs dependency.
  *
+ * @note Thread Safety
+ *   This library is NOT thread-safe. All calls must be made from
+ *   the same thread (typically the main loop thread).
+ *   Concurrent access without external locking is undefined behavior.
+ *
  * Pool types (by data length):
  *   L0=8B, L1=32B, L2=128B, L3=512B, L4=1KB, L5=4KB, L6=16KB, L7=dynamic malloc
  */
@@ -149,6 +154,15 @@ kwcc_mempool_slot_t *kwcc_mempool_alloc_dynamic(const char *key,
                                                  uint32_t cap, uint32_t timeout_sec);
 kwcc_mempool_slot_t *kwcc_mempool_get(const char *key);
 void kwcc_mempool_set(kwcc_mempool_slot_t *slot, const void *data, uint32_t size);
+
+/**
+ * @param key            key to look up in the mempool
+ * @param default_value  returned when key is not found (not copied).
+ *                       Caller must ensure default_value remains valid
+ *                       while the returned pointer is in use.
+ * @return               pointer to internal slot data (do NOT free),
+ *                       or default_value if key not found.
+ */
 const char *kwcc_mempool_get_str(const char *key, const char *default_value);
 
 void kwcc_mempool_acquire(kwcc_mempool_slot_t *slot);

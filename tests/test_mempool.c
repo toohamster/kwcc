@@ -110,15 +110,13 @@ int main(void) {
     str = kwcc_mempool_get_str("nonexistent", "default");
     TEST("get_str returns default", str != NULL && strcmp(str, "default") == 0);
 
-    /* ── 6. acquire/release ── */
-    printf("\n[6] acquire/release\n");
+    /* ── 6. ref_count initial value = 1 ── */
+    printf("\n[6] ref_count initial value\n");
     s1 = kwcc_mempool_get("test/name");
     if (s1) {
-        TEST("ref_count starts at 0", s1->ref_count == 0);
+        TEST("ref_count starts at 1 (not 0)", s1->ref_count == 1);
         kwcc_mempool_acquire(s1);
-        TEST("acquire increments", s1->ref_count == 1);
-        kwcc_mempool_acquire(s1);
-        TEST("acquire again", s1->ref_count == 2);
+        TEST("acquire increments", s1->ref_count == 2);
         kwcc_mempool_release(s1);
         TEST("release decrements", s1->ref_count == 1);
     }
@@ -229,15 +227,50 @@ int main(void) {
     TEST("set_max_pools min is 4", g_kwcc_mempool_mgr.max_pools[KWCC_MEMPOOL_L3] == 4);
     g_kwcc_mempool_mgr.max_pools[KWCC_MEMPOOL_L3] = old_max;
 
-    /* ── 15. GC ── */
-    printf("\n[15] GC\n");
+    /* ── 15. ref_count + GC ── */
+    printf("\n[15] ref_count + GC\n");
+    /* alloc → ref=1 → GC should NOT collect */
+    kwcc_mempool_alloc(KWCC_MEMPOOL_TYPE_STRING, "test/gc_keep", 20, 0);
+    kwcc_mempool_slot_t *s_gc = kwcc_mempool_get("test/gc_keep");
+    TEST("alloc ref=1", s_gc != NULL && s_gc->ref_count == 1);
     kwcc_mempool_gc_force();
-    /* Existing keys with ref=0 but no timeout should survive (no auto-GC without timeout) */
-    kwcc_mempool_slot_t *s1c = kwcc_mempool_get("test/name");
-    TEST("GC preserves non-expired keys", s1c != NULL);
+    s_gc = kwcc_mempool_get("test/gc_keep");
+    TEST("GC preserves ref=1 slot", s_gc != NULL);
 
-    /* ── 16. Shutdown ── */
-    printf("\n[16] shutdown\n");
+    /* alloc → release → ref=0 → GC SHOULD collect */
+    kwcc_mempool_slot_t *s_rel = kwcc_mempool_alloc(KWCC_MEMPOOL_TYPE_STRING, "test/gc_drop", 20, 0);
+    TEST("alloc ref=1", s_rel != NULL && s_rel->ref_count == 1);
+    if (s_rel) kwcc_mempool_release(s_rel);
+    s_rel = kwcc_mempool_get("test/gc_drop");
+    TEST("after release ref=0", s_rel != NULL && s_rel->ref_count == 0);
+    kwcc_mempool_gc_force();
+    s_rel = kwcc_mempool_get("test/gc_drop");
+    TEST("GC collects ref=0 slot", s_rel == NULL);
+
+    /* ── 16. TLV boundary check ── */
+    printf("\n[16] TLV boundary check\n");
+    /* Nested object path: get_path into non-existent sub-object */
+    test_pack_state_t simple;
+    simple.keys[0] = "flat";  simple.vals[0] = "value"; simple.types[0] = KWCC_MEMPOOL_TLV_FIELD;
+    simple.count = 1;
+    simple.idx = 0;
+    uint8_t *flat_tlv = kwcc_mempool_tlv_build(test_pack_cb, &simple, &tlv_len);
+    TEST("flat TLV builds", flat_tlv != NULL);
+    if (flat_tlv) {
+        /* Path query on flat TLV for non-existent nested path */
+        size_t vlen = 0;
+        const char *v = kwcc_mempool_tlv_get_path(flat_tlv, tlv_len, "nested/key", &vlen);
+        TEST("get_path returns NULL for non-existent nested path", v == NULL);
+        kwcc_mempool_tlv_free_json((char *)flat_tlv);
+    }
+
+    /* Truncated TLV data: force error code */
+    uint8_t truncated[2] = { KWCC_MEMPOOL_TLV_FIELD, 0x10 };  /* missing length byte + data */
+    int iter_result = kwcc_mempool_tlv_iter(truncated, sizeof(truncated), test_iter_cb, NULL);
+    TEST("truncated TLV returns error code", iter_result < 0);
+
+    /* ── 17. Shutdown ── */
+    printf("\n[17] shutdown\n");
     kwcc_mempool_shutdown();
     TEST("shutdown completes", g_kwcc_mempool_mgr.pool_count[KWCC_MEMPOOL_L0] == 0);
     TEST("L7 usage zeroed", g_kwcc_mempool_l7_used == 0);

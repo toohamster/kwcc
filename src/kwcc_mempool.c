@@ -316,6 +316,7 @@ static void kwcc_mempool_init_slot(kwcc_mempool_slot_t *s, uint8_t data_type, co
     s->pool_idx = pool_idx;
     s->slot_idx = slot_idx;
     s->type = data_type;
+    s->ref_count = 1;   /* caller holds implicit reference */
     s->in_use = 1;
     s->alloc_time = (uint32_t)time(NULL);
     s->last_access = s->alloc_time;
@@ -707,7 +708,10 @@ int kwcc_mempool_get_keys(const char *prefix, const char **out_keys, int max_key
 
 void kwcc_mempool_set_max_pools(int pool_type, int max) {
     if (pool_type < 0 || pool_type >= KWCC_MEMPOOL_MAX_TYPES) return;
-    if (max < 4) max = 4;
+    if (max < 4) {
+        log_warn("mempool: set_max_pools(L%d, %d): value too small, clamped to 4", pool_type, max);
+        max = 4;
+    }
     g_kwcc_mempool_mgr.max_pools[pool_type] = max;
     log_info("mempool: L%d max_pools set to %d", pool_type, max);
 }
@@ -765,6 +769,7 @@ uint8_t *kwcc_mempool_tlv_build(kwcc_mempool_tlv_pack_cb cb, void *user_data,
 int kwcc_mempool_tlv_iter(const uint8_t *tlv_data, size_t tlv_len,
                            kwcc_mempool_tlv_iter_cb cb, void *user_data) {
     if (!tlv_data || tlv_len == 0) return -1;
+    if (tlv_len < 3) return -5;  /* truncated: need at least Type(1B) + TotalLen(2B) */
     const uint8_t *ptr = tlv_data;
     const uint8_t *end = tlv_data + tlv_len;
     int entries = 0;
