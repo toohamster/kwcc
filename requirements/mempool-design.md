@@ -439,80 +439,92 @@ typedef struct {
 
 ## 关键源文件
 
-| 文件 | 作用 | 本次改动 |
-|------|------|---------|
-| `src/kwcc_mempool.h` | 重命名自 kwcc_pool.h | 类型定义 + API 声明 |
-| `src/kwcc_mempool.c` | 重命名自 kwcc_pool.c | 核心实现（多池管理 + key_map + TLV + 常量表） |
-| `src/kwcc.h` | umbrella header | 加 `#include "kwcc_mempool.h"` |
-| `src/kwcc_js.c` | JS lifecycle | 添加 `$config` JS API + C handler + TLV pack/unpack/to_json |
-| `src/kwcc_ui.c` | UI bridge | 在 `kwcc_register_ui` 中加 `$config` JS wrapper |
-| `src/main.m` | Sokol lifecycle | `init()` 加 `kwcc_mempool_init()` |
-| `src/kwcc_base.h` | base infra | 添加 `KWCC_DEBUG` 宏 + 编译默认宏 |
-| `app/main.js` | JS entry | 加 `$config.setMaxPools` 调用 |
-| `Makefile` | build | 加 `kwcc_mempool.c` 编译规则 |
-| `deps/mquickjs/mqjs_stdlib.c` | stdlib | 加 C 函数注册（CONFIG_KWCC） |
-| `src/kwcc_io.c` | I/O reactor | 迁移到 `kwcc_mempool_*` API |
+| 文件 | 作用 | 状态 |
+|------|------|------|
+| `src/kwcc_mempool.h` | L0-L7 池类型 + slot + key_map + 常量表 + TLV + API | ✅ 已完成 |
+| `src/kwcc_mempool.c` | 核心实现（多池 + key_map + TLV + 常量表 + GC + dump） | ✅ 已完成 |
+| `src/kwcc_config.h` | Config 层 C 接口声明（10 个 API） | ✅ 已完成 |
+| `src/kwcc_config.c` | Config 层实现（自动拼 "a."/"c." 前缀） | ✅ 已完成 |
+| `src/kwcc.h` | umbrella header | ✅ 已完成 |
+| `src/kwcc_js.c` | JS lifecycle（$config 待实现） | ⏳ Phase 4 |
+| `src/kwcc_js.h` | JS lifecycle 声明 | ⏳ Phase 4 |
+| `src/kwcc_ui.c` | UI bridge + SVG + 字体 + input | ✅ 已完成 |
+| `src/kwcc_ui.h` | UI 模块声明 + SVG cache extern | ✅ 已完成 |
+| `src/kwcc_bus.c` | C→JS 消息总线桥接 | ✅ 已完成 |
+| `src/kwcc_bus.h` | 消息总线声明 | ✅ 已完成 |
+| `src/kwcc_io.c` | I/O Reactor（select() FD 管理） | ✅ 已完成 |
+| `src/kwcc_io.h` | I/O 管理器声明 | ✅ 已完成 |
+| `src/main.m` | Sokol lifecycle + NanoVG 渲染 | ✅ 已完成 |
+| `deps/mquickjs/mqjs_stdlib.c` | stdlib（$config 注册待实现） | ⏳ Phase 4 |
+| `Makefile` | 两阶段构建 | ✅ 已完成 | |
 
-## 清理步骤（旧 `__kwcc_config` 系统）
+## 清理步骤（旧 `__kwcc_config` 系统）— ✅ 已完成
 
-1. **`src/kwcc.c`** — 清空全部旧实现
-2. **`src/kwcc_base.h`** — 删除旧 config 声明
-3. **`src/kwcc_io.c`** — 迁移到 mempool API
-4. **`src/kwcc_js.c`** — 删除 `kwcc_config_set_jsctx` + `js_kwcc_config_set`
-5. **`src/kwcc_js.h`** — 删除旧声明
-6. **`src/kwcc_ui.c`** — 删除 `kwcc_config` JS wrapper
-7. **`deps/mquickjs/mqjs_stdlib.c`** — 删除 `kwcc_config_set` 注册
+1. ~~删除 `src/kwcc.c`~~ — 已清空
+2. ~~删除 `src/kwcc_base.h` 旧 config 声明~~ — 已删除
+3. ~~`src/kwcc_io.c` 迁移到 mempool API~~ — 已完成
+4. ~~删除 `src/kwcc_js.c` 旧 $config 代码~~ — 已清空
+5. ~~删除 `src/kwcc_js.h` 旧声明~~ — 已清空
+6. ~~删除 `src/kwcc_ui.c` 旧 config wrapper~~ — 已删除
+7. ~~删除 `deps/mquickjs/mqjs_stdlib.c` 旧注册~~ — 已删除
 
-> **注意**：代码已回滚，所有清理步骤待重新执行。
+## 当前状态（2026-06-18 更新）
 
-## 当前状态（2026-06-13 更新）
-
-- Phase 1（基础骨架）：已完成但有 bug — `kwcc_mempool_alloc` 中 const_lookup 为空操作
-- Phase 2（TLV）：已完成但有 bug — `tlv_to_json` 缺 JSON 转义
-- Phase 3（$config JS API）：未执行，仍为旧 setApp/setUser API
+- Phase 1（基础骨架）：✅ 已完成 — kwcc_mempool.h/c 重写 + 常量表 + key_map + GC + L7 动态分配 + 编译通过
+- Phase 2（TLV）：✅ 已完成 — tlv_build/tlv_iter/tlv_get_path/tlv_to_json + JSON 转义 + 安全边界检查
+- Phase 2.5（Config 层）：✅ 已完成 — kwcc_config.h/c 10 个 C API + 自动拼 "a."/"c." 前缀
+- Phase 3（$config JS API）：❌ 未执行（下一步）
 - Phase 4-6：未执行
-- **决定**：推倒重做，删除现有旧代码，按四层顺序从头写
 
-## 实施步骤（推倒重做）
+**已完成的测试验证**：
+- `tests/test_mempool.c` — 46 测试全部通过（init/alloc/set/get/const/ref_count/GC/TLV/JSON 转义/L7）
+- `tests/test_config.c` — 19 测试全部通过（set/get string/int/bool/TLV/release/prefix/max_pools/default/跨域隔离）
 
-### 步骤一：删除旧代码
-1. 删除 `src/kwcc_mempool.c`、`src/kwcc_mempool.h`
-2. 删除 `src/kwcc_config.h`
-3. 删除 `src/kwcc_js.c` 中所有 $config 相关旧代码（`kwcc_config_get_core/get_app`、`kwcc_register_config_js`、旧 8 个 C handler、TLV 集成函数）
-4. 删除 `src/kwcc_js.h` 中所有 $config 旧声明
-5. 删除 `deps/mquickjs/mqjs_stdlib.c` 中 CONFIG_KWCC 区域所有旧注册
-6. 恢复 `app/main.js` 到无 $config 调用状态（删除 setAppSize/setUserSize）
+**命名规范整改（2026-06-18）**：
+- 所有 C 符号已统一 `kwcc_<module>_` 前缀
+- 全局变量 `g_kwcc_<module>_`，static 变量也加 `g_kwcc_` 前缀
+- 宏 `KWCC_<MODULE>_`，类型 `<module>_t`
+- 涉及文件：`kwcc_mempool.c`、`kwcc_ui.c`、`kwcc_bus.c`、`kwcc_io.c`、`kwcc_config.c`、`main.m`
 
-### 步骤二：第1层 — 纯 C mempool 内存管理（新建 `src/kwcc_mempool.h` + `src/kwcc_mempool.c`）
-1. 重写 `kwcc_mempool.h`：L0-L7 池类型、slot 结构体(88B)、key_map(32768)、常量表(16)、数据类型 enum、TLV 类型、API 声明
-2. 重写 `kwcc_mempool.c`：
-   - 常量表初始化 `kwcc_mempool_const_init()` + `kwcc_mempool_const_lookup()`
-   - FNV-1a hash、key_map 查找/插入/删除
-   - Slab 操作（init/alloc/free）、池创建
-   - `kwcc_mempool_init()` — 初始化所有层，各开 1 池，max_pools = {16,8,8,4,4,4,2,2}
-   - `kwcc_mempool_shutdown()` — 释放所有资源
-   - `kwcc_mempool_alloc(data_type, key, size, timeout)` — **包含 const_lookup**：INT32/INT64 匹配常量表 → 分配 const slot（不占 slab），未匹配 → 按 size 路由 L0-L6
-   - `kwcc_mempool_alloc_dynamic(key, cap, timeout)` — L7 动态 malloc
-   - `kwcc_mempool_get(key)` — key_map 查找返回 slot
-   - `kwcc_mempool_set(slot, data, size)` — 写数据（含 const_lookup 兜底）
-   - `kwcc_mempool_acquire/release` — ref_count 管理
-   - `kwcc_mempool_get_keys(prefix, out_keys, max)` — 前缀扫描
-   - `kwcc_mempool_get_str(key, default)` — 返回字符串
-   - `kwcc_mempool_set_max_pools(type, max)` — 运行时调整
-   - GC 三层：`kwcc_mempool_gc()` / `kwcc_mempool_gc_force()` / `kwcc_mempool_gc_auto()`（80% 阈值）
-   - `kwcc_mempool_expand(type)` — 满即扩
-   - `g_kwcc_mempool_l7_used` 全局变量跟踪 L7 用量
+## 实施步骤（更新：步骤一至三 ✅ 已完成）
 
-### 步骤三：第2层 — Config 层（新建 `src/kwcc_config.h`）
-1. 声明 `kwcc_config_get_core(key)` / `kwcc_config_get_app(key)`
-2. 实现在 `kwcc_mempool.c` 中（或单独 `kwcc_config.c`）：自动拼 "c."/"a." 前缀，调 `kwcc_mempool_get_str`
+### 步骤一：删除旧代码 ✅
 
-### 步骤四：第3层 — TLV 序列化（写在 `kwcc_mempool.c` 中，纯 C）
-1. `kwcc_mempool_tlv_build(pack_cb, user_data, out_len)` — 回调驱动构建
-2. `kwcc_mempool_tlv_iter(tlv_data, tlv_len, iter_cb, user_data)` — 遍历解析
-3. `kwcc_mempool_tlv_get_path(tlv_data, tlv_len, path, out_len)` — 路径查询，**每次偏移前边界检查**
-4. `kwcc_mempool_tlv_to_json(tlv_data, tlv_len, out_len)` — TLV→JSON，**字符串转义 `"` `\` 控制字符**
-5. `kwcc_mempool_tlv_free_json(ptr)` — 释放 JSON 缓冲
+### 步骤二：第1层 — 纯 C mempool 内存管理 ✅
+已完成 `src/kwcc_mempool.h` + `src/kwcc_mempool.c`：
+- 常量表 16 个 + const_lookup + const_init
+- FNV-1a hash、key_map 查找/插入/删除（32768 条目）
+- Slab 操作（init/alloc/free）、池创建
+- `kwcc_mempool_init()` / `kwcc_mempool_shutdown()`
+- `kwcc_mempool_alloc(data_type, key, size, timeout)` — 含 const_lookup 兜底
+- `kwcc_mempool_alloc_dynamic(key, cap, timeout)` — L7 动态 malloc
+- `kwcc_mempool_get(key)` / `kwcc_mempool_set(slot, data, size)`
+- `kwcc_mempool_acquire/release/invalidate`
+- `kwcc_mempool_get_keys(prefix, out_keys, max)` — 前缀扫描
+- `kwcc_mempool_get_str(key, default)` — 返回字符串
+- `kwcc_mempool_set_max_pools(type, max)` — 运行时调整
+- GC 三层：`kwcc_mempool_gc()` / `kwcc_mempool_gc_force()` / `kwcc_mempool_gc_auto()`（80% 阈值）
+- `kwcc_mempool_expand(type)` / `kwcc_mempool_expand_l7()` — 满即扩
+- `g_kwcc_mempool_l7_used` 全局变量跟踪 L7 用量
+- Debug dump：`kwcc_mempool_dump_stats()` / `kwcc_mempool_dump_all()`（KWCC_DEBUG）
+- 纯 C 测试：46 测试全部通过
+
+### 步骤三：第2层 — Config 层 ✅
+已完成 `src/kwcc_config.h` + `src/kwcc_config.c`：
+- App 域（自动拼 "a." 前缀）：set_app_int/string/bool/tlv + get_app + release_app + release_app_prefix
+- Core 域（自动拼 "c." 前缀）：set_core_tlv + get_core + get_core_slot + release_core
+- 通用：set_max_pools
+- 内部函数：`kwcc_config_build_key()` — 前缀拼接
+- 纯 C 测试：19 测试全部通过
+
+### 步骤四：第3层 — TLV 序列化 ✅
+已完成（写在 `kwcc_mempool.c` 中，纯 C）：
+- `kwcc_mempool_tlv_build(pack_cb, user_data, out_len)` — 回调驱动构建
+- `kwcc_mempool_tlv_iter(tlv_data, tlv_len, iter_cb, user_data)` — 遍历解析
+- `kwcc_mempool_tlv_get_path(tlv_data, tlv_len, path, out_len)` — 路径查询 + 边界检查
+- `kwcc_mempool_tlv_to_json(tlv_data, tlv_len, out_len)` — TLV→JSON + 字符串转义（`"` `\` `\n` `\t` `\r` 控制字符 → `\u00XX`）
+- `kwcc_mempool_tlv_free_json(ptr)` — 释放 JSON 缓冲
+- TLV 安全边界：`tlv_len < 3` 截断检测、`total_len < 3` 异常检测、`ptr + total_len > end` 越界保护
 
 ### 步骤五：第4层 — C-JS 接口（`src/kwcc_js.c` + `src/kwcc_js.h`）
 1. 实现 `kwcc_config_get_core/get_app`（调 mempool）
@@ -546,17 +558,22 @@ typedef struct {
 | `src/kwcc.h` | 确认包含 `kwcc_mempool.h` + `kwcc_config.h` |
 | `Makefile` | 确认依赖正确 |
 
-## 实施步骤（待执行，见上方步骤一至七）
+## 实施步骤（待执行：Phase 4-7，见上方执行计划）
 
 ## 关键设计决策
 
-- **命名规范**：所有 C 符号统一 `kwcc_mempool_` 前缀；枚举/宏大写 `KWCC_MEMPOOL_*`；全局变量 `g_kwcc_mempool_*`
+- **命名规范**：所有 C 符号统一 `kwcc_<module>_` 前缀
+  - 函数：`kwcc_mempool_alloc`、`kwcc_ui_init`、`kwcc_config_get_app`
+  - 全局变量：`g_kwcc_mu`、`g_kwcc_ui_sync_count`、`g_kwcc_mempool_mgr`
+  - Static 变量：也加 `g_kwcc_<module>_` 前缀（如 `g_kwcc_ui_current_font`）
+  - 宏/枚举：`KWCC_MEMPOOL_L7`、`KWCC_UI_SVG_CACHE_SIZE`
+  - 类型：`kwcc_mempool_slot_t`、`kwcc_ui_svg_cache_t`
 - **业务前缀**：JS wrapper 自动加 `a.`（App）/ `c.`（Core），在 `kwcc_js.c` 中实现；Core 可写可读
 - **分隔符**：`.` 是业务命名空间分隔符，`/` 是前缀分组和 TLV 路径分隔符
 - **key 语义**：扁平字符串，`/` 只是人为约定的前缀分隔符
 - **JS API**：扁平方法名 `appSetInt/appSetString/appSetBool/appSetJson/appSetTlv/appGet/appGetTlv/appRelease/appReleasePrefix` + `coreSetTlv` + `setMaxPools`
 - **常量查找**：`kwcc_mempool_const_lookup(data, len, type)` 通用函数，替代 if/else
-- **ref_count**：`uint16_t`，`alloc()` 时 = 0，`acquire()` 时++，溢出打 error 忽略
+- **ref_count**：`uint16_t`，`alloc()` 时 = **1**（调用者隐式持有引用），`acquire()` 时++，溢出打 error 忽略
 - **GC 80% 阈值**：自动检测，超过立即强制 GC
 - **$config 是唯一公开 API**，`$memory` 不暴露
 - **类型标记**：uint8_t，0-7（STRING/INT32/INT64/FLOAT/DOUBLE/JSON/TLV/CONST）
@@ -693,96 +710,81 @@ slot 0: key="a.io/config", size=512/1024B, ref=1, timeout=0, age=30s, type=TLV
 
 ## 执行计划
 
-### Phase 1: 基础骨架（重命名 + 新头文件 + 常量表 + 编译通过）
+### Phase 1: 基础骨架 ✅ 已完成
 
-**目标**：文件重命名 + 新头文件定义 + 常量表 + Makefile 更新 + 编译通过
+**状态**：文件重命名 + 新头文件 + 常量表 + key_map + 多池管理 + GC + L7 动态分配 + Makefile + 编译通过
 
-**改动文件**：
+**已完成文件**：
 | 文件 | 操作 |
 |------|------|
-| `src/kwcc_pool.h` | 重命名为 `src/kwcc_mempool.h`（删除旧文件） |
-| `src/kwcc_pool.c` | 重命名为 `src/kwcc_mempool.c`（删除旧文件） |
-| `src/kwcc_mempool.h` | 全面重写：L0-L7 池类型 + slot 结构体 + key_map + 常量表 + API 声明 |
-| `src/kwcc_mempool.c` | 全面重写：多池管理 + alloc/get/set/release + key_map + GC + 常量表 + L7 动态分配 |
-| `src/kwcc_config.h` | 新建：Config 层 C 接口声明（无 mquickjs 依赖），`kwcc_config_get_core/get_app` |
-| `src/kwcc_js.c` | 更新所有 `#include` 和符号引用 + 实现 `kwcc_config_get_core/get_app` |
-| `src/kwcc_js.h` | 添加 `kwcc_config_get_core/get_app` 声明 |
-| `src/kwcc_io.c` | 改为 `kwcc_config_get_core("io/max_fds")`，不直接调 mempool |
-| `Makefile` | `kwcc_pool.c` → `kwcc_mempool.c`，头文件依赖更新 |
-| `src/kwcc.h` | `#include "kwcc_mempool.h"` + `#include "kwcc_config.h"` |
-| `src/main.m` | `kwcc_mem_init_defaults()` → `kwcc_mempool_init()` |
+| `src/kwcc_mempool.h` | ✅ 重写：L0-L7 + slot(88B) + key_map(32768) + 常量表(16) + TLV 类型 + API |
+| `src/kwcc_mempool.c` | ✅ 重写：全部核心实现 |
+| `src/kwcc_config.h` | ✅ 新建：10 个 C API 声明 |
+| `src/kwcc_config.c` | ✅ 新建：自动拼前缀实现 |
+| `src/kwcc.h` | ✅ include mempool + config 头文件 |
+| `src/kwcc_io.c` | ✅ 迁移到 kwcc_config_get_core |
+| `Makefile` | ✅ 编译规则更新 |
+| `src/main.m` | ✅ kwcc_mempool_init() |
+| 命名规范 | ✅ 全部模块统一 kwcc_ 前缀（2026-06-18） |
 
-**编译验证**：`make clean && make` 必须通过
-
-**常量表（Phase 1 内做）**：
-- `g_kwcc_mempool_const_table[16]` 初始化（null/空串/0/1/true/false/-1 等高频值）
-- `kwcc_mempool_const_lookup(data, len, type)` — alloc 存 int/bool 时自动匹配常量表
-- 匹配到常量时 slot->type = CONST，data 指向常量区，不占 slab chunk
-- 这是 alloc 的必经路径，必须在 Phase 1 就做
+**测试**：`tests/test_mempool.c` 46 pass
 
 ---
 
-### Phase 2: TLV 序列化
+### Phase 2: TLV 序列化 ✅ 已完成
 
-**目标**：TLV 打包/解包/路径查询 + to_json 转换 + JS ↔ TLV 集成
+**状态**：TLV 打包/解包/路径查询 + to_json 转换 + JSON 转义 + 安全边界
+
+**已完成文件**：
+| 文件 | 内容 |
+|------|------|
+| `src/kwcc_mempool.c` | ✅ tlv_build / tlv_iter / tlv_get_path / tlv_to_json + JSON 转义 |
+| `src/kwcc_mempool.h` | ✅ TLV 类型 + API 声明 |
+
+**测试**：`tests/test_mempool.c` TLV 相关测试全部通过
+
+---
+
+### Phase 3: Config 层 ✅ 已完成
+
+**状态**：C 模块的存取接口，自动拼 "a."/"c." 前缀
+
+**已完成文件**：
+| 文件 | 内容 |
+|------|------|
+| `src/kwcc_config.h` | ✅ 10 个 C API 声明 |
+| `src/kwcc_config.c` | ✅ set_app_int/string/bool/tlv + get_app + release_app + release_app_prefix + core 域 |
+
+**测试**：`tests/test_config.c` 19 pass
+
+---
+
+### Phase 4: $config JS API 重写 ⏳ 下一步
+
+**目标**：12 个 C handler + JS wrapper + mqjs_stdlib.c 注册
 
 **改动文件**：
 | 文件 | 内容 |
 |------|------|
-| `src/kwcc_mempool.c` | `kwcc_mempool_tlv_build()` / `tlv_iter()` / `tlv_get_path()` / `tlv_to_json()` — 纯 C，无 JS 依赖 |
-| `src/kwcc_mempool.h` | TLV 类型 + API 声明 |
-| `src/kwcc_js.c` | JSValue → TLV 打包（遍历 JS keys + 回调驱动） + TLV → JSValue 解包（调用 tlv_get_path / tlv_to_json） |
-
-**关键约束**：
-- `kwcc_mempool` 层：纯 C 回调钩子，不碰 `JSContext`/`JSValue`
-- `kwcc_js.c` 层：JS 转换逻辑，通过回调调用 mempool 的纯 C 函数
-- 使用 `mquickjs_priv.h` 内部 API（`js_object_keys`）
-- `tlv_get_path()` 按 `/` 分隔符逐层查找
-- TLV 安全边界：所有解析函数必须有边界检查
+| `src/kwcc_js.c` | 12 个新 C handler + JS wrapper + TLV 集成函数 |
+| `src/kwcc_js.h` | 新声明 |
+| `deps/mquickjs/mqjs_stdlib.c` | 12 个 JS_CFUNC_DEF 注册 |
+| `app/main.js` | 删除旧调用，加 $config 测试调用 |
 
 ---
 
-### Phase 3: $config JS API 重写
+### Phase 5: 编译 + 运行时验证
 
-**目标**：新扁平 API + 业务前缀自动添加 + TLV + 常量表集成
-
-**改动文件**：
-| 文件 | 内容 |
-|------|------|
-| `deps/mquickjs/mqjs_stdlib.c` | 更新 `#ifdef CONFIG_KWCC` 函数声明 |
-| `src/kwcc_js.c` | 重写所有 C handler + JS wrapper |
-| `src/kwcc_ui.c` | 更新 `$config` JS wrapper 字符串（`JS_Eval` 注入） |
-
-**C handler 新增/替换**：
-```
-js_config_set_int / js_config_set_string / js_config_set_bool / js_config_set_json / js_config_set_tlv
-js_config_get
-js_config_get_tlv_path / js_config_get_tlv_json
-js_config_release / js_config_release_prefix
-js_config_set_max_pools
-js_config_core_set_tlv
-```
-
-**JS wrapper**（通过 `JS_Eval` 注入，mquickjs ES5 语法）：
-- 扁平方法名：`appSetInt / appSetString / appSetBool / appSetJson / appSetTlv / appGet / appGetTlv / appRelease / appReleasePrefix / coreSetTlv / setMaxPools`
-- App 域内部自动加 `"a."` 前缀，Core 域自动加 `"c."` 前缀
-- 使用 `var` 声明，无箭头函数/展开参数
-
-**删除**：旧的 `setApp / setUser / setCore / getApp / getUser / getCore / releaseApp / releaseUser` 相关 C handler 和 JS wrapper
-
----
-
-### Phase 4: 运行时验证（基础 API + 窗口正常显示）
-
-**目标**：确保重命名 + TLV + 新 API 后程序行为正常，窗口正常显示，无 crash
+**目标**：确保 $config API 后程序行为正常
 
 **测试点**：
+- `make clean && make` 编译通过
 - `make run` 窗口正常显示
 - `kwcc.log` 无错误日志
 
 ---
 
-### Phase 5: 集成验证
+### Phase 6: 集成验证
 
 **目标**：完整功能端到端测试
 
@@ -792,19 +794,17 @@ js_config_core_set_tlv
 - `$config.appSetBool("enabled", true)` → 常量表引用
 - `$config.appSetTlv("io", { timeout: { user: "v1" } })` → TLV 存储
 - `$config.appGetTlv("io", "timeout/user")` → 返回 `"v1"`
-- `$config.appGetTlv("io")` → 返回 `{"timeout":{"user":"v1"}}` JSON 字符串
+- `$config.appGetTlv("io")` → 返回 JSON 字符串
 - `$config.appGet("name", "default")` → 返回 `"myapp"`
 - `$config.appRelease("io/port")` → 释放 `a.io/port`
 - `$config.appReleasePrefix("io")` → 释放 `a.io/` 前缀所有
 - `$config.coreSetTlv("io", { max_fds: "16" })` → 存 TLV 到 `c.io`
-- C 模块 `kwcc_mempool_get("c.io")` → 拿 slot → 根据 type 调 `kwcc_mempool_tlv_get_path()` 解析 max_fds
+- C 模块 `kwcc_mempool_get("c.io")` → TLV 路径查询
 - `$config.setMaxPools("l5", 4)` → 运行时调整
-- 编译通过 + 窗口正常显示 + 无日志错误
 
 ---
 
-### Phase 6: 清理 + 提交
+### Phase 7: 清理 + 提交
 
-- 删除所有旧 `kwcc_config_set_app` 等残留声明
 - 确认 `kwcc.log` 无错误
 - 提交 git

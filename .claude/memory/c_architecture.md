@@ -1,89 +1,162 @@
 # C 层完整架构状态
 
-> 基于 bus 模块拆分后的多文件架构（`kwcc_ui.c` + `kwcc_js.c` + `kwcc_bus.c` + `kwcc.c`）
+> 基于多文件架构（`kwcc_mempool.c` + `kwcc_config.c` + `kwcc_ui.c` + `kwcc_js.c` + `kwcc_bus.c` + `kwcc_io.c`）
 
 ## 文件职责分布
 
-| 文件 | 职责 | 不含 |
-|------|------|------|
-| `kwcc_base.h` | 纯 C 类型 + config getter 声明 | 无 JS/microui 类型 |
-| `kwcc.c` | config JSValue 存储（内部 `__kwcc_config` 对象方案） | 无 microui |
-| `kwcc_ui.c` | `g_mu` + `kwcc_ui_init/free` + `kwcc_process_js` + UI 桥接 + input + SVG + 字体 | 无 JS lifecycle |
-| `kwcc_ui.h` | UI 模块声明 + SVG cache extern + `g_mu` extern | |
-| `kwcc_js.c` | `kwcc_create/destroy_js` + stdlib stubs + kwcc_ui 桥接 | 无 microui |
-| `kwcc_js.h` | JS lifecycle + stubs 声明 | 无 microui |
-| `kwcc_bus.c` | C→JS 消息总线桥接：topic map + dispatch_event + bind_topic + frame 重置 | 无 microui、无 JS lifecycle |
-| `kwcc_bus.h` | 消息总线声明 | 无 microui 类型 |
-| `kwcc.h` | 入口 umbrella header（#include 各模块头文件） | 无实现代码 |
+| 文件 | 职责 |
+|------|------|
+| `kwcc_base.h` | 纯 C 类型声明 |
+| `kwcc_mempool.h/c` | L0-L7 Slab 内存池：alloc/set/get/release/GC/key_map/常量表/TLV 序列化 |
+| `kwcc_config.h/c` | Config 层：get_core/get_app 前缀封装，C 业务模块读取接口 |
+| `kwcc_ui.c` | `g_kwcc_mu` + UI 桥接 + input + SVG + 字体 + js_ui_dispatch + register_ui |
+| `kwcc_ui.h` | UI 模块声明 + SVG cache extern |
+| `kwcc_js.c` | `kwcc_create/destroy_js` + stdlib stubs + kwcc_ui 桥接 |
+| `kwcc_js.h` | JS lifecycle + stubs 声明 |
+| `kwcc_bus.c` | C→JS 消息总线桥接：topic map + dispatch_event + bind_topic + frame 重置 |
+| `kwcc_bus.h` | 消息总线声明 |
+| `kwcc_io.c` | I/O Reactor：select() 非阻塞 FD 管理器 |
+| `kwcc_io.h` | I/O 管理器声明 |
+| `kwcc.h` | 入口 umbrella header（include 各模块头文件） |
 
 ## 全局变量
+
+### main.m
+| 变量 | 类型 | 用途 |
+|------|------|------|
+| `g_kwcc_vg` | `NVGcontext*` | NanoVG 渲染上下文（**定义**，非 extern） |
+| `g_js_ctx` | `JSContext*` (static) | JS 上下文 |
+| `g_js_text` | `const char*` (static) | 缓存的 JS 代码 |
+| `g_log_fp` | `FILE*` (static) | 日志文件指针 |
+| `kwcc_load_file` | `const char*` (static func) | 读取文件到静态 buffer |
+| `kwcc_render_mu_commands` | `void` (static func) | 遍历 microui 命令队列并渲染 |
+
+### kwcc_mempool.c
+| 变量 | 类型 | 用途 |
+|------|------|------|
+| `g_kwcc_mempool_const_table[16]` | `kwcc_mempool_const_t` | 常量表（null/空串/0/1/true/false/-1 等） |
+| `g_kwcc_mempool_key_map[32768]` | `kwcc_mempool_keymap_t` | 开地址哈希表，O(1) key→slot 查找 |
+| `g_kwcc_mempool_mgr` | `kwcc_mempool_manager_t` | 池管理器（L0-L7 池指针 + 计数 + max_pools） |
+| `g_kwcc_mempool_max_pools[8]` | `const int` | 各层最大池数（编译时常量） |
+| `g_kwcc_mempool_l7_used` | `uint64_t` | L7 已用字节数 |
+| `g_kwcc_mempool_last_gc_time` | `uint32_t` (static) | 上次 GC 时间戳 |
 
 ### kwcc_ui.c
 | 变量 | 类型 | 用途 |
 |------|------|------|
-| `g_mu` | `mu_Context` | microui 主上下文（**定义**，非 extern） |
-| `g_slider_val` | `mu_Real` | 持久化 slider 值（static，避免局部地址陷阱） |
-| `g_current_font` | `const char*` | 当前激活字体名称 |
-| `g_sync_table[32]` | `mod_state_t` { key[64], visible } | 模块状态同步表 |
-| `g_sync_count` | `int` | sync 计数 |
-| `g_current_mod_key` | `const char*` | 当前模块 key（ui.sync 设置） |
-| `g_win_intercepted[32]` | `int` | 窗口拦截栈 |
-| `g_win_topics[32][128]` | `char` | 窗口 topic 栈 |
-| `g_win_top` | `int` | 窗口栈顶 |
-| `g_js_ctx` | `JSContext*` | JS 上下文（close 回调用） |
-| `g_svg_cache[128]` | `svg_cache_t` | SVG 缓存（extern，共享给 main.m） |
-| `g_svg_cache_next` | `int` | SVG 缓存轮转指针 |
-| `g_frame_counter` | `int` | 帧计数器 |
+| `g_kwcc_mu` | `mu_Context` | microui 主上下文（**定义**，非 extern） |
+| `g_kwcc_ui_slider_val` | `mu_Real` (static) | 持久化 slider 值 |
+| `g_kwcc_ui_current_font` | `const char*` (static) | 当前激活字体名称 |
+| `g_kwcc_ui_sync_table[32]` | `mod_state_t` (static) | 模块状态同步表 |
+| `g_kwcc_ui_sync_count` | `int` (static) | sync 计数 |
+| `g_kwcc_ui_current_mod_key` | `const char*` (static) | 当前模块 key |
+| `g_kwcc_ui_win_intercepted[32]` | `int` (static) | 窗口拦截栈 |
+| `g_kwcc_ui_win_topics[32][128]` | `char` (static) | 窗口 topic 栈 |
+| `g_kwcc_ui_win_top` | `int` (static) | 窗口栈顶 |
+| `g_kwcc_ui_js_ctx` | `JSContext*` (static) | JS 上下文（close 回调用） |
+| `g_kwcc_ui_svg_cache[128]` | `kwcc_ui_svg_cache_t` | SVG 缓存（extern，共享给 main.m） |
+| `g_kwcc_ui_svg_cache_next` | `int` | SVG 缓存轮转指针 |
+| `g_kwcc_ui_frame_counter` | `int` | 帧计数器 |
 
 ### kwcc_bus.c
 | 变量 | 类型 | 用途 |
 |------|------|------|
-| `g_topic_map[256]` | struct { int id, topic[128] } | 每帧 ID→topic 映射（Zero-Alloc） |
-| `g_topic_map_count` | `int` | topic map 计数 |
+| `g_kwcc_bus_topic_map[256]` | struct { int id, topic[128] } | 每帧 ID→topic 映射 |
+| `g_kwcc_bus_topic_map_count` | `int` | topic map 计数 |
+
+### kwcc_io.c
+| 变量 | 类型 | 用途 |
+|------|------|------|
+| `g_kwcc_io_slots[KWCC_IO_MAX_FDS]` | `kwcc_io_slot_t` | FD 槽位表 |
+| `g_kwcc_io_max_fds` | `int` (static) | 活跃 FD 数上限（默认 16，可调） |
 
 ### kwcc_js.c
 | 变量 | 类型 | 用途 |
 |------|------|------|
-| `g_ui_callback` | `JSUICallback` | UI 桥接回调指针（kwcc_set_ui_callback 设置） |
-
-### kwcc.c
-| 变量 | 类型 | 用途 |
-|------|------|------|
-| `g_js_ctx` | `JSContext*` | config 存储用的 JSContext |
+| `g_ui_callback` | `JSUICallback` | UI 桥接回调指针 |
 
 ## C 层函数清单
 
 ### 核心生命周期
 | 函数 | 所在文件 | 功能 |
 |------|----------|------|
+| `kwcc_mempool_init()` | kwcc_mempool.c | 初始化常量表 + key_map + L0-L7 各 1 个池 |
+| `kwcc_mempool_shutdown()` | kwcc_mempool.c | 释放所有池 + 清零 |
 | `kwcc_ui_init()` | kwcc_ui.c | `mu_init` + text 回调 + `on_window_close` |
 | `kwcc_ui_free()` | kwcc_ui.c | 清理 UI 资源（当前空，备用） |
-| `kwcc_create_js()` | kwcc_js.c | 创建 JSContext + 调 `kwcc_config_set_jsctx` |
+| `kwcc_create_js()` | kwcc_js.c | 创建 JSContext |
 | `kwcc_destroy_js()` | kwcc_js.c | 释放 JSContext |
-| `kwcc_begin_frame()` | kwcc_ui.c | 每帧重置：sync_count=0, win_top=0 + 调 kwcc_bus_begin_frame |
+| `kwcc_begin_frame()` | kwcc_ui.c | 每帧重置 + 调 kwcc_bus_begin_frame |
 | `kwcc_process_js()` | kwcc_ui.c | 帧入口：frame++ → begin_frame → mu_begin → JS_Eval → mu_end |
-| `kwcc_get_mu()` | kwcc_ui.c | 返回 g_mu 指针 |
+| `kwcc_get_mu()` | kwcc_ui.c | 返回 &g_kwcc_mu |
 | `kwcc_get_font()` | kwcc_ui.c | 返回当前字体名称 |
+
+### MemPool 层（kwcc_mempool.c）
+| 函数 | 功能 |
+|------|------|
+| `kwcc_mempool_alloc(type, key, size, timeout)` | 按 size 路由到 L0-L6 或 L7 分配 slot，ref_count=1 |
+| `kwcc_mempool_alloc_dynamic(key, cap, timeout)` | L7 动态 malloc 分配 |
+| `kwcc_mempool_get(key)` | O(1) key_map 查找返回 slot |
+| `kwcc_mempool_get_str(key, default)` | 返回字符串，自动补 \0 |
+| `kwcc_mempool_set(slot, data, size)` | 写入数据（兜底 const_lookup） |
+| `kwcc_mempool_acquire(slot)` | ref_count++ |
+| `kwcc_mempool_release(slot)` | ref_count--，降到 0 可被 GC 回收 |
+| `kwcc_mempool_invalidate(slot)` | 强制 ref_count=0, timeout=0 |
+| `kwcc_mempool_gc()` | 5 秒节流的 GC（ref_count=0 或超时） |
+| `kwcc_mempool_gc_force()` | 强制 GC，无节流 |
+| `kwcc_mempool_gc_auto()` | 按使用率自动 GC（>80% 触发 force） |
+| `kwcc_mempool_get_keys(prefix, out_keys, max)` | 前缀扫描返回 key 列表 |
+| `kwcc_mempool_set_max_pools(type, max)` | 调整某层最大池数 |
+| `kwcc_mempool_const_lookup(data, len, type)` | 常量表查找 |
+| `kwcc_mempool_fnv1a(s)` | FNV-1a 哈希 |
+| `kwcc_mempool_tlv_build(cb, user_data, out_len)` | TLV 序列化（回调驱动） |
+| `kwcc_mempool_tlv_iter(data, len, cb, user_data)` | TLV 遍历（回调驱动） |
+| `kwcc_mempool_tlv_get_path(data, len, path, out_len)` | TLV 路径查询 |
+| `kwcc_mempool_tlv_to_json(data, len, out_len)` | TLV → JSON 字符串（含转义） |
+| `kwcc_mempool_tlv_free_json(ptr)` | 释放 JSON 字符串 |
+
+### Config 层（kwcc_config.c）
+| 函数 | 功能 |
+|------|------|
+| `kwcc_config_set_app_int(key, val)` | 自动拼 "a." 前缀 → mempool alloc+set |
+| `kwcc_config_set_app_string(key, val)` | 同上，字符串 |
+| `kwcc_config_set_app_bool(key, val)` | 同上，布尔 |
+| `kwcc_config_set_app_tlv(key, data, len)` | 同上，TLV 数据 |
+| `kwcc_config_get_app(key, default)` | 自动拼 "a." 前缀 → mempool get → 字符串 |
+| `kwcc_config_release_app(key)` | 自动拼 "a." 前缀 → mempool release |
+| `kwcc_config_release_app_prefix(key)` | 前缀批量 release |
+| `kwcc_config_set_core_tlv(key, data, len)` | 自动拼 "c." 前缀 → mempool |
+| `kwcc_config_get_core(key, default)` | 自动拼 "c." 前缀 → mempool get |
+| `kwcc_config_get_core_slot(key)` | 返回 slot 指针（用于 TLV 路径查询） |
+| `kwcc_config_release_core(key)` | 自动拼 "c." 前缀 → mempool release |
+| `kwcc_config_set_max_pools(type, max)` | 转发到 mempool |
 
 ### 事件系统（kwcc_bus.c）
 | 函数 | 功能 |
 |------|------|
-| `kwcc_bind_topic(id, topic)` | 存入 g_topic_map（id→topic） |
+| `kwcc_bind_topic(id, topic)` | 存入 g_kwcc_bus_topic_map |
 | `kwcc_dispatch_event(ctx, topic, action)` | JS_Eval 调用 `$bus.emit(topic, action, new Object())` |
-| `kwcc_bus_begin_frame()` | 每帧重置 g_topic_map_count = 0 |
-| `kwcc_on_window_close(ctx, title)` | X 按钮回调：dispatch(title, "close") |
+| `kwcc_bus_begin_frame()` | 每帧重置 g_kwcc_bus_topic_map_count = 0 |
+
+### I/O Reactor（kwcc_io.c）
+| 函数 | 功能 |
+|------|------|
+| `kwcc_io_init()` | 初始化 FD 槽位表，读取 config 获取 max_fds |
+| `kwcc_io_register(fd, cb, user_data)` | 注册 FD + 回调 |
+| `kwcc_io_unregister(fd)` | 注销 FD |
+| `kwcc_io_poll_once()` | select() 零超时轮询，回调 dispatch |
 
 ### 窗口挡板（kwcc_ui.c）
 | 函数 | 功能 |
 |------|------|
 | `kwcc_sync_module(key, visible)` | 设置当前模块 key + 更新 visible 状态 |
-| `kwcc_get_current_visibility()` | 查 g_sync_table 返回当前模块可见性 |
+| `kwcc_get_current_visibility()` | 查 g_kwcc_ui_sync_table 返回当前模块可见性 |
 
 ### SVG 缓存（kwcc_ui.c）
 | 函数 | 功能 |
 |------|------|
-| `fnv1a(s)` | FNV-1a 哈希 |
-| `svg_resolve(data, is_inline)` | 哈希匹配 → 解析 → 帧安全淘汰 |
+| `kwcc_ui_fnv1a(s)` | FNV-1a 哈希 |
+| `kwcc_ui_svg_resolve(data, is_inline)` | 哈希匹配 → 解析 → 帧安全淘汰 |
 | `kwcc_queue_svg(data, is_inline, x, y, w, h)` | 先 mu_get_clip_rect → 再 svg_resolve → 入队 |
 
 ### 字体系统（kwcc_ui.c）
@@ -110,20 +183,20 @@
 | `js_setTimeout` / `js_clearTimeout` | stub |
 | `js_date_now` / `js_performance_now` | stub |
 | `js_kwcc_ui` | UI 桥接入口 → g_ui_callback |
-| `js_kwcc_config_set` | config 设置入口 → kwcc_config_set |
 
 ### kwcc_ui.c — js_ui_dispatch + register_ui
 `js_ui_dispatch` — 所有 ui.* 方法的 C handler，按 method 名 dispatch
 `kwcc_register_ui` — 创建 `ui` 对象 + 注入 JS wrapper + 调 `kwcc_set_ui_callback`
 
-### Config 存储（kwcc.c）
-| 函数 | 功能 |
-|------|------|
-| `kwcc_config_set_jsctx(ctx)` | 设置 JSContext（内部，kwcc_create_js 调用） |
-| `kwcc_config_set_object(module, obj)` | 存储 JS object 到 `__kwcc_config` 全局对象 |
-| `kwcc_config_set(module, key, value)` | C stub：字符串形式 config set |
-| `kwcc_config_get(module, key, default)` | 旋转 buffer 返回字符串值 |
-| `kwcc_config_get_int32(module, key, default)` | 返回 int32 值 |
+## 命名规范
+
+| 类型 | 格式 | 示例 |
+|------|------|------|
+| 函数 | `kwcc_<module>_` | `kwcc_mempool_alloc`, `kwcc_ui_init` |
+| 全局变量 | `g_kwcc_<module>_` | `g_kwcc_mu`, `g_kwcc_ui_sync_count` |
+| Static 变量 | `g_kwcc_<module>_` | `g_kwcc_ui_current_font` |
+| 宏 | `KWCC_<MODULE>_` | `KWCC_UI_SVG_CACHE_SIZE`, `KWCC_MEMPOOL_L7` |
+| 类型 | `<module>_t` | `kwcc_mempool_slot_t`, `kwcc_ui_svg_cache_t` |
 
 ## 已实现的 JS API（完整清单）
 
@@ -160,9 +233,6 @@ ui.loadFontDir(dir)
 
 // SVG
 ui.svg(path_or_svg, x, y, w, h)
-
-// config
-kwcc_config(module, options)  // 遍历 options 的 keys，逐个调 kwcc_config_set
 ```
 
 ## 未实现的常见控件
@@ -171,20 +241,22 @@ kwcc_config(module, options)  // 遍历 options 的 keys，逐个调 kwcc_config
 
 | microui 函数 | 状态 |
 |--------------|------|
-| `mu_checkbox` | ❌ 未实现 |
-| `mu_textbox` | ❌ 未实现 |
-| `mu_header` | ❌ 未实现 |
-| `mu_begin_treenode` | ❌ 未实现 |
-| `mu_icon` | ❌ 未实现（JS 层无入口） |
+| `mu_checkbox` | 未实现 |
+| `mu_textbox` | 未实现 |
+| `mu_header` | 未实现 |
+| `mu_begin_treenode` | 未实现 |
+| `mu_icon` | 未实现（JS 层无入口） |
 
 ## 重要设计决策记录
 
 1. **button dispatch action 固定为 "click"**：topic 已经唯一标识按钮，handler 不需要识别 action
 2. **slider 值用 static 变量**：避免局部地址陷阱（microui 用 &value 作为 ID）
-3. **topic map 每帧清零**：g_topic_map_count = 0 在 begin_frame 中，不保留跨帧数据
+3. **topic map 每帧清零**：g_kwcc_bus_topic_map_count = 0 在 begin_frame 中，不保留跨帧数据
 4. **deferred 机制已移除**：on_window_close 直接 dispatch，不再先存数组
-5. **on_window_close 收到的是 title 不是 topic**：dispatch 的 topic 参数是 title 字符串，目前没有通过 ID 查找正确 topic 的映射（待 v2 完成后修复）
-6. **config 存储用全局对象方案**：`__kwcc_config` 挂在 JS global 上，避免 JSGCRef 手动管理
+5. **on_window_close 收到的是 title 不是 topic**：dispatch 的 topic 参数是 title 字符串（待 v2 完成后修复）
+6. **Config 存储用 mempool 方案**：通过 kwcc_mempool_alloc/set/get/release 管理，config 层自动拼 "a."/"c." 前缀
+7. **ref_count 初始值为 1**：alloc 调用者隐式持有引用，必须显式 release 才能被 GC 回收
+8. **const 表匹配不占 slab chunk**：匹配到常量后 slot->data 指向常量区，slot->type=CONST
 
 ## JS 框架 API（main.js）
 
@@ -201,11 +273,11 @@ kwcc_config(module, options)  // 遍历 options 的 keys，逐个调 kwcc_config
 ### 注册 API
 | 函数 | 用途 | 去重 |
 |------|------|------|
-| `loadJs(path)` | 加载 JS 文件，已加载则跳过 | ✅ |
-| `loadJs(path, once)` | `once=1`(默认)只加载一次；`once=0` 强制加载 | ✅ |
-| `registerModule(name, mod)` | 注册模块 state + actions + initEvents | ✅ 已注册跳过 |
-| `registerModuleView(name, renderFn)` | 注册模块 view 渲染函数 | ✅ 已注册跳过 |
-| `registerTopic(name, topics)` | 注册模块 topic 常量 | ✅ 已注册跳过 |
+| `loadJs(path)` | 加载 JS 文件，已加载则跳过 | Yes |
+| `loadJs(path, once)` | `once=1`(默认)只加载一次；`once=0` 强制加载 | Yes |
+| `registerModule(name, mod)` | 注册模块 state + actions + initEvents | Yes |
+| `registerModuleView(name, renderFn)` | 注册模块 view 渲染函数 | Yes |
+| `registerTopic(name, topics)` | 注册模块 topic 常量 | Yes |
 
 ### 初始化
 | 函数 | 用途 |
