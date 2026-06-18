@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 /* ── SVG cache (extern, set in kwcc_ui.c, read in main.m) ── */
-#define SVG_CACHE_SIZE 128
+#define KWCC_UI_SVG_CACHE_SIZE 128
 
 typedef struct NSVGimage NSVGimage;
 
@@ -18,10 +18,10 @@ typedef struct {
     NSVGimage   *image;
     int          frame_id;
     int          in_use;
-} svg_cache_t;
+} kwcc_ui_svg_cache_t;
 
-extern svg_cache_t g_svg_cache[SVG_CACHE_SIZE];
-extern int         g_frame_counter;
+extern kwcc_ui_svg_cache_t g_kwcc_ui_svg_cache[KWCC_UI_SVG_CACHE_SIZE];
+extern int         g_kwcc_ui_frame_counter;
 
 void kwcc_ui_init(void);
 void kwcc_ui_free(void);

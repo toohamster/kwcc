@@ -7,25 +7,25 @@
 
 /* ── Topic map ─────────────────────────────────────────────── */
 
-#define TOPIC_MAP_SIZE 256
-static struct { int id; char topic[128]; } g_topic_map[TOPIC_MAP_SIZE];
-static int g_topic_map_count = 0;
+#define KWCC_BUS_TOPIC_MAP_SIZE 256
+static struct { int id; char topic[128]; } g_kwcc_bus_topic_map[KWCC_BUS_TOPIC_MAP_SIZE];
+static int g_kwcc_bus_topic_map_count = 0;
 
 /* ── Bind: register ID → topic mapping ─────────────────────── */
 
 void kwcc_bind_topic(int id, const char *topic) {
-    if (g_topic_map_count < TOPIC_MAP_SIZE && topic) {
-        g_topic_map[g_topic_map_count].id = id;
-        strncpy(g_topic_map[g_topic_map_count].topic, topic, 127);
-        g_topic_map[g_topic_map_count].topic[127] = '\0';
-        g_topic_map_count++;
+    if (g_kwcc_bus_topic_map_count < KWCC_BUS_TOPIC_MAP_SIZE && topic) {
+        g_kwcc_bus_topic_map[g_kwcc_bus_topic_map_count].id = id;
+        strncpy(g_kwcc_bus_topic_map[g_kwcc_bus_topic_map_count].topic, topic, 127);
+        g_kwcc_bus_topic_map[g_kwcc_bus_topic_map_count].topic[127] = '\0';
+        g_kwcc_bus_topic_map_count++;
     }
 }
 
 /* ── Per-frame reset ───────────────────────────────────────── */
 
 void kwcc_bus_begin_frame(void) {
-    g_topic_map_count = 0;
+    g_kwcc_bus_topic_map_count = 0;
 }
 
 /* ── Event dispatch: C → JS via $bus.emit ──────────────────── */

@@ -10,7 +10,7 @@
 
 /* ── 前缀拼接辅助 ── */
 
-static void build_key(char *buf, size_t cap, const char *prefix, const char *key) {
+static void kwcc_config_build_key(char *buf, size_t cap, const char *prefix, const char *key) {
     int n = snprintf(buf, cap, "%s.%s", prefix, key);
     if (n < 0 || n >= (int)cap) buf[0] = '\0';
 }
@@ -20,7 +20,7 @@ static void build_key(char *buf, size_t cap, const char *prefix, const char *key
 void kwcc_config_set_app_int(const char *key, int32_t val) {
     if (!key) return;
     char full[256];
-    build_key(full, sizeof(full), "a", key);
+    kwcc_config_build_key(full, sizeof(full), "a", key);
     if (!full[0]) return;
 
     kwcc_mempool_slot_t *s = kwcc_mempool_alloc(KWCC_MEMPOOL_TYPE_INT32, full, sizeof(val), 0);
@@ -31,7 +31,7 @@ void kwcc_config_set_app_int(const char *key, int32_t val) {
 void kwcc_config_set_app_string(const char *key, const char *val) {
     if (!key || !val) return;
     char full[256];
-    build_key(full, sizeof(full), "a", key);
+    kwcc_config_build_key(full, sizeof(full), "a", key);
     if (!full[0]) return;
 
     size_t len = strlen(val) + 1;
@@ -43,7 +43,7 @@ void kwcc_config_set_app_string(const char *key, const char *val) {
 void kwcc_config_set_app_bool(const char *key, int val) {
     if (!key) return;
     char full[256];
-    build_key(full, sizeof(full), "a", key);
+    kwcc_config_build_key(full, sizeof(full), "a", key);
     if (!full[0]) return;
 
     int32_t v = val ? 1 : 0;
@@ -55,7 +55,7 @@ void kwcc_config_set_app_bool(const char *key, int val) {
 void kwcc_config_set_app_tlv(const char *key, const uint8_t *tlv_data, uint32_t tlv_len) {
     if (!key || !tlv_data || tlv_len == 0) return;
     char full[256];
-    build_key(full, sizeof(full), "a", key);
+    kwcc_config_build_key(full, sizeof(full), "a", key);
     if (!full[0]) return;
 
     kwcc_mempool_slot_t *s = kwcc_mempool_alloc(KWCC_MEMPOOL_TYPE_TLV, full, tlv_len, 0);
@@ -66,7 +66,7 @@ void kwcc_config_set_app_tlv(const char *key, const uint8_t *tlv_data, uint32_t 
 const char *kwcc_config_get_app(const char *key, const char *default_value) {
     if (!key) return default_value;
     char full[256];
-    build_key(full, sizeof(full), "a", key);
+    kwcc_config_build_key(full, sizeof(full), "a", key);
     if (!full[0]) return default_value;
 
     kwcc_mempool_slot_t *slot = kwcc_mempool_get(full);
@@ -83,7 +83,7 @@ const char *kwcc_config_get_app(const char *key, const char *default_value) {
 void kwcc_config_release_app(const char *key) {
     if (!key) return;
     char full[256];
-    build_key(full, sizeof(full), "a", key);
+    kwcc_config_build_key(full, sizeof(full), "a", key);
     if (!full[0]) return;
     kwcc_mempool_slot_t *s = kwcc_mempool_get(full);
     if (s) kwcc_mempool_release(s);
@@ -108,7 +108,7 @@ void kwcc_config_release_app_prefix(const char *key) {
 void kwcc_config_set_core_tlv(const char *key, const uint8_t *tlv_data, uint32_t tlv_len) {
     if (!key || !tlv_data || tlv_len == 0) return;
     char full[256];
-    build_key(full, sizeof(full), "c", key);
+    kwcc_config_build_key(full, sizeof(full), "c", key);
     if (!full[0]) return;
 
     kwcc_mempool_slot_t *s = kwcc_mempool_alloc(KWCC_MEMPOOL_TYPE_TLV, full, tlv_len, 0);
@@ -119,7 +119,7 @@ void kwcc_config_set_core_tlv(const char *key, const uint8_t *tlv_data, uint32_t
 const char *kwcc_config_get_core(const char *key, const char *default_value) {
     if (!key) return default_value;
     char full[256];
-    build_key(full, sizeof(full), "c", key);
+    kwcc_config_build_key(full, sizeof(full), "c", key);
     if (!full[0]) return default_value;
 
     kwcc_mempool_slot_t *slot = kwcc_mempool_get(full);
@@ -136,7 +136,7 @@ const char *kwcc_config_get_core(const char *key, const char *default_value) {
 void *kwcc_config_get_core_slot(const char *key) {
     if (!key) return NULL;
     char full[256];
-    build_key(full, sizeof(full), "c", key);
+    kwcc_config_build_key(full, sizeof(full), "c", key);
     if (!full[0]) return NULL;
     return (void *)kwcc_mempool_get(full);
 }
@@ -144,7 +144,7 @@ void *kwcc_config_get_core_slot(const char *key) {
 void kwcc_config_release_core(const char *key) {
     if (!key) return;
     char full[256];
-    build_key(full, sizeof(full), "c", key);
+    kwcc_config_build_key(full, sizeof(full), "c", key);
     if (!full[0]) return;
     kwcc_mempool_slot_t *s = kwcc_mempool_get(full);
     if (s) kwcc_mempool_release(s);

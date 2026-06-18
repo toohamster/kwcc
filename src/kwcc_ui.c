@@ -15,63 +15,63 @@
 #include "kwcc_bus.h"
 
 /* Extern: NVG context set in main.m */
-extern NVGcontext *vg;
+extern NVGcontext *g_kwcc_vg;
 
 /* ── Owned microui context ─────────────────────────────────── */
 
-mu_Context g_mu;
+mu_Context g_kwcc_mu;
 
 /* ── Persistent UI state ─────────────────────────────────────── */
 
-static mu_Real    g_slider_val = 0.5f;
-static const char *g_current_font = NULL;
+static mu_Real    g_kwcc_ui_slider_val = 0.5f;
+static const char *g_kwcc_ui_current_font = NULL;
 
 
 /* Window barrier */
-#define MAX_WIN_DEPTH 32
+#define KWCC_UI_MAX_WIN_DEPTH 32
 typedef struct {
     char key[64];
     int  visible;
 } mod_state_t;
 
-#define MAX_MODULES 32
-static mod_state_t g_sync_table[MAX_MODULES];
-static int         g_sync_count = 0;
-static const char *g_current_mod_key = NULL;
-static int         g_win_intercepted[MAX_WIN_DEPTH];
-static char        g_win_topics[MAX_WIN_DEPTH][128];
-static int         g_win_top = 0;
+#define KWCC_UI_MAX_MODULES 32
+static mod_state_t g_kwcc_ui_sync_table[KWCC_UI_MAX_MODULES];
+static int         g_kwcc_ui_sync_count = 0;
+static const char *g_kwcc_ui_current_mod_key = NULL;
+static int         g_kwcc_ui_win_intercepted[KWCC_UI_MAX_WIN_DEPTH];
+static char        g_kwcc_ui_win_topics[KWCC_UI_MAX_WIN_DEPTH][128];
+static int         g_kwcc_ui_win_top = 0;
 
 /* JS context — for close callback */
-static JSContext *g_js_ctx = NULL;
+static JSContext *g_kwcc_ui_js_ctx = NULL;
 
 void kwcc_set_js_context(JSContext *ctx) {
-    g_js_ctx = ctx;
+    g_kwcc_ui_js_ctx = ctx;
 }
 
 /* ── Config helpers ─────────────────────────────────────────── */
 
 static void kwcc_sync_module(const char *key, int visible) {
-    g_current_mod_key = key;
-    for (int i = 0; i < g_sync_count; i++) {
-        if (strcmp(g_sync_table[i].key, key) == 0) {
-            g_sync_table[i].visible = visible;
+    g_kwcc_ui_current_mod_key = key;
+    for (int i = 0; i < g_kwcc_ui_sync_count; i++) {
+        if (strcmp(g_kwcc_ui_sync_table[i].key, key) == 0) {
+            g_kwcc_ui_sync_table[i].visible = visible;
             return;
         }
     }
-    if (g_sync_count < MAX_MODULES) {
-        strncpy(g_sync_table[g_sync_count].key, key, 63);
-        g_sync_table[g_sync_count].key[63] = '\0';
-        g_sync_table[g_sync_count].visible = visible;
-        g_sync_count++;
+    if (g_kwcc_ui_sync_count < KWCC_UI_MAX_MODULES) {
+        strncpy(g_kwcc_ui_sync_table[g_kwcc_ui_sync_count].key, key, 63);
+        g_kwcc_ui_sync_table[g_kwcc_ui_sync_count].key[63] = '\0';
+        g_kwcc_ui_sync_table[g_kwcc_ui_sync_count].visible = visible;
+        g_kwcc_ui_sync_count++;
     }
 }
 
 static int kwcc_get_current_visibility(void) {
-    if (!g_current_mod_key) return 1;
-    for (int i = 0; i < g_sync_count; i++) {
-        if (strcmp(g_sync_table[i].key, g_current_mod_key) == 0) {
-            return g_sync_table[i].visible;
+    if (!g_kwcc_ui_current_mod_key) return 1;
+    for (int i = 0; i < g_kwcc_ui_sync_count; i++) {
+        if (strcmp(g_kwcc_ui_sync_table[i].key, g_kwcc_ui_current_mod_key) == 0) {
+            return g_kwcc_ui_sync_table[i].visible;
         }
     }
     return 1;
@@ -81,37 +81,37 @@ static int kwcc_get_current_visibility(void) {
 
 void kwcc_begin_frame(void) {
     kwcc_bus_begin_frame();
-    g_sync_count = 0;
-    g_win_top = 0;
+    g_kwcc_ui_sync_count = 0;
+    g_kwcc_ui_win_top = 0;
 }
 
 static void kwcc_on_window_close(mu_Context *ctx, const char *title) {
     (void)ctx;
     log_info("on_window_close: %s", title);
-    kwcc_dispatch_event(g_js_ctx, title, "close");
+    kwcc_dispatch_event(g_kwcc_ui_js_ctx, title, "close");
 }
 
 /* ── SVG cache ─────────────────────────────────────────────── */
 
-svg_cache_t g_svg_cache[SVG_CACHE_SIZE];
-int         g_svg_cache_next = 0;
-int         g_frame_counter  = 0;
+kwcc_ui_svg_cache_t g_kwcc_ui_svg_cache[KWCC_UI_SVG_CACHE_SIZE];
+int         g_kwcc_ui_svg_cache_next = 0;
+int         g_kwcc_ui_frame_counter  = 0;
 
-static uint32_t fnv1a(const char *s) {
+static uint32_t kwcc_ui_fnv1a(const char *s) {
     uint32_t h = 2166136261;
     while (*s) { h ^= *s++; h *= 16777619; }
     return h;
 }
 
-static int svg_resolve(const char *data, int is_inline) {
-    uint32_t hash = fnv1a(data);
+static int kwcc_ui_svg_resolve(const char *data, int is_inline) {
+    uint32_t hash = kwcc_ui_fnv1a(data);
     size_t   len  = strlen(data);
 
-    for (int i = 0; i < SVG_CACHE_SIZE; i++) {
-        if (g_svg_cache[i].in_use &&
-            g_svg_cache[i].hash == hash &&
-            g_svg_cache[i].content_len == len) {
-            g_svg_cache[i].frame_id = g_frame_counter;
+    for (int i = 0; i < KWCC_UI_SVG_CACHE_SIZE; i++) {
+        if (g_kwcc_ui_svg_cache[i].in_use &&
+            g_kwcc_ui_svg_cache[i].hash == hash &&
+            g_kwcc_ui_svg_cache[i].content_len == len) {
+            g_kwcc_ui_svg_cache[i].frame_id = g_kwcc_ui_frame_counter;
             return i;
         }
     }
@@ -126,12 +126,12 @@ static int svg_resolve(const char *data, int is_inline) {
     }
     if (!img) { log_warn("svg: parse failed (is_inline=%d)", is_inline); return -1; }
 
-    int slot = g_svg_cache_next;
+    int slot = g_kwcc_ui_svg_cache_next;
 
-    if (g_svg_cache[slot].in_use && g_svg_cache[slot].frame_id >= g_frame_counter) {
+    if (g_kwcc_ui_svg_cache[slot].in_use && g_kwcc_ui_svg_cache[slot].frame_id >= g_kwcc_ui_frame_counter) {
         int found = -1;
-        for (int i = 0; i < SVG_CACHE_SIZE; i++) {
-            if (g_svg_cache[i].in_use && g_svg_cache[i].frame_id < g_frame_counter) {
+        for (int i = 0; i < KWCC_UI_SVG_CACHE_SIZE; i++) {
+            if (g_kwcc_ui_svg_cache[i].in_use && g_kwcc_ui_svg_cache[i].frame_id < g_kwcc_ui_frame_counter) {
                 found = i;
                 break;
             }
@@ -144,24 +144,24 @@ static int svg_resolve(const char *data, int is_inline) {
         }
     }
 
-    if (g_svg_cache[slot].in_use && g_svg_cache[slot].image) {
-        nsvgDelete(g_svg_cache[slot].image);
+    if (g_kwcc_ui_svg_cache[slot].in_use && g_kwcc_ui_svg_cache[slot].image) {
+        nsvgDelete(g_kwcc_ui_svg_cache[slot].image);
     }
 
-    g_svg_cache[slot].hash = hash;
-    g_svg_cache[slot].content_len = len;
-    g_svg_cache[slot].image = img;
-    g_svg_cache[slot].frame_id = g_frame_counter;
-    g_svg_cache[slot].in_use = 1;
+    g_kwcc_ui_svg_cache[slot].hash = hash;
+    g_kwcc_ui_svg_cache[slot].content_len = len;
+    g_kwcc_ui_svg_cache[slot].image = img;
+    g_kwcc_ui_svg_cache[slot].frame_id = g_kwcc_ui_frame_counter;
+    g_kwcc_ui_svg_cache[slot].in_use = 1;
 
-    g_svg_cache_next = (slot + 1) % SVG_CACHE_SIZE;
+    g_kwcc_ui_svg_cache_next = (slot + 1) % KWCC_UI_SVG_CACHE_SIZE;
     return slot;
 }
 
 static void kwcc_queue_svg(const char *data, int is_inline, float x, float y, float w, float h) {
-    mu_Rect clip = mu_get_clip_rect(&g_mu);
-    int cache_idx = svg_resolve(data, is_inline);
-    mu_SvgCommand *cmd = (mu_SvgCommand *)mu_push_command(&g_mu, MU_COMMAND_SVG, sizeof(mu_SvgCommand));
+    mu_Rect clip = mu_get_clip_rect(&g_kwcc_mu);
+    int cache_idx = kwcc_ui_svg_resolve(data, is_inline);
+    mu_SvgCommand *cmd = (mu_SvgCommand *)mu_push_command(&g_kwcc_mu, MU_COMMAND_SVG, sizeof(mu_SvgCommand));
     cmd->rect.x = (int)(clip.x + x);
     cmd->rect.y = (int)(clip.y + y);
     cmd->rect.w = (int)w;
@@ -213,12 +213,12 @@ void kwcc_load_font_dir(const char *dir_path) {
         char full_path[512];
         snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, ent->d_name);
 
-        if (nvgCreateFont(vg, font_name, full_path) >= 0) {
+        if (nvgCreateFont(g_kwcc_vg, font_name, full_path) >= 0) {
             log_info("font loaded: %s (%s)", font_name, full_path);
             loaded++;
             if (!cjk_set && is_cjk_hint(font_name)) {
-                if (g_current_font) free((void *)g_current_font);
-                g_current_font = strdup(font_name);
+                if (g_kwcc_ui_current_font) free((void *)g_kwcc_ui_current_font);
+                g_kwcc_ui_current_font = strdup(font_name);
                 cjk_set = 1;
                 log_info("auto-selected CJK font: %s", font_name);
             }
@@ -234,31 +234,31 @@ void kwcc_load_font_dir(const char *dir_path) {
 }
 
 const char *kwcc_get_font(void) {
-    return g_current_font ? g_current_font : "sans";
+    return g_kwcc_ui_current_font ? g_kwcc_ui_current_font : "sans";
 }
 
 /* ── microui text measurement callbacks ────────────────────── */
 
 static int mu_text_width(mu_Font font, const char *str, int len) {
     (void)font;
-    if (!str || !vg) return len > 0 ? len * 7 : 0;
+    if (!str || !g_kwcc_vg) return len > 0 ? len * 7 : 0;
     if (len < 0) len = (int)strlen(str);
     float bounds[4];
-    const char *fname = g_current_font ? g_current_font : "sans";
-    nvgFontFace(vg, fname);
-    nvgFontSize(vg, 14);
-    nvgTextBounds(vg, 0, 0, str, str + len, bounds);
+    const char *fname = g_kwcc_ui_current_font ? g_kwcc_ui_current_font : "sans";
+    nvgFontFace(g_kwcc_vg, fname);
+    nvgFontSize(g_kwcc_vg, 14);
+    nvgTextBounds(g_kwcc_vg, 0, 0, str, str + len, bounds);
     return (int)(bounds[2] - bounds[0]);
 }
 
 static int mu_text_height(mu_Font font) {
     (void)font;
-    if (!vg) return 14;
+    if (!g_kwcc_vg) return 14;
     float bounds[4];
-    const char *fname = g_current_font ? g_current_font : "sans";
-    nvgFontFace(vg, fname);
-    nvgFontSize(vg, 14);
-    nvgTextBounds(vg, 0, 0, "Hy", NULL, bounds);
+    const char *fname = g_kwcc_ui_current_font ? g_kwcc_ui_current_font : "sans";
+    nvgFontFace(g_kwcc_vg, fname);
+    nvgFontSize(g_kwcc_vg, 14);
+    nvgTextBounds(g_kwcc_vg, 0, 0, "Hy", NULL, bounds);
     return (int)(bounds[3] - bounds[1]);
 }
 
@@ -284,36 +284,36 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         }
 
         int visible = kwcc_get_current_visibility();
-        if (g_win_top < MAX_WIN_DEPTH) {
+        if (g_kwcc_ui_win_top < KWCC_UI_MAX_WIN_DEPTH) {
             if (!visible) {
-                g_win_intercepted[g_win_top] = 1;
+                g_kwcc_ui_win_intercepted[g_kwcc_ui_win_top] = 1;
                 if (topic) {
-                    strncpy(g_win_topics[g_win_top], topic, 127);
-                    g_win_topics[g_win_top][127] = '\0';
+                    strncpy(g_kwcc_ui_win_topics[g_kwcc_ui_win_top], topic, 127);
+                    g_kwcc_ui_win_topics[g_kwcc_ui_win_top][127] = '\0';
                 } else {
-                    g_win_topics[g_win_top][0] = '\0';
+                    g_kwcc_ui_win_topics[g_kwcc_ui_win_top][0] = '\0';
                 }
-                g_win_top++;
+                g_kwcc_ui_win_top++;
                 return JS_NewBool(0);
             }
-            g_win_intercepted[g_win_top] = 0;
+            g_kwcc_ui_win_intercepted[g_kwcc_ui_win_top] = 0;
             if (topic) {
-                strncpy(g_win_topics[g_win_top], topic, 127);
-                g_win_topics[g_win_top][127] = '\0';
+                strncpy(g_kwcc_ui_win_topics[g_kwcc_ui_win_top], topic, 127);
+                g_kwcc_ui_win_topics[g_kwcc_ui_win_top][127] = '\0';
             } else {
-                g_win_topics[g_win_top][0] = '\0';
+                g_kwcc_ui_win_topics[g_kwcc_ui_win_top][0] = '\0';
             }
-            g_win_top++;
+            g_kwcc_ui_win_top++;
         }
 
-        mu_begin_window_ex(&g_mu, title ? title : "", (mu_Rect){x, y, w, h}, opt);
+        mu_begin_window_ex(&g_kwcc_mu, title ? title : "", (mu_Rect){x, y, w, h}, opt);
         return JS_UNDEFINED;
     }
     if (strcmp(method, "endWindow") == 0) {
-        if (g_win_top > 0) {
-            g_win_top--;
-            if (!g_win_intercepted[g_win_top]) {
-                mu_end_window(&g_mu);
+        if (g_kwcc_ui_win_top > 0) {
+            g_kwcc_ui_win_top--;
+            if (!g_kwcc_ui_win_intercepted[g_kwcc_ui_win_top]) {
+                mu_end_window(&g_kwcc_mu);
             }
         }
         return JS_UNDEFINED;
@@ -331,11 +331,11 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         const char *name = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &buf);
         int opt = 0;
         if (argc > 1) JS_ToInt32(ctx, &opt, argv[1]);
-        mu_begin_panel_ex(&g_mu, name ? name : "", opt);
+        mu_begin_panel_ex(&g_kwcc_mu, name ? name : "", opt);
         return JS_UNDEFINED;
     }
     if (strcmp(method, "endPanel") == 0) {
-        mu_end_panel(&g_mu);
+        mu_end_panel(&g_kwcc_mu);
         return JS_UNDEFINED;
     }
     if (strcmp(method, "button") == 0) {
@@ -345,22 +345,22 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         if (argc > 1) {
             topic = JS_ToCString(ctx, argv[1], &tbuf);
         }
-        int res = mu_button_ex(&g_mu, text ? text : "", 0, MU_OPT_ALIGNCENTER);
+        int res = mu_button_ex(&g_kwcc_mu, text ? text : "", 0, MU_OPT_ALIGNCENTER);
         if ((res & MU_RES_SUBMIT) && topic) {
-            kwcc_dispatch_event(ctx, topic, "click");
+            kwcc_dispatch_event(g_kwcc_ui_js_ctx, topic, "click");
         }
         return JS_NewBool(res & MU_RES_SUBMIT);
     }
     if (strcmp(method, "label") == 0) {
         JSCStringBuf buf;
         const char *text = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &buf);
-        mu_label(&g_mu, text ? text : "");
+        mu_label(&g_kwcc_mu, text ? text : "");
         return JS_UNDEFINED;
     }
     if (strcmp(method, "slider") == 0) {
         JSCStringBuf tbuf;
         const char *text = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &tbuf);
-        double val = g_slider_val, low = 0, high = 1;
+        double val = g_kwcc_ui_slider_val, low = 0, high = 1;
         const char *topic = NULL;
         JSCStringBuf topic_buf;
         if (argc > 1) JS_ToNumber(ctx, &val, argv[1]);
@@ -369,14 +369,14 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         if (argc > 4) {
             topic = JS_ToCString(ctx, argv[4], &topic_buf);
         }
-        g_slider_val = (mu_Real)val;
+        g_kwcc_ui_slider_val = (mu_Real)val;
         mu_Real flow = (mu_Real)low, fhigh = (mu_Real)high;
-        mu_Real prev = g_slider_val;
-        mu_slider_ex(&g_mu, &g_slider_val, flow, fhigh, 0.01f, "%g", MU_OPT_ALIGNCENTER);
-        if (g_slider_val != prev && topic) {
-            kwcc_dispatch_event(ctx, topic, "change");
+        mu_Real prev = g_kwcc_ui_slider_val;
+        mu_slider_ex(&g_kwcc_mu, &g_kwcc_ui_slider_val, flow, fhigh, 0.01f, "%g", MU_OPT_ALIGNCENTER);
+        if (g_kwcc_ui_slider_val != prev && topic) {
+            kwcc_dispatch_event(g_kwcc_ui_js_ctx, topic, "change");
         }
-        return JS_NewFloat64(ctx, g_slider_val);
+        return JS_NewFloat64(ctx, g_kwcc_ui_slider_val);
     }
     if (strcmp(method, "layoutRow") == 0) {
         int height = 20;
@@ -387,7 +387,7 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
             JS_ToInt32(ctx, &widths[i - 1], argv[i]);
             items = i;
         }
-        mu_layout_row(&g_mu, items, items > 0 ? widths : NULL, height);
+        mu_layout_row(&g_kwcc_mu, items, items > 0 ? widths : NULL, height);
         return JS_UNDEFINED;
     }
     if (strcmp(method, "setNext") == 0) {
@@ -396,7 +396,7 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         if (argc > 1) JS_ToInt32(ctx, &y, argv[1]);
         if (argc > 2) JS_ToInt32(ctx, &w, argv[2]);
         if (argc > 3) JS_ToInt32(ctx, &h, argv[3]);
-        mu_layout_set_next(&g_mu, (mu_Rect){x, y, w, h}, 0);
+        mu_layout_set_next(&g_kwcc_mu, (mu_Rect){x, y, w, h}, 0);
         return JS_UNDEFINED;
     }
     if (strcmp(method, "rect") == 0) {
@@ -409,20 +409,20 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         if (argc > 4) JS_ToInt32(ctx, &r, argv[4]);
         if (argc > 5) JS_ToInt32(ctx, &g, argv[5]);
         if (argc > 6) JS_ToInt32(ctx, &b, argv[6]);
-        mu_draw_rect(&g_mu, (mu_Rect){x, y, w, h}, (mu_Color){r, g, b, 255});
+        mu_draw_rect(&g_kwcc_mu, (mu_Rect){x, y, w, h}, (mu_Color){r, g, b, 255});
         return JS_UNDEFINED;
     }
     if (strcmp(method, "display") == 0) {
         JSCStringBuf buf;
         const char *text = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &buf);
-        mu_Rect r = mu_layout_next(&g_mu);
-        mu_draw_rect(&g_mu, r, (mu_Color){30, 30, 30, 255});
+        mu_Rect r = mu_layout_next(&g_kwcc_mu);
+        mu_draw_rect(&g_kwcc_mu, r, (mu_Color){30, 30, 30, 255});
         if (text) {
-            int tw = g_mu.text_width(NULL, text, -1);
-            int th = g_mu.text_height(NULL);
+            int tw = g_kwcc_mu.text_width(NULL, text, -1);
+            int th = g_kwcc_mu.text_height(NULL);
             int tx = r.x + r.w - tw - 8;
             int ty = r.y + (r.h - th) / 2;
-            mu_draw_text(&g_mu, NULL, text, -1, (mu_Vec2){tx, ty},
+            mu_draw_text(&g_kwcc_mu, NULL, text, -1, (mu_Vec2){tx, ty},
                 (mu_Color){240, 240, 240, 255});
         }
         return JS_UNDEFINED;
@@ -430,8 +430,8 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
     if (strcmp(method, "textCentered") == 0) {
         JSCStringBuf buf;
         const char *text = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &buf);
-        mu_Rect r = mu_layout_next(&g_mu);
-        mu_draw_control_text(&g_mu, text ? text : "", r, MU_COLOR_TEXT, MU_OPT_ALIGNCENTER);
+        mu_Rect r = mu_layout_next(&g_kwcc_mu);
+        mu_draw_control_text(&g_kwcc_mu, text ? text : "", r, MU_COLOR_TEXT, MU_OPT_ALIGNCENTER);
         return JS_UNDEFINED;
     }
     if (strcmp(method, "loadFont") == 0) {
@@ -439,8 +439,8 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         const char *name = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &name_buf);
         const char *path = JS_ToCString(ctx, argc > 1 ? argv[1] : JS_UNDEFINED, &path_buf);
         if (name && path) {
-            if (nvgCreateFont(vg, name, path) >= 0) {
-                g_current_font = strdup(name);
+            if (nvgCreateFont(g_kwcc_vg, name, path) >= 0) {
+                g_kwcc_ui_current_font = strdup(name);
                 log_info("font loaded: %s (%s)", name, path);
             } else {
                 log_error("nvgCreateFont failed: %s (%s)", name, path);
@@ -452,10 +452,10 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         JSCStringBuf name_buf;
         const char *name = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &name_buf);
         if (name) {
-            if (g_current_font && g_current_font != name) {
-                free((void *)g_current_font);
+            if (g_kwcc_ui_current_font && g_kwcc_ui_current_font != name) {
+                free((void *)g_kwcc_ui_current_font);
             }
-            g_current_font = strdup(name);
+            g_kwcc_ui_current_font = strdup(name);
             log_info("font set to: %s", name);
         }
         return JS_UNDEFINED;
@@ -495,32 +495,32 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
 /* ── Input routing ─────────────────────────────────────────── */
 
 void kwcc_input_mousemove(int x, int y) {
-    mu_input_mousemove(&g_mu, x, y);
+    mu_input_mousemove(&g_kwcc_mu, x, y);
 }
 
 void kwcc_input_mousedown(int x, int y, int btn) {
-    mu_input_mousedown(&g_mu, x, y, btn);
+    mu_input_mousedown(&g_kwcc_mu, x, y, btn);
 }
 
 void kwcc_input_mouseup(int x, int y, int btn) {
-    mu_input_mouseup(&g_mu, x, y, btn);
+    mu_input_mouseup(&g_kwcc_mu, x, y, btn);
 }
 
 void kwcc_input_scroll(int x, int y) {
-    mu_input_scroll(&g_mu, x, y);
+    mu_input_scroll(&g_kwcc_mu, x, y);
 }
 
 void kwcc_input_text(const char *text) {
-    mu_input_text(&g_mu, text);
+    mu_input_text(&g_kwcc_mu, text);
 }
 
 /* ── Registration ──────────────────────────────────────────── */
 
 void kwcc_ui_init(void) {
-    mu_init(&g_mu);
-    g_mu.text_width  = mu_text_width;
-    g_mu.text_height = mu_text_height;
-    g_mu.on_window_close = kwcc_on_window_close;
+    mu_init(&g_kwcc_mu);
+    g_kwcc_mu.text_width  = mu_text_width;
+    g_kwcc_mu.text_height = mu_text_height;
+    g_kwcc_mu.on_window_close = kwcc_on_window_close;
 }
 
 void kwcc_ui_free(void) {
@@ -529,10 +529,10 @@ void kwcc_ui_free(void) {
 
 void kwcc_process_js(JSContext *ctx, const char *js_text) {
     if (!js_text) return;
-    g_frame_counter++;
+    g_kwcc_ui_frame_counter++;
     kwcc_begin_frame();
 
-    mu_begin(&g_mu);
+    mu_begin(&g_kwcc_mu);
 
     JSValue result = JS_Eval(ctx, js_text, strlen(js_text), "<main.js>", 0);
     if (JS_IsException(result)) {
@@ -542,11 +542,11 @@ void kwcc_process_js(JSContext *ctx, const char *js_text) {
         log_error("JS: %s", s ? s : "(none)");
     }
 
-    mu_end(&g_mu);
+    mu_end(&g_kwcc_mu);
 }
 
 mu_Context *kwcc_get_mu(void) {
-    return &g_mu;
+    return &g_kwcc_mu;
 }
 
 void kwcc_register_ui(JSContext *ctx) {

@@ -16,12 +16,12 @@
 #define NANOSVG_IMPLEMENTATION
 #include "nanosvg/nanosvg.h"
 
-NVGcontext *vg = NULL;
-static JSContext  *js_ctx = NULL;
-static const char *js_text = NULL;
-static FILE       *log_fp = NULL;
+NVGcontext *g_kwcc_vg = NULL;
+static JSContext  *g_js_ctx = NULL;
+static const char *g_js_text = NULL;
+static FILE       *g_log_fp = NULL;
 
-static const char *load_file(const char *path) {
+static const char *kwcc_load_file(const char *path) {
     static char buf[65536];
     FILE *f = fopen(path, "rb");
     if (!f) { log_error("cannot open %s", path); return NULL; }
@@ -31,7 +31,7 @@ static const char *load_file(const char *path) {
     return buf;
 }
 
-static void render_mu_commands(void) {
+static void kwcc_render_mu_commands(void) {
     mu_Context *mu = kwcc_get_mu();
     mu_Command *cmd = NULL;
     int count = 0;
@@ -43,30 +43,30 @@ static void render_mu_commands(void) {
             {
                 mu_ClipCommand *c = (mu_ClipCommand *)cmd;
                 if (c->rect.w == 0 && c->rect.h == 0) {
-                    nvgResetScissor(vg);
+                    nvgResetScissor(g_kwcc_vg);
                 } else {
-                    nvgScissor(vg, c->rect.x, c->rect.y, c->rect.w, c->rect.h);
+                    nvgScissor(g_kwcc_vg, c->rect.x, c->rect.y, c->rect.w, c->rect.h);
                 }
             }
             break;
         case MU_COMMAND_RECT:
             {
                 mu_RectCommand *c = (mu_RectCommand *)cmd;
-                nvgBeginPath(vg);
-                nvgRect(vg, c->rect.x, c->rect.y, c->rect.w, c->rect.h);
-                nvgFillColor(vg, nvgRGBA(c->color.r, c->color.g, c->color.b, c->color.a));
-                nvgFill(vg);
+                nvgBeginPath(g_kwcc_vg);
+                nvgRect(g_kwcc_vg, c->rect.x, c->rect.y, c->rect.w, c->rect.h);
+                nvgFillColor(g_kwcc_vg, nvgRGBA(c->color.r, c->color.g, c->color.b, c->color.a));
+                nvgFill(g_kwcc_vg);
             }
             break;
         case MU_COMMAND_TEXT:
             {
                 mu_TextCommand *c = (mu_TextCommand *)cmd;
-                nvgBeginPath(vg);
-                nvgFontFace(vg, kwcc_get_font());
-                nvgFontSize(vg, 14);
-                nvgFillColor(vg, nvgRGBA(c->color.r, c->color.g, c->color.b, c->color.a));
-                nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-                nvgText(vg, c->pos.x, c->pos.y, c->str, NULL);
+                nvgBeginPath(g_kwcc_vg);
+                nvgFontFace(g_kwcc_vg, kwcc_get_font());
+                nvgFontSize(g_kwcc_vg, 14);
+                nvgFillColor(g_kwcc_vg, nvgRGBA(c->color.r, c->color.g, c->color.b, c->color.a));
+                nvgTextAlign(g_kwcc_vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+                nvgText(g_kwcc_vg, c->pos.x, c->pos.y, c->str, NULL);
             }
             break;
         case MU_COMMAND_ICON:
@@ -76,27 +76,27 @@ static void render_mu_commands(void) {
                 float s = 1.5f;  /* stroke width */
                 float m = c->rect.w * 0.25f;  /* margin */
                 /* draw X for close icon */
-                nvgBeginPath(vg);
-                nvgStrokeColor(vg, nvgRGBA(col.r, col.g, col.b, col.a));
-                nvgStrokeWidth(vg, s);
-                nvgMoveTo(vg, c->rect.x + m, c->rect.y + m);
-                nvgLineTo(vg, c->rect.x + c->rect.w - m, c->rect.y + c->rect.h - m);
-                nvgMoveTo(vg, c->rect.x + c->rect.w - m, c->rect.y + m);
-                nvgLineTo(vg, c->rect.x + m, c->rect.y + c->rect.h - m);
-                nvgStroke(vg);
+                nvgBeginPath(g_kwcc_vg);
+                nvgStrokeColor(g_kwcc_vg, nvgRGBA(col.r, col.g, col.b, col.a));
+                nvgStrokeWidth(g_kwcc_vg, s);
+                nvgMoveTo(g_kwcc_vg, c->rect.x + m, c->rect.y + m);
+                nvgLineTo(g_kwcc_vg, c->rect.x + c->rect.w - m, c->rect.y + c->rect.h - m);
+                nvgMoveTo(g_kwcc_vg, c->rect.x + c->rect.w - m, c->rect.y + m);
+                nvgLineTo(g_kwcc_vg, c->rect.x + m, c->rect.y + c->rect.h - m);
+                nvgStroke(g_kwcc_vg);
             }
             break;
         case MU_COMMAND_SVG:
             {
                 mu_SvgCommand *c = (mu_SvgCommand *)cmd;
-                if (c->cache_idx < 0 || c->cache_idx >= SVG_CACHE_SIZE) {
+                if (c->cache_idx < 0 || c->cache_idx >= KWCC_UI_SVG_CACHE_SIZE) {
                     break;
                 }
-                NSVGimage *image = g_svg_cache[c->cache_idx].image;
+                NSVGimage *image = g_kwcc_ui_svg_cache[c->cache_idx].image;
                 if (!image) break;
 
                 /* mark active this frame */
-                g_svg_cache[c->cache_idx].frame_id = g_frame_counter;
+                g_kwcc_ui_svg_cache[c->cache_idx].frame_id = g_kwcc_ui_frame_counter;
 
                 float svg_w = image->width > 0 ? image->width : 1;
                 float svg_h = image->height > 0 ? image->height : 1;
@@ -109,37 +109,37 @@ static void render_mu_commands(void) {
                 float oy = (float)c->rect.y + (c->rect.h - sh) / 2.0f;
 
                 /* Extract NVG color from nanosvg color (stored as R|(G<<8)|(B<<16)) */
-                nvgSave(vg);
-                nvgTranslate(vg, ox, oy);
-                nvgScale(vg, scale, scale);
+                nvgSave(g_kwcc_vg);
+                nvgTranslate(g_kwcc_vg, ox, oy);
+                nvgScale(g_kwcc_vg, scale, scale);
                 for (NSVGshape *shape = image->shapes; shape; shape = shape->next) {
                     if (!(shape->flags & NSVG_FLAGS_VISIBLE)) continue;
                     for (NSVGpath *p = shape->paths; p; p = p->next) {
                         if (!p || p->npts < 2) continue;
                         float *pts = p->pts;
                         int n = p->npts;
-                        nvgBeginPath(vg);
-                        nvgMoveTo(vg, pts[0], pts[1]);
+                        nvgBeginPath(g_kwcc_vg);
+                        nvgMoveTo(g_kwcc_vg, pts[0], pts[1]);
                         for (int i = 1; i + 2 < n; i += 3) {
-                            nvgBezierTo(vg, pts[i*2], pts[i*2+1], pts[i*2+2], pts[i*2+3], pts[i*2+4], pts[i*2+5]);
+                            nvgBezierTo(g_kwcc_vg, pts[i*2], pts[i*2+1], pts[i*2+2], pts[i*2+3], pts[i*2+4], pts[i*2+5]);
                         }
-                        if (p->closed) nvgClosePath(vg);
+                        if (p->closed) nvgClosePath(g_kwcc_vg);
                         if (shape->fill.type == NSVG_PAINT_COLOR) {
                             unsigned int fc = shape->fill.color;
-                            nvgFillColor(vg, nvgRGBA(fc & 0xFF, (fc >> 8) & 0xFF, (fc >> 16) & 0xFF, 0xFF));
-                            nvgFill(vg);
+                            nvgFillColor(g_kwcc_vg, nvgRGBA(fc & 0xFF, (fc >> 8) & 0xFF, (fc >> 16) & 0xFF, 0xFF));
+                            nvgFill(g_kwcc_vg);
                         }
                         if (shape->stroke.type == NSVG_PAINT_COLOR && shape->strokeWidth > 0) {
                             unsigned int sc = shape->stroke.color;
-                            nvgStrokeColor(vg, nvgRGBA(sc & 0xFF, (sc >> 8) & 0xFF, (sc >> 16) & 0xFF, 0xFF));
-                            nvgStrokeWidth(vg, shape->strokeWidth);
-                            nvgLineCap(vg, shape->strokeLineCap);
-                            nvgLineJoin(vg, shape->strokeLineJoin);
-                            nvgStroke(vg);
+                            nvgStrokeColor(g_kwcc_vg, nvgRGBA(sc & 0xFF, (sc >> 8) & 0xFF, (sc >> 16) & 0xFF, 0xFF));
+                            nvgStrokeWidth(g_kwcc_vg, shape->strokeWidth);
+                            nvgLineCap(g_kwcc_vg, shape->strokeLineCap);
+                            nvgLineJoin(g_kwcc_vg, shape->strokeLineJoin);
+                            nvgStroke(g_kwcc_vg);
                         }
                     }
                 }
-                nvgRestore(vg);
+                nvgRestore(g_kwcc_vg);
             }
             break;
         }
@@ -149,9 +149,9 @@ static void render_mu_commands(void) {
 }
 
 static void init(void) {
-    log_fp = fopen("kwcc.log", "w");
-    if (log_fp) {
-        log_add_fp(log_fp, LOG_TRACE);
+    g_log_fp = fopen("kwcc.log", "w");
+    if (g_log_fp) {
+        log_add_fp(g_log_fp, LOG_TRACE);
     }
     log_info("=== kwcc started ===");
 
@@ -160,27 +160,27 @@ static void init(void) {
         .logger.func = slog_func,
     });
 
-    vg = nvgCreateGL3(NVG_ANTIALIAS | NVG_STENCIL_STROKES);
+    g_kwcc_vg = nvgCreateGL3(NVG_ANTIALIAS | NVG_STENCIL_STROKES);
 
     /* Load system fonts for CJK support */
-    int font = nvgCreateFontAtIndex(vg, "sans", "/System/Library/Fonts/PingFang.ttc", 0);
+    int font = nvgCreateFontAtIndex(g_kwcc_vg, "sans", "/System/Library/Fonts/PingFang.ttc", 0);
     if (font < 0) {
         log_warn("PingFang.ttc load failed, trying STHeiti");
-        font = nvgCreateFontAtIndex(vg, "sans", "/System/Library/Fonts/STHeiti Medium.ttc", 0);
+        font = nvgCreateFontAtIndex(g_kwcc_vg, "sans", "/System/Library/Fonts/STHeiti Medium.ttc", 0);
         if (font < 0) {
             log_warn("STHeiti load failed, fallback to Roboto");
-            nvgCreateFont(vg, "sans", "assets/Roboto-Regular.ttf");
+            nvgCreateFont(g_kwcc_vg, "sans", "assets/Roboto-Regular.ttf");
         }
     }
 
     kwcc_mempool_init();       /* 0. memory pool */
-    js_ctx = kwcc_create_js();    /* 1. JSContext + config init */
+    g_js_ctx = kwcc_create_js();    /* 1. JSContext + config init */
     kwcc_ui_init();               /* 2. microui text callbacks */
-    kwcc_register_ui(js_ctx);     /* 3. UI methods */
+    kwcc_register_ui(g_js_ctx);     /* 3. UI methods */
 
     /* Load and eval main.js once during init (register modules, init store/events) */
-    js_text = load_file("app/main.js");
-    kwcc_process_js(js_ctx, js_text);
+    g_js_text = kwcc_load_file("app/main.js");
+    kwcc_process_js(g_js_ctx, g_js_text);
 }
 
 static void frame(void) {
@@ -188,7 +188,7 @@ static void frame(void) {
     int h = sapp_height();
 
     /* Each frame: just call onFrame() for rendering */
-    kwcc_process_js(js_ctx, "onFrame();");
+    kwcc_process_js(g_js_ctx, "onFrame();");
 
     sg_begin_pass(&(sg_pass){
         .action = {
@@ -200,9 +200,9 @@ static void frame(void) {
         .swapchain = sglue_swapchain(),
     });
 
-    nvgBeginFrame(vg, (float)w, (float)h, 1.0f);
-    render_mu_commands();
-    nvgEndFrame(vg);
+    nvgBeginFrame(g_kwcc_vg, (float)w, (float)h, 1.0f);
+    kwcc_render_mu_commands();
+    nvgEndFrame(g_kwcc_vg);
 
     sg_end_pass();
     sg_commit();
@@ -210,9 +210,9 @@ static void frame(void) {
 
 static void cleanup(void) {
     log_info("=== kwcc exiting ===");
-    if (log_fp) { fflush(log_fp); fclose(log_fp); log_fp = NULL; }
-    if (vg) { nvgDeleteGL3(vg); vg = NULL; }
-    kwcc_destroy_js(js_ctx);
+    if (g_log_fp) { fflush(g_log_fp); fclose(g_log_fp); g_log_fp = NULL; }
+    if (g_kwcc_vg) { nvgDeleteGL3(g_kwcc_vg); g_kwcc_vg = NULL; }
+    kwcc_destroy_js(g_js_ctx);
     kwcc_ui_free();
     kwcc_mempool_shutdown();
     sg_shutdown();

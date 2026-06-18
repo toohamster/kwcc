@@ -12,22 +12,23 @@
 
 /* ═══ Slot counts per pool type (per spec) ═══ */
 
-#define SLOTS_L0 128
-#define SLOTS_L1 128
-#define SLOTS_L2 128
-#define SLOTS_L3 128
-#define SLOTS_L4 128
-#define SLOTS_L5 32
-#define SLOTS_L6 8
-#define SLOTS_L7 128
+#define KWCC_MEMPOOL_SLOTS_L0 128
+#define KWCC_MEMPOOL_SLOTS_L1 128
+#define KWCC_MEMPOOL_SLOTS_L2 128
+#define KWCC_MEMPOOL_SLOTS_L3 128
+#define KWCC_MEMPOOL_SLOTS_L4 128
+#define KWCC_MEMPOOL_SLOTS_L5 32
+#define KWCC_MEMPOOL_SLOTS_L6 8
+#define KWCC_MEMPOOL_SLOTS_L7 128
 
-static const int slots_per_pool[KWCC_MEMPOOL_MAX_TYPES] = {
-    SLOTS_L0, SLOTS_L1, SLOTS_L2, SLOTS_L3, SLOTS_L4, SLOTS_L5, SLOTS_L6, SLOTS_L7
+static const int kwcc_mempool_slots_per_pool[KWCC_MEMPOOL_MAX_TYPES] = {
+    KWCC_MEMPOOL_SLOTS_L0, KWCC_MEMPOOL_SLOTS_L1, KWCC_MEMPOOL_SLOTS_L2, KWCC_MEMPOOL_SLOTS_L3,
+    KWCC_MEMPOOL_SLOTS_L4, KWCC_MEMPOOL_SLOTS_L5, KWCC_MEMPOOL_SLOTS_L6, KWCC_MEMPOOL_SLOTS_L7
 };
 
 /* ═══ Chunk sizes per pool type ═══ */
 
-static const uint32_t chunk_sizes[KWCC_MEMPOOL_MAX_TYPES] = {
+static const uint32_t kwcc_mempool_chunk_sizes[KWCC_MEMPOOL_MAX_TYPES] = {
     8,       /* L0: int/float/bool */
     32,      /* L1: very short strings */
     128,     /* L2: short strings */
@@ -189,8 +190,8 @@ static void kwcc_mempool_slab_init(kwcc_mempool_slab_t *slab, int n_slots) {
 /* ═══ Pool creation ═══ */
 
 static kwcc_mempool_pool_t *kwcc_mempool_create_pool(uint8_t type, uint8_t idx) {
-    uint32_t csz = chunk_sizes[type];
-    int n = slots_per_pool[type];
+    uint32_t csz = kwcc_mempool_chunk_sizes[type];
+    int n = kwcc_mempool_slots_per_pool[type];
     size_t slab_bytes = (size_t)csz * n;
 
     kwcc_mempool_pool_t *pool = calloc(1, sizeof(kwcc_mempool_pool_t));
@@ -247,7 +248,7 @@ void kwcc_mempool_shutdown(void) {
     for (int i = 0; i < g_kwcc_mempool_mgr.pool_count[KWCC_MEMPOOL_L7]; i++) {
         kwcc_mempool_l7_pool_t *p = g_kwcc_mempool_mgr.l7_pools[i];
         if (p) {
-            for (int j = 0; j < SLOTS_L7; j++)
+            for (int j = 0; j < KWCC_MEMPOOL_SLOTS_L7; j++)
                 if (p->slots[j].in_use && p->slots[j].data) free(p->slots[j].data);
             free(p);
         }
@@ -289,7 +290,7 @@ static int kwcc_mempool_expand_l7(void) {
 static kwcc_mempool_slot_t *kwcc_mempool_find_free_slot(uint8_t type, uint8_t *out_pool_idx,
                                                          uint8_t *out_slot_idx) {
     int count = g_kwcc_mempool_mgr.pool_count[type];
-    int n = slots_per_pool[type];
+    int n = kwcc_mempool_slots_per_pool[type];
     for (int pi = 0; pi < count; pi++) {
         kwcc_mempool_pool_t *p = g_kwcc_mempool_mgr.pools[type][pi];
         if (!p || !p->in_use) continue;
@@ -370,19 +371,19 @@ kwcc_mempool_slot_t *kwcc_mempool_alloc(uint8_t data_type, const char *key,
 
     /* ── Route to pool type by size ── */
     uint8_t target_type;
-    if (size <= chunk_sizes[KWCC_MEMPOOL_L0]) {
+    if (size <= kwcc_mempool_chunk_sizes[KWCC_MEMPOOL_L0]) {
         target_type = KWCC_MEMPOOL_L0;
-    } else if (size <= chunk_sizes[KWCC_MEMPOOL_L1]) {
+    } else if (size <= kwcc_mempool_chunk_sizes[KWCC_MEMPOOL_L1]) {
         target_type = KWCC_MEMPOOL_L1;
-    } else if (size <= chunk_sizes[KWCC_MEMPOOL_L2]) {
+    } else if (size <= kwcc_mempool_chunk_sizes[KWCC_MEMPOOL_L2]) {
         target_type = KWCC_MEMPOOL_L2;
-    } else if (size <= chunk_sizes[KWCC_MEMPOOL_L3]) {
+    } else if (size <= kwcc_mempool_chunk_sizes[KWCC_MEMPOOL_L3]) {
         target_type = KWCC_MEMPOOL_L3;
-    } else if (size <= chunk_sizes[KWCC_MEMPOOL_L4]) {
+    } else if (size <= kwcc_mempool_chunk_sizes[KWCC_MEMPOOL_L4]) {
         target_type = KWCC_MEMPOOL_L4;
-    } else if (size <= chunk_sizes[KWCC_MEMPOOL_L5]) {
+    } else if (size <= kwcc_mempool_chunk_sizes[KWCC_MEMPOOL_L5]) {
         target_type = KWCC_MEMPOOL_L5;
-    } else if (size <= chunk_sizes[KWCC_MEMPOOL_L6]) {
+    } else if (size <= kwcc_mempool_chunk_sizes[KWCC_MEMPOOL_L6]) {
         target_type = KWCC_MEMPOOL_L6;
     } else {
         return kwcc_mempool_alloc_dynamic(key, size, timeout_sec);
@@ -402,8 +403,8 @@ kwcc_mempool_slot_t *kwcc_mempool_alloc(uint8_t data_type, const char *key,
     }
 
     uint8_t *data_ptr = g_kwcc_mempool_mgr.pools[target_type][pi]->slab.memory
-                        + (size_t)si * chunk_sizes[target_type];
-    kwcc_mempool_init_slot(s, data_type, key, chunk_sizes[target_type],
+                        + (size_t)si * kwcc_mempool_chunk_sizes[target_type];
+    kwcc_mempool_init_slot(s, data_type, key, kwcc_mempool_chunk_sizes[target_type],
                            timeout_sec, target_type, pi, si, data_ptr);
     return s;
 }
@@ -436,7 +437,7 @@ kwcc_mempool_slot_t *kwcc_mempool_alloc_dynamic(const char *key,
     for (int pi = 0; pi < l7_count; pi++) {
         kwcc_mempool_l7_pool_t *p = g_kwcc_mempool_mgr.l7_pools[pi];
         if (!p || !p->in_use) continue;
-        for (int si = 0; si < SLOTS_L7; si++) {
+        for (int si = 0; si < KWCC_MEMPOOL_SLOTS_L7; si++) {
             if (!p->slots[si].in_use) {
                 uint8_t *data = malloc(cap);
                 if (!data) continue;
@@ -588,7 +589,7 @@ static void kwcc_mempool_gc_internal(void) {
         for (int pi = 0; pi < count; pi++) {
             kwcc_mempool_pool_t *p = g_kwcc_mempool_mgr.pools[t][pi];
             if (!p || !p->in_use) continue;
-            int n = slots_per_pool[t];
+            int n = kwcc_mempool_slots_per_pool[t];
             for (int si = 0; si < n; si++) {
                 kwcc_mempool_slot_t *s = &p->slots[si];
                 if (!s->in_use) continue;
@@ -608,7 +609,7 @@ static void kwcc_mempool_gc_internal(void) {
     for (int pi = 0; pi < l7_count; pi++) {
         kwcc_mempool_l7_pool_t *p = g_kwcc_mempool_mgr.l7_pools[pi];
         if (!p || !p->in_use) continue;
-        for (int si = 0; si < SLOTS_L7; si++) {
+        for (int si = 0; si < KWCC_MEMPOOL_SLOTS_L7; si++) {
             kwcc_mempool_slot_t *s = &p->slots[si];
             if (!s->in_use) continue;
             if (s->ref_count == 0) {
@@ -641,7 +642,7 @@ void kwcc_mempool_gc_auto(void) {
     int total_used = 0, total_slots = 0;
     for (int t = 0; t < KWCC_MEMPOOL_L7; t++) {
         int count = g_kwcc_mempool_mgr.pool_count[t];
-        int n = slots_per_pool[t];
+        int n = kwcc_mempool_slots_per_pool[t];
         total_slots += count * n;
         for (int pi = 0; pi < count; pi++) {
             kwcc_mempool_pool_t *p = g_kwcc_mempool_mgr.pools[t][pi];
@@ -654,8 +655,8 @@ void kwcc_mempool_gc_auto(void) {
     for (int pi = 0; pi < l7_count; pi++) {
         kwcc_mempool_l7_pool_t *p = g_kwcc_mempool_mgr.l7_pools[pi];
         if (!p) continue;
-        total_slots += SLOTS_L7;
-        for (int si = 0; si < SLOTS_L7; si++)
+        total_slots += KWCC_MEMPOOL_SLOTS_L7;
+        for (int si = 0; si < KWCC_MEMPOOL_SLOTS_L7; si++)
             if (p->slots[si].in_use) total_used++;
     }
     float usage = total_slots > 0 ? (float)total_used / (float)total_slots : 0.0f;
@@ -673,7 +674,7 @@ int kwcc_mempool_get_keys(const char *prefix, const char **out_keys, int max_key
 
     for (int t = 0; t < KWCC_MEMPOOL_L7; t++) {
         int pc = g_kwcc_mempool_mgr.pool_count[t];
-        int n = slots_per_pool[t];
+        int n = kwcc_mempool_slots_per_pool[t];
         for (int pi = 0; pi < pc; pi++) {
             kwcc_mempool_pool_t *p = g_kwcc_mempool_mgr.pools[t][pi];
             if (!p) continue;
@@ -692,7 +693,7 @@ int kwcc_mempool_get_keys(const char *prefix, const char **out_keys, int max_key
     for (int pi = 0; pi < l7_count && count < max_keys; pi++) {
         kwcc_mempool_l7_pool_t *p = g_kwcc_mempool_mgr.l7_pools[pi];
         if (!p) continue;
-        for (int si = 0; si < SLOTS_L7 && count < max_keys; si++) {
+        for (int si = 0; si < KWCC_MEMPOOL_SLOTS_L7 && count < max_keys; si++) {
             kwcc_mempool_slot_t *s = &p->slots[si];
             if (!s->in_use) continue;
             if (strncmp(s->key, prefix, plen) == 0) {
@@ -722,7 +723,7 @@ uint16_t kwcc_mempool_tlv_read_le16(const uint8_t *p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
-static void tlv_write_le16(uint8_t *p, uint16_t v) {
+static void kwcc_mempool_tlv_write_le16(uint8_t *p, uint16_t v) {
     p[0] = (uint8_t)(v & 0xFF);
     p[1] = (uint8_t)((v >> 8) & 0xFF);
 }
@@ -752,7 +753,7 @@ uint8_t *kwcc_mempool_tlv_build(kwcc_mempool_tlv_pack_cb cb, void *user_data,
             if (!buf) { *out_len = 0; return NULL; }
         }
         buf[offset++] = etype;
-        tlv_write_le16(buf + offset, (uint16_t)total);
+        kwcc_mempool_tlv_write_le16(buf + offset, (uint16_t)total);
         offset += 2;
         memcpy(buf + offset, name, nlen);
         offset += nlen;
@@ -836,7 +837,7 @@ const char *kwcc_mempool_tlv_get_path(const uint8_t *tlv_data, size_t tlv_len,
 }
 
 /* JSON string escape helper */
-static size_t json_escape_len(const char *s, size_t len) {
+static size_t kwcc_mempool_json_escape_len(const char *s, size_t len) {
     size_t n = 0;
     for (size_t i = 0; i < len; i++) {
         unsigned char c = (unsigned char)s[i];
@@ -847,7 +848,7 @@ static size_t json_escape_len(const char *s, size_t len) {
     return n;
 }
 
-static void json_write_escaped(char *dst, const char *s, size_t len) {
+static void kwcc_mempool_json_write_escaped(char *dst, const char *s, size_t len) {
     for (size_t i = 0; i < len; i++) {
         unsigned char c = (unsigned char)s[i];
         if (c == '"') { *dst++ = '\\'; *dst++ = '"'; }
@@ -917,10 +918,10 @@ char *kwcc_mempool_tlv_to_json(const uint8_t *tlv_data, size_t tlv_len, size_t *
             if (is_num && value_len > 0) {
                 JSON_APPEND((const char *)value, value_len);
             } else {
-                size_t elen = json_escape_len((const char *)value, value_len);
+                size_t elen = kwcc_mempool_json_escape_len((const char *)value, value_len);
                 if (pos + elen + 2 >= cap) { cap *= 2; json = realloc(json, cap); }
                 json[pos++] = '"';
-                json_write_escaped(json + pos, (const char *)value, value_len);
+                kwcc_mempool_json_write_escaped(json + pos, (const char *)value, value_len);
                 pos += elen;
                 json[pos++] = '"';
             }
@@ -952,7 +953,7 @@ void kwcc_mempool_dump_stats(void) {
     int total_used = 0, total_slots = 0;
     for (int t = 0; t < KWCC_MEMPOOL_L7; t++) {
         int count = g_kwcc_mempool_mgr.pool_count[t];
-        int n = slots_per_pool[t];
+        int n = kwcc_mempool_slots_per_pool[t];
         int used = 0;
         for (int pi = 0; pi < count; pi++) {
             kwcc_mempool_pool_t *p = g_kwcc_mempool_mgr.pools[t][pi];
@@ -963,7 +964,7 @@ void kwcc_mempool_dump_stats(void) {
         total_used += used;
         total_slots += count * n;
         log_info("L%d (%dB): %d pool%s [ %d/%d slots used ]",
-                 t, chunk_sizes[t], count, count > 1 ? "s" : "", used, count * n);
+                 t, kwcc_mempool_chunk_sizes[t], count, count > 1 ? "s" : "", used, count * n);
     }
     log_info("L7 (dynamic): %d pools [ %lu bytes used ]",
              g_kwcc_mempool_mgr.pool_count[KWCC_MEMPOOL_L7],
@@ -979,7 +980,7 @@ void kwcc_mempool_dump_all(const char *filepath, int show_content) {
 
     for (int t = 0; t < KWCC_MEMPOOL_L7; t++) {
         int count = g_kwcc_mempool_mgr.pool_count[t];
-        int n = slots_per_pool[t];
+        int n = kwcc_mempool_slots_per_pool[t];
         for (int pi = 0; pi < count; pi++) {
             kwcc_mempool_pool_t *p = g_kwcc_mempool_mgr.pools[t][pi];
             if (!p) continue;
@@ -1015,7 +1016,7 @@ void kwcc_mempool_dump_all(const char *filepath, int show_content) {
     for (int pi = 0; pi < l7_count; pi++) {
         kwcc_mempool_l7_pool_t *p = g_kwcc_mempool_mgr.l7_pools[pi];
         if (!p) continue;
-        for (int si = 0; si < SLOTS_L7; si++) {
+        for (int si = 0; si < KWCC_MEMPOOL_SLOTS_L7; si++) {
             kwcc_mempool_slot_t *s = &p->slots[si];
             if (!s->in_use) continue;
             total++;

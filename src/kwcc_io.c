@@ -14,35 +14,35 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-static kwcc_io_slot_t g_io_slots[KWCC_IO_MAX_FDS];
-static int            g_io_max_fds = 16;
+static kwcc_io_slot_t g_kwcc_io_slots[KWCC_IO_MAX_FDS];
+static int            g_kwcc_io_max_fds = 16;
 
 void kwcc_io_init(void) {
-    memset(g_io_slots, 0, sizeof(g_io_slots));
+    memset(g_kwcc_io_slots, 0, sizeof(g_kwcc_io_slots));
 
     const char *val = kwcc_config_get_core("io/max_fds", "16");
     int max = atoi(val ? val : "16");
     if (max < 1) max = 1;
     if (max > KWCC_IO_MAX_FDS) max = KWCC_IO_MAX_FDS;
-    g_io_max_fds = max;
+    g_kwcc_io_max_fds = max;
 }
 
 void kwcc_io_register(int fd, kwcc_io_callback_t cb, void *user_data) {
-    for (int i = 0; i < g_io_max_fds; i++) {
-        if (!g_io_slots[i].in_use) {
-            g_io_slots[i].fd = fd;
-            g_io_slots[i].callback = cb;
-            g_io_slots[i].user_data = user_data;
-            g_io_slots[i].in_use = 1;
+    for (int i = 0; i < g_kwcc_io_max_fds; i++) {
+        if (!g_kwcc_io_slots[i].in_use) {
+            g_kwcc_io_slots[i].fd = fd;
+            g_kwcc_io_slots[i].callback = cb;
+            g_kwcc_io_slots[i].user_data = user_data;
+            g_kwcc_io_slots[i].in_use = 1;
             return;
         }
     }
 }
 
 void kwcc_io_unregister(int fd) {
-    for (int i = 0; i < g_io_max_fds; i++) {
-        if (g_io_slots[i].in_use && g_io_slots[i].fd == fd) {
-            g_io_slots[i].in_use = 0;
+    for (int i = 0; i < g_kwcc_io_max_fds; i++) {
+        if (g_kwcc_io_slots[i].in_use && g_kwcc_io_slots[i].fd == fd) {
+            g_kwcc_io_slots[i].in_use = 0;
             return;
         }
     }
@@ -55,11 +55,11 @@ void kwcc_io_poll_once(void) {
     int max_fd = -1;
     int active = 0;
 
-    for (int i = 0; i < g_io_max_fds; i++) {
-        if (g_io_slots[i].in_use) {
-            FD_SET(g_io_slots[i].fd, &readfds);
-            if (g_io_slots[i].fd > max_fd) {
-                max_fd = g_io_slots[i].fd;
+    for (int i = 0; i < g_kwcc_io_max_fds; i++) {
+        if (g_kwcc_io_slots[i].in_use) {
+            FD_SET(g_kwcc_io_slots[i].fd, &readfds);
+            if (g_kwcc_io_slots[i].fd > max_fd) {
+                max_fd = g_kwcc_io_slots[i].fd;
             }
             active++;
         }
@@ -79,9 +79,9 @@ void kwcc_io_poll_once(void) {
     if (ret == 0) return;  /* timeout, no data */
 
     /* Dispatch callbacks for fds with data */
-    for (int i = 0; i < g_io_max_fds; i++) {
-        if (g_io_slots[i].in_use && FD_ISSET(g_io_slots[i].fd, &readfds)) {
-            kwcc_io_slot_t *slot = &g_io_slots[i];
+    for (int i = 0; i < g_kwcc_io_max_fds; i++) {
+        if (g_kwcc_io_slots[i].in_use && FD_ISSET(g_kwcc_io_slots[i].fd, &readfds)) {
+            kwcc_io_slot_t *slot = &g_kwcc_io_slots[i];
             slot->callback(slot->fd, slot->user_data);
         }
     }
