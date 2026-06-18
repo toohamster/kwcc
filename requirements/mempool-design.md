@@ -319,10 +319,11 @@ Config 层（kwcc_config.h + kwcc_config.c，C 模块的存取接口，无 mquic
   例：kwcc_config_get_core("io/max_fds") → mempool 中查找 "c.io/max_fds"
   例：kwcc_config_set_app_int("port", 8080) → mempool 中存 "a.port"
 
-Key 前缀拼接（`$config` 层业务逻辑）：
-  在 `kwcc_js.c` 中实现，负责给 key 拼 `a.` / `c.` 前缀。
-  用途：JS wrapper 自动加业务前缀，防止 JS 注入恶意 key。
-  例：`$config.appSetInt("io/port", 8080)` → C 侧 `"a.io/port"`
+Key 前缀拼接（C 层业务逻辑）：
+  在 `kwcc_config.c` 中实现，所有 App/Core 函数内部自动拼 `a.` / `c.` 前缀。
+  用途：C 业务模块（JS handler、其他 C 模块）不需要关心前缀拼接，直接传原始 key。
+  例：`kwcc_config_set_app_int("io/port", 8080)` → mempool 中存 `"a.io/port"`
+  例：JS wrapper 调 `kwcc_config_set_app_int("io/port", v)` → mempool 中存 `"a.io/port"`
 
 JS 层：$config（唯一公开的配置工具）
   分隔符约定：
@@ -332,7 +333,7 @@ JS 层：$config（唯一公开的配置工具）
   key 语义：扁平字符串，/ 只是人为约定的前缀分隔符
   TLV 是唯一特例：值内部是树形结构，路径查询在值内容上操作
 
-  App 域（读写，JS wrapper 自动加 a. 前缀）：
+  App 域（读写，C 层 config 函数自动加 a. 前缀）：
     appSetInt(key, val) / appSetString(key, val) / appSetBool(key, val)
     appSetJson(key, obj)     // JS对象 → JSON字符串
     appSetTlv(key, obj)      // JS对象 → TLV二进制
@@ -383,26 +384,50 @@ $config.setMaxPools("*", 4);                       // 全部设为 4
 
 **JS wrapper 内部**（在 `JS_Eval` 中注入）：
 ```javascript
-// App 域 — 自动加 "a." 前缀
-$config.appSetInt = function(k, v) { kwcc_config_set_int("a." + k, v); };
-$config.appSetString = function(k, v) { kwcc_config_set_string("a." + k, v); };
-$config.appSetBool = function(k, v) { kwcc_config_set_bool("a." + k, v); };
-$config.appSetJson = function(k, v) { kwcc_config_set_json("a." + k, v); };
-$config.appSetTlv = function(k, v) { kwcc_config_set_tlv("a." + k, v); };
-$config.appGet = function(k, d) { return kwcc_config_get("a." + k, d); };
+// App 域 — C handler 内部做 JSValue→C 值转换，委托给 C 层 config
+$config.appSetInt = function(k, v) { kwcc_js_config_set_app_int(k, v); };
+$config.appSetString = function(k, v) { kwcc_js_config_set_app_string(k, v); };
+$config.appSetBool = function(k, v) { kwcc_js_config_set_app_bool(k, v); };
+$config.appSetJson = function(k, v) { kwcc_js_config_set_app_json(k, JSON.stringify(v)); };
+$config.appSetTlv = function(k, v) { kwcc_js_config_set_app_tlv(k, v); };
+$config.appGet = function(k, d) { return kwcc_js_config_get_app(k, d); };
 $config.appGetTlv = function(k, p, d) {
-    if (p) { return kwcc_config_get_tlv_path("a." + k, p); }
-    return kwcc_config_get_tlv_json("a." + k, d);
+    if (p) { return kwcc_js_config_get_app_tlv_path(k, p, d); }
+    return kwcc_js_config_get_app_tlv_json(k, d);
 };
-$config.appRelease = function(k) { kwcc_config_release("a." + k); };
-$config.appReleasePrefix = function(k) { kwcc_config_release_prefix("a." + k + "/"); };
+$config.appRelease = function(k) { kwcc_js_config_release_app(k); };
+$config.appReleasePrefix = function(k) { kwcc_js_config_release_app_prefix(k); };
 
-// Core 域 — 自动加 "c." 前缀
-$config.coreSetTlv = function(k, v) { kwcc_config_set_tlv("c." + k, v); };
+// Core 域 — C handler 内部做 JSValue→C 值转换，委托给 C 层 config
+$config.coreSetTlv = function(k, v) { kwcc_js_config_set_core_tlv(k, v); };
 
 // 池管理
-$config.setMaxPools = function(t, n) { kwcc_config_set_max_pools(t, n); };
+$config.setMaxPools = function(t, n) { kwcc_js_config_set_max_pools(t, n); };
 ```
+
+**C handler（kwcc_js.c，12 个，注册为 JS 全局函数）：**
+
+| JS 全局函数 | 内部处理 | 委托给 C 层 |
+|---|---|---|
+| `kwcc_js_config_set_app_int` | `JS_ToInt32` | `kwcc_config_set_app_int` |
+| `kwcc_js_config_set_app_string` | `JS_ToCString` | `kwcc_config_set_app_string` |
+| `kwcc_js_config_set_app_bool` | `JS_IsTrue` | `kwcc_config_set_app_bool` |
+| `kwcc_js_config_set_app_json` | `JS_ToCString`（JSON 字符串） | `kwcc_config_set_app_string` |
+| `kwcc_js_config_set_app_tlv` | `kwcc_js_value_to_tlv` | `kwcc_config_set_app_tlv` |
+| `kwcc_js_config_get_app` | `kwcc_config_get_app` → `JS_NewString` | — |
+| `kwcc_js_config_get_app_tlv_path` | `kwcc_config_get_core_slot` → `tlv_get_path` → `JS_NewString` | — |
+| `kwcc_js_config_get_app_tlv_json` | `kwcc_config_get_core_slot` → `tlv_to_json` → `JS_NewString` | — |
+| `kwcc_js_config_release_app` | — | `kwcc_config_release_app` |
+| `kwcc_js_config_release_app_prefix` | — | `kwcc_config_release_app_prefix` |
+| `kwcc_js_config_set_core_tlv` | `kwcc_js_value_to_tlv` | `kwcc_config_set_core_tlv` |
+| `kwcc_js_config_set_max_pools` | `JS_ToInt32` | `kwcc_config_set_max_pools` |
+
+**TLV 转换函数（kwcc_js.c 内部，不注册）：**
+```c
+uint8_t *kwcc_js_value_to_tlv(JSContext *ctx, JSValue js_val, size_t *out_len);
+```
+- JSValue（对象）→ 遍历 keys → `kwcc_mempool_tlv_build()` → TLV 字节数组（malloc）
+- 调用方负责 `free(tlv)`
 
 ## 多池管理
 
@@ -527,13 +552,12 @@ typedef struct {
 - TLV 安全边界：`tlv_len < 3` 截断检测、`total_len < 3` 异常检测、`ptr + total_len > end` 越界保护
 
 ### 步骤五：第4层 — C-JS 接口（`src/kwcc_js.c` + `src/kwcc_js.h`）
-1. 实现 `kwcc_config_get_core/get_app`（调 mempool）
-2. 实现 12 个 C handler：`js_config_set_int` / `set_string` / `set_bool` / `set_json` / `set_tlv` / `get` / `get_tlv_path` / `get_tlv_json` / `release` / `release_prefix` / `set_max_pools` / `core_set_tlv`
-3. 实现 TLV 集成函数：`kwcc_js_value_to_tlv` / `kwcc_tlv_to_js_value` / `kwcc_tlv_path_to_js_value`
-4. `kwcc_register_config_js()` — 注入 JS wrapper（`var` 声明，无箭头/展开）
-5. 更新 `kwcc_js.h` — 所有新声明
-6. 更新 `deps/mquickjs/mqjs_stdlib.c` — `#ifdef CONFIG_KWCC` 区域 12 个 `JS_CFUNC_DEF`（只在 `js_global_object[]` 注册，不在 `js_c_function_decl[]` 重复）
-7. 更新 `app/main.js` — 删除旧调用
+1. 在 `kwcc_js.c` 中实现 12 个 C handler（`kwcc_js_config_set_app_int` 等），内部做 JSValue→C 值转换，委托给 C 层 config 函数
+2. TLV 转换函数 `kwcc_js_value_to_tlv`（JSValue 对象 → TLV 字节数组）
+3. `kwcc_register_config_js()` — 注入 JS wrapper
+4. 更新 `kwcc_js.h` — 12 个 C handler + TLV 转换函数声明
+5. 更新 `deps/mquickjs/mqjs_stdlib.c` — `#ifdef CONFIG_KWCC` 区域 12 个 `JS_CFUNC_DEF`（只在 `js_global_object[]` 注册）
+6. 更新 `app/main.js` — 测试调用
 
 ### 步骤六：编译 + 运行时验证
 1. `make clean && make` 编译通过
@@ -568,7 +592,7 @@ typedef struct {
   - Static 变量：也加 `g_kwcc_<module>_` 前缀（如 `g_kwcc_ui_current_font`）
   - 宏/枚举：`KWCC_MEMPOOL_L7`、`KWCC_UI_SVG_CACHE_SIZE`
   - 类型：`kwcc_mempool_slot_t`、`kwcc_ui_svg_cache_t`
-- **业务前缀**：JS wrapper 自动加 `a.`（App）/ `c.`（Core），在 `kwcc_js.c` 中实现；Core 可写可读
+- **业务前缀**：C 层 config 函数自动加 `a.`（App）/ `c.`（Core），在 `kwcc_config.c` 中实现；JS handler 委托给 C 层
 - **分隔符**：`.` 是业务命名空间分隔符，`/` 是前缀分组和 TLV 路径分隔符
 - **key 语义**：扁平字符串，`/` 只是人为约定的前缀分隔符
 - **JS API**：扁平方法名 `appSetInt/appSetString/appSetBool/appSetJson/appSetTlv/appGet/appGetTlv/appRelease/appReleasePrefix` + `coreSetTlv` + `setMaxPools`
