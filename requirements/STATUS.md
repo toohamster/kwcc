@@ -1,6 +1,6 @@
 # requirements/ 目录方案状态汇总
 
-> 更新于 2026-06-18
+> 更新于 2026-06-22
 
 ## 已完成 ✅
 
@@ -19,9 +19,11 @@
 
 | 文件 | 状态 | 说明 |
 |------|------|------|
-| `microui-id-override.md` | ⏳ 待论证 | microui ID 覆盖机制，优先级在 store-data-flow-v2 之后 |
-| `async-io-promise.md` | ⏳ 待论证 | 单线程异步 I/O + Promise，待论证 |
-| `async-io-implementation-plan.md` | ⏳ 进行中 | 基于 async-io-promise.md 的实计划，Step 1/2/3 已完成 |
+| `bus-split-design.md` | ⏳ 待论证（优先级最高） | kwcc_bus 拆分为纯 C 事件总线 + JS 桥接层 |
+| `async-io-design.md` | ⏳ 待论证（依赖 bus 拆分） | 单线程异步 I/O + Promise，已合并为统一方案 |
+| `async-io-promise.md` | 📁 保留参考 | 旧方案，内容已合并到 async-io-design.md |
+| `async-io-implementation-plan.md` | 📁 保留参考 | 旧实施计划，内容已合并到 async-io-design.md |
+| `microui-id-override.md` | ⏳ 待论证 | microui ID 覆盖机制，优先级在 async-io 之后 |
 
 ## 已废弃 ❌
 
@@ -34,6 +36,6 @@
 
 ## 下一步可以做
 
-1. **microui-id-override.md** — 窗口 ID 覆盖机制（待论证）
-2. **async-io-promise.md** — 异步 I/O + Promise（待论证）
-3. **async-io-implementation-plan.md** — 异步 I/O 实施（Step 1/2/3 已完成，继续 4/5/6）
+1. **bus-split-design.md** — kwcc_bus 拆分（优先级最高，async-io 前置依赖）
+2. **async-io-design.md** — 异步 I/O + Promise（依赖 bus 拆分完成后实施）
+3. **microui-id-override.md** — 窗口 ID 覆盖机制（待论证）

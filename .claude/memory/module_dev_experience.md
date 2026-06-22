@@ -60,6 +60,15 @@
 - 嵌套对象递归处理：内层 type=OBJECT，叶子 type=FIELD
 - 调用方负责 `free(tlv)`
 
+### 架构决策
+
+**const_lookup 在 set 中做即可，不需要在 alloc 中做**：
+- 方案原文要求 alloc 时先查常量表，匹配到则不占 slab chunk
+- 实际调用链：`config_set_app_int` → `mempool_alloc` → `mempool_set`
+- `mempool_set` 中已有 const_lookup 兜底（line 518-531），匹配到则 `slot->data` 指向常量表，跳过 memcpy
+- 在 set 中做和在 alloc 中做功能等价，提前到 alloc 只是省一次 slab 预留，收益可忽略
+- **结论**：set 中的 const_lookup 已足够，不需要在 alloc 中再做一遍
+
 ### 正确做法
 
 1. **实施前先完整读方案**，逐行对照，确认理解正确再动手
