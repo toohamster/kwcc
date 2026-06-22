@@ -93,7 +93,7 @@ fork 独立 `kwcc_curl` 子进程，建立非阻塞 pipe，构造 curl 参数，
 ```
 kwcc_http.c 依赖：
 ├── kwcc_io.c/h   — FD 管理（select + 非阻塞 read）
-├── kwcc_bus.c/h  — 事件发射（纯 C，kwcc_bus_emit_event）
+├── kwcc_bus.c/h  — 事件发射（NORMAL + LIGHT 双模式，零业务耦合）
 ├── picohttpparser — HTTP 响应解析
 └── libc（malloc/free/fork/exec/waitpid）
 
@@ -105,7 +105,7 @@ kwcc_http.c 不依赖：
 
 这保证了：
 1. **独立编译**：`kwcc_http.o` 不链接任何 JS 相关代码
-2. **独立测试**：可写纯 C 测试 mock `kwcc_bus_emit_event` 回调，验证 HTTP 解析逻辑
+2. **独立测试**：可写纯 C 测试 mock `kwcc_bus_emit` 回调，验证 HTTP 解析逻辑
 3. **可替换**：未来 `kwcc_curl` 可替换为自研 socket 实现，接口不变
 
 ### 配置管理
@@ -166,14 +166,27 @@ typedef struct {
 } kwcc_http_req_t;
 ```
 
+### req_id 管理
+
+**req_id 由 kwcc_http 统一生成**，调用方不需要管：
+
+```c
+/* kwcc_http_request 返回生成的 req_id（内部递增计数器）*/
+const char *kwcc_http_request(const char *method,
+                              const char *url, const char **headers, int header_count,
+                              const char *body, int body_len);
+```
+
+生成规则：`"req_<seq>"`，seq 为内部递增计数器，循环复用。
+
 ### API
 ```c
-void  kwcc_http_init(void);
-void  kwcc_http_request(const char *req_id, const char *method,
-                        const char *url, const char **headers, int header_count,
-                        const char *body, int body_len);
-void  kwcc_http_cancel(const char *req_id);
-void  kwcc_http_set_config(const char *key, const char *value);  /* 可选 */
+void        kwcc_http_init(void);
+const char *kwcc_http_request(const char *method,
+                              const char *url, const char **headers, int header_count,
+                              const char *body, int body_len);  /* 返回 req_id */
+void        kwcc_http_cancel(const char *req_id);
+void        kwcc_http_set_config(const char *key, const char *value);  /* 可选 */
 ```
 
 ### 依赖：picohttpparser
@@ -287,45 +300,25 @@ static void kwcc_http_on_read(int fd, void *user_data) {
 
 ### kwcc_http_dispatch_end() — C→JS 通信
 
-**机制**：C API 构建 JSValue 对象 → `kwcc_bus_dispatch_event_obj`（在 `kwcc_js.c` 中实现）→ `$bus.emit`。禁止 `JS_Eval` + 字符串拼接用户数据。
-
-**注意**：`kwcc_bus_dispatch_event_obj` 不在 `kwcc_bus.c` 中实现，因为它操作 JSValue，必须依赖 mquickjs。它放在 `kwcc_js.c` 中，保持 `kwcc_bus.c` 的纯 C 独立性。详见 `requirements/bus-split-design.md`。
+**机制**：topic 由 HTTP 模块内部管理（动态 `http/end/<req_id>`），JS 侧无感知。
 
 ```c
 static void kwcc_http_dispatch_end(kwcc_http_req_t *req, int error,
                                    int status, const char *body, int body_len,
                                    struct phr_header *headers, size_t num_headers) {
-    JSContext *ctx = /* 获取全局 JS 上下文 */;
-    if (!ctx) return;
+    /* 动态 topic，按 req_id 路由，确保每个请求只触发自己的 handler */
+    char topic[64];
+    snprintf(topic, sizeof(topic), error ? "http/error/%s" : "http/end/%s", req->req_id);
 
-    if (error) {
-        JSValue data = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, data, "reqId", JS_NewString(ctx, req->req_id));
-        JS_SetPropertyStr(ctx, data, "error", JS_NewString(ctx, "request failed"));
-        kwcc_bus_dispatch_event_obj(ctx, "http/end", data);
-        return;
-    }
-
-    /* C API 构建 response 对象 */
-    JSValue resp = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, resp, "reqId", JS_NewString(ctx, req->req_id));
-    JS_SetPropertyStr(ctx, resp, "status", JS_NewInt32(ctx, status));
-    JS_SetPropertyStr(ctx, resp, "body", JS_NewStringLen(ctx, body, body_len));
-
-    JSValue headers_obj = JS_NewObject(ctx);
-    for (size_t i = 0; i < num_headers; i++) {
-        char *hname = strndup(headers[i].name, headers[i].name_len);
-        JS_SetPropertyStr(ctx, headers_obj, hname,
-            JS_NewStringLen(ctx, headers[i].value, headers[i].value_len));
-        free(hname);
-    }
-    JS_SetPropertyStr(ctx, resp, "headers", headers_obj);
-
-    kwcc_bus_dispatch_event_obj(ctx, "http/end", resp);
+    kwcc_bus_emit(topic, NULL, 0);  /* JS 桥接层收到 topic 后，从回调注册表查找对应 handler */
 }
 ```
 
-**需要新增 `kwcc_bus_dispatch_event_obj`**：在 `kwcc_bus.c` 中添加，接受已构建的 JSValue 对象，通过 `$bus.emit` 传递。
+**topic 设计**：
+- `http/end/<req_id>` — 每个请求的响应走独立 topic
+- `http/progress/<req_id>` — 每个请求的进度走独立 topic
+- JS 桥接层收到 `http/end/req_1` 后，从 req_id 回调注册表取出对应 resolve/reject
+- `*` 通配仍可收所有事件：`kwcc_bus_subscribe("*", log_all)`
 
 ### JS→C 通信：代理机制
 
@@ -367,18 +360,15 @@ static void kwcc_http_cleanup(kwcc_http_req_t *req) {
 
 ### 进度事件（ON_PROGRESS，按帧限频）
 
-每帧检查 `req->response_len != req->last_dispatched`，有变化则通过纯 C bus 发射：
+每帧检查 `req->response_len != req->last_dispatched`，有变化则通过 bus 发射动态 topic：
 
 ```c
-kwcc_http_progress_t prog = { .req_id = req->req_id,
-                              .loaded = req->response_len,
-                              .total = req->total_size };
-kwcc_bus_emit_event("http/progress", &prog, sizeof(prog));
+char topic[64];
+snprintf(topic, sizeof(topic), "http/progress/%s", req->req_id);
+kwcc_bus_emit(topic, NULL, 0);
 ```
 
-60fps 下每秒最多 60 次 dispatch，JS 侧完全可承受。
-
-JS 桥接层收到后，将 `kwcc_http_progress_t` 转为 JSValue 对象，再 `$bus.emit`。
+60fps 下每秒最多 60 次 dispatch，JS 桥接层收到 topic 后从 req_id 回调注册表路由到对应 handler。
 
 ---
 
@@ -410,11 +400,13 @@ static void frame(void) {
 `$http` 是一个对象，提供多个方法和属性：
 
 ```javascript
-$http.request(reqId, url, options)   // 发起 HTTP 请求
-$http.cancel(reqId)                   // 取消请求
-$http.config(key, value)              // 设置配置项
-$http.state = { activeRequests: 0 }  // 运行状态
+$http.request(url, options)            // 发起 HTTP 请求，返回 Promise
+$http.cancel(reqId)                     // 取消请求
+$http.config(key, value)                // 设置配置项
+$http.state = { activeRequests: 0 }    // 运行状态
 ```
+
+**注意**：`$http.request` 不再需要 reqId 参数，req_id 由 C 侧 kwcc_http 生成并返回。
 
 ### 注入方式
 
@@ -517,19 +509,20 @@ MiniPromise.prototype.catch = function(onRejected) {
 
 ### $http._fetchAsync 内部实现
 
+**设计原则**：JS 侧不需要知道 topic，topic 由 C 侧 HTTP 模块管理。req_id 由 C 侧生成。
+
 ```javascript
-$http._fetchAsync = function(reqId, method, url, headers, body, onProgress) {
+$http._fetchAsync = function(method, url, headers, body, onProgress) {
     return new MiniPromise(function(resolve, reject) {
-        var cleanup = function() {
-            $bus.off("http/end", onEnd);
-            $bus.off("http/error", onError);
-            if (onProgress) $bus.off("http/progress", onProgressFiltered);
-        };
+        /* C handler 返回生成的 req_id */
+        var reqId = kwcc_js_mquickjs_call("_http_request", method, url, headers, body);
+
+        /* C 侧通过 kwcc_bus_emit("http/end/<reqId>", ...) 发射事件 */
+        /* JS 桥接层收到后，从 req_id 回调注册表中取出对应 resolve/reject */
 
         var onEnd = function(action, data) {
             if (data.reqId !== reqId) return;
-            cleanup();
-            /* Fix 11: 显式 nullify 大字符串，触发 GC 释放 C heap */
+            $http._removeCallback(reqId);
             if (data.body) data.body = null;
             if (data.headers) data.headers = null;
             resolve(data);
@@ -537,7 +530,7 @@ $http._fetchAsync = function(reqId, method, url, headers, body, onProgress) {
 
         var onError = function(action, data) {
             if (data.reqId !== reqId) return;
-            cleanup();
+            $http._removeCallback(reqId);
             reject(data.error);
         };
 
@@ -546,30 +539,58 @@ $http._fetchAsync = function(reqId, method, url, headers, body, onProgress) {
             onProgress(data.loaded, data.total);
         };
 
-        $bus.on("http/end", onEnd);
-        $bus.on("http/error", onError);
-        if (onProgress) $bus.on("http/progress", onProgressFiltered);
+        /* 注册回调到 req_id 注册表（C 侧通过动态 topic 路由到正确 handler）*/
+        $http._addCallback(reqId, "http/end", onEnd);
+        $http._addCallback(reqId, "http/error", onError);
+        if (onProgress) $http._addCallback(reqId, "http/progress", onProgressFiltered);
 
         $http.state.activeRequests++;
-
-        /* 通过代理机制调用 C handler */
-        kwcc_js_mquickjs_call("_http_request", reqId, method, url, headers, body);
     });
 };
 ```
+```
+
+**C 侧 req_id 回调注册表**（在 `kwcc_js.c` 中维护）：
+
+```c
+/* kwcc_js.c — req_id → JS callback 映射（一个大 map）*/
+#define KWCC_HTTP_CB_MAX 8
+static struct {
+    char     req_id[64];
+    JSValue  on_end_cb;    /* resolve callback */
+    JSValue  on_error_cb;  /* reject callback */
+    JSValue  on_progress_cb;
+    int      in_use;
+} g_kwcc_http_cbs[KWCC_HTTP_CB_MAX];
+
+void kwcc_js_http_add_cb(const char *req_id, JSValue on_end, JSValue on_error, JSValue on_progress);
+void kwcc_js_http_remove_cb(const char *req_id);
+void kwcc_js_http_on_bus_event(const char *topic, const void *data, size_t len);
+```
+
+**req_id map 超时清理**：如果请求超时或取消，map 里的回调条目需要清理，防止泄漏。
+
+```c
+/* kwcc_http_cleanup 中发射超时/取消事件 */
+char topic[64];
+snprintf(topic, sizeof(topic), "http/cancel/%s", req->req_id);
+kwcc_bus_emit(topic, NULL, 0);  /* JS 桥接收到后清理 map 条目 */
+```
+
+当 bus 发射 `http/end/req_1` 时，JS 桥接层从 topic 中提取 req_id，查注册表，调用对应的 resolve callback。收到 `http/cancel/req_1` 或 `http/timeout/req_1` 时同样清理 map 条目并 reject Promise。
 
 ### 业务代码调用示例
 
 ```javascript
 // 简单请求
-$http.request("api_test", "https://httpbin.org/get").then(function(resp) {
+$http.request("https://httpbin.org/get").then(function(resp) {
     ui.label("Response: " + resp.body);
 }).catch(function(err) {
     ui.label("Error: " + err);
 });
 
 // 带进度条的 POST
-$http.request("upload", "https://example.com/upload", {
+$http.request("https://example.com/upload", {
     method: "POST",
     headers: ["Content-Type: application/json"],
     body: '{"data":"test"}',
@@ -586,8 +607,9 @@ $http.request("upload", "https://example.com/upload", {
     ui.label("Upload failed: " + err);
 });
 
-// 取消请求
-$http.cancel("upload");
+// 取消请求（需要保留 reqId 用于 cancel）
+var reqId = $http.request("https://example.com/slow", { ... });
+$http.cancel(reqId);
 ```
 
 ---
@@ -632,9 +654,15 @@ curl 自带 `--max-time` 参数，C 层不需要额外处理。
 
 在实施 Step 3 之前，需要先完成 `kwcc_bus` 的拆分（详见 `requirements/bus-split-design.md`）：
 
-1. **kwcc_bus.c 移除 mquickjs 依赖** — `kwcc_dispatch_event` 拆为 `kwcc_bus_emit_event`（纯 C）+ JS 桥接回调
-2. **kwcc_js.c 新增 `kwcc_bus_dispatch_event_obj`** — 操作 JSValue 的 dispatch 放这里
-3. **现有调用点替换** — `kwcc_dispatch_event` → `kwcc_bus_emit_event`
+1. **kwcc_bus.c 重写为 NORMAL 链表 + LIGHT map** — `kwcc_bus_subscribe/unsubscribe/light_bind/emit`，零业务耦合
+2. **topic map 移到 kwcc_ui.c** — microui 专用，不再在 bus 中
+3. **kwcc_js.c 新增 `kwcc_js_on_bus_event`** — 作为 bus consumer 注册回调，不耦合到 bus
+4. **现有调用点替换** — `kwcc_dispatch_event` → `kwcc_bus_emit`
+
+**Topic 规范**（详见 bus-split-design.md）：
+- C bus topic：`ui/calc/btn0`, `http/end/req_1`（LIGHT / NORMAL）
+- JS bus topic：JS 侧独立，通过桥接层连通
+- 匹配规则：精确 / `*` 通配 / 前缀匹配
 
 完成后再实施 Step 3（HTTP Process Engine）。
 
@@ -648,7 +676,7 @@ curl 自带 `--max-time` 参数，C 层不需要额外处理。
 |------|------|--------------|------|
 | 1 | picohttpparser 编译验证 | 无（已有） | 无 |
 | 2 | I/O Reactor（Layer 1） | `src/kwcc_io.h/c`（已完成） | 无 |
-| 3 | HTTP Process Engine（Layer 2） | `src/kwcc_http.h`, `src/kwcc_http.c` | Step 2 |
+| 3 | HTTP Process Engine（Layer 2） | `src/kwcc_http.h`, `src/kwcc_http.c` | Step 2（bus 拆分） |
 | 4 | C binding + JS API + Frame Hook | `src/kwcc_js.c`, `src/kwcc_js.h`, `src/main.m` | Step 3 |
 | 5 | JS $http 对象 + MiniPromise | `app/runtime/http.js`, `app/main.js` | Step 4 |
 
@@ -664,7 +692,7 @@ curl 自带 `--max-time` 参数，C 层不需要额外处理。
 
 新建 `src/kwcc_http.h` + `src/kwcc_http.c`，实现 fork + pipe + curl + picohttpparser 解析 + dispatch。
 
-新增 `kwcc_bus_dispatch_event_obj` 到 `src/kwcc_bus.c`。
+新增 JS 桥接回调到 `src/kwcc_js.c`。
 
 ### Step 4: C binding + JS API + Frame Hook
 
@@ -710,6 +738,6 @@ curl 自带 `--max-time` 参数，C 层不需要额外处理。
 | 6 | bin_path Executable Check | Layer 2 | `access(bin_path, X_OK)` |
 | 7 | select() EINTR Protection | Layer 1 | `if (errno == EINTR) return;`（已实现） |
 | 8 | Incomplete Header Loop Guard | Layer 2 | `if (r == -2) break;` |
-| 9 | Global Shape Table Leak | Layer 4 | `kwcc_bus_dispatch_event_obj` 不用全局变量 |
+| 9 | Global Shape Table Leak | Layer 4 | `js_bus_dispatch_obj`（内部）不用全局变量 |
 | 10 | FD Pollution via fork | Layer 2 | `FD_CLOEXEC` + 关闭 > STDERR_FILENO 的所有 FD |
 | 11 | Heap Fragmentation Guard | Layer 4 | 显式 nullify body 再 delete |
