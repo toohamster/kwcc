@@ -133,6 +133,65 @@ JSValue js_kwcc_ui(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
  * C handler layer: JSValue → C value conversion → delegate to config layer
  * ═══════════════════════════════════════════════════════════════ */
 
+/* ── Proxy: dynamic handler dispatch (avoids modifying mqjs_stdlib.c) ── */
+
+typedef JSValue (*kwcc_js_cfun_t)(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+
+typedef struct {
+    const char *name;
+    kwcc_js_cfun_t func;
+} kwcc_js_cfun_entry_t;
+
+static kwcc_js_cfun_entry_t g_kwcc_js_cfun_handlers[] = {
+    /* Future new handlers — just add here, no need to modify mqjs_stdlib.c */
+    { "kwcc_js_mempool_dump_stats", kwcc_js_mempool_dump_stats },
+    { "kwcc_js_mempool_dump_all",   kwcc_js_mempool_dump_all },
+    { NULL, NULL }
+};
+
+JSValue kwcc_js_mquickjs_call(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    JSCStringBuf nbuf;
+    const char *name = JS_ToCString(ctx, argv[0], &nbuf);
+    if (!name) return JS_UNDEFINED;
+    for (int i = 0; g_kwcc_js_cfun_handlers[i].name; i++) {
+        if (strcmp(g_kwcc_js_cfun_handlers[i].name, name) == 0) {
+            return g_kwcc_js_cfun_handlers[i].func(ctx, this_val, argc - 1, argv + 1);
+        }
+    }
+    log_error("kwcc_js_mquickjs_call: unknown handler '%s'", name);
+    return JS_UNDEFINED;
+}
+
+/* ── Dump functions (KWCC_DEBUG only, direct mempool access) ── */
+
+JSValue kwcc_js_mempool_dump_stats(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+#ifdef KWCC_DEBUG
+    kwcc_mempool_dump_stats();
+#else
+    log_info("dump: not available (build without KWCC_DEBUG)");
+#endif
+    return JS_UNDEFINED;
+}
+
+JSValue kwcc_js_mempool_dump_all(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+#ifdef KWCC_DEBUG
+    JSCStringBuf pbuf;
+    const char *path = JS_ToCString(ctx, argv[0], &pbuf);
+    if (!path) return JS_UNDEFINED;
+    int show_content = 0;
+    if (argc >= 2) JS_ToInt32(ctx, &show_content, argv[1]);
+    kwcc_mempool_dump_all(path, show_content);
+#else
+    log_info("dumpAll: not available (build without KWCC_DEBUG)");
+#endif
+    return JS_UNDEFINED;
+}
+
 /* ── TLV conversion helper ──────────────────────────────────── */
 
 typedef struct {
@@ -427,7 +486,9 @@ void kwcc_register_config_js(JSContext *ctx) {
         "$config.appRelease = function(k) { kwcc_js_config_release_app(k); };\n"
         "$config.appReleasePrefix = function(k) { kwcc_js_config_release_app_prefix(k); };\n"
         "$config.coreSetTlv = function(k, v) { kwcc_js_config_set_core_tlv(k, v); };\n"
-        "$config.setMaxPools = function(t, n) { kwcc_js_config_set_max_pools(t, n); };\n";
+        "$config.setMaxPools = function(t, n) { kwcc_js_config_set_max_pools(t, n); };\n"
+        "$config.dump = function() { kwcc_js_mquickjs_call('kwcc_js_mempool_dump_stats'); };\n"
+        "$config.dumpAll = function(p, s) { kwcc_js_mquickjs_call('kwcc_js_mempool_dump_all', p, s || 0); };\n";
 
     JSValue result = JS_Eval(ctx, wrapper, strlen(wrapper), "<$config>", JS_EVAL_REPL);
     if (JS_IsException(result)) {

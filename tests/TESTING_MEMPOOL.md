@@ -43,6 +43,8 @@
 | 18 | TLV 转换（js_object_keys） | C handler | `tests/test_config_js.c` | ✅ | 修复 ClassID=0 问题 |
 | 19 | 编译通过 | 构建 | `make clean && make` | ✅ | |
 | 20 | 运行无错误 | 运行时 | `./kwcc` | ✅ | `kwcc.log` 无错误 |
+| 21 | appSetJson → type=JSON → get 自动 parse 返回对象 | C handler + JS 集成 | `tests/test_config_js.c/.js` | ✅ | |
+| 22 | appSetJsonString → type=STRING → get 返回字符串 → JS parse | C handler + JS 集成 | `tests/test_config_js.c/.js` | ✅ | |
 
 ## 图例
 

@@ -89,6 +89,19 @@ tests/*.o
    - `git status` 看有没有 .o、可执行文件、不需要的中间文件混入
    - 确认 `.gitignore` 覆盖完整
 
+## 错误案例：命名规范遵守
+
+**错误**：在实现 dump 功能时，C handler 命名为 `kwcc_js_config_dump` / `kwcc_js_dump_stats`，没有体现功能归属。
+
+**原因**：没有先思考函数名应该体现什么逻辑，随意命名。注册表里也用了 `kwcc_js_config_dump` 而不是 `kwcc_js_mempool_dump_stats`。
+
+**正确做法**：
+- C handler 在 `kwcc_js.c` 中，命名 `kwcc_js_<功能>_<具体操作>`
+- dump 是 mempool 的调试功能 → `kwcc_js_mempool_dump_stats` / `kwcc_js_mempool_dump_all`
+- 注册表名字与 C handler 一致：`{ "kwcc_js_mempool_dump_stats", kwcc_js_mempool_dump_stats }`
+
+**教训**：命名必须先想清楚功能归属和逻辑含义，不能随意缩写或泛化。每次新加函数名都要对照命名规范检查。
+
 ## 测试记录
 
 每个功能开发完成后，**必须更新对应的 `tests/TESTING_*.md`**：

@@ -36,6 +36,12 @@ JSValue kwcc_js_config_release_app_prefix(JSContext *ctx, JSValue *this_val, int
 JSValue kwcc_js_config_set_core_tlv(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue kwcc_js_config_set_max_pools(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 
+JSValue kwcc_js_mempool_dump_stats(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue kwcc_js_mempool_dump_all(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+
+/* Proxy: dynamic handler dispatch (avoids modifying mqjs_stdlib.c) */
+JSValue kwcc_js_mquickjs_call(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+
 /* TLV conversion helper */
 uint8_t *kwcc_js_value_to_tlv(JSContext *ctx, JSValue js_val, size_t *out_len);
 

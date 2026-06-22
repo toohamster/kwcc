@@ -68,8 +68,15 @@ assert(true, "appRelease no crash");
 
 /* Test 10: coreSetTlv */
 $config.coreSetTlv("test/core", { max_fds: "16" });
-/* Core 域只有 set，JS 侧无 getter，跳过验证 */
 assert(true, "coreSetTlv no crash");
+
+/* Test 11: dump (no crash, output to log) */
+$config.dump();
+assert(true, "dump no crash");
+
+/* Test 12: dumpAll (write to file) */
+$config.dumpAll("test_dump.txt", 0);
+assert(true, "dumpAll no crash");
 
 /* Summary */
 print("=== $config Integration Tests: " + test_pass + " passed, " + test_fail + " failed ===");
