@@ -60,13 +60,14 @@
 │   └── mquickjs/    #   mquickjs 解释器核心 + 构建工具
 ├── src/             # 项目 C 源码
 │   ├── main.m       # Sokol 窗口生命周期与渲染主循环 (Objective-C)
-│   ├── kwcc_base.h  # 纯 C 基础设施（config getter 声明，无 JS/microui 类型）
-│   ├── kwcc.c       # config JSValue 存储实现（无 microui）
+│   ├── kwcc_base.h  # 纯 C 基础设施（类型声明）
+│   ├── kwcc_mempool.h/c # Slab 内存池：L0-L7 分层池、key_map、常量表、GC、TLV 序列化
+│   ├── kwcc_config.h/c  # Config 层：App/Core 域存取接口，自动拼 "a."/"c." 前缀
 │   ├── kwcc_ui.c/h  # UI 模块（g_mu、microui 桥接、input、SVG、字体、register_ui）
-│   ├── kwcc_js.c/h  # JS lifecycle（create/destroy JSContext、stdlib stubs、kwcc_ui 桥接）
+│   ├── kwcc_js.c/h  # JS lifecycle + $config JS API + C handler 层 + 代理机制
 │   ├── kwcc_bus.c/h # C→JS 消息总线桥接（topic map + dispatch_event + bind_topic）
-│   ├── kwcc.h       # 入口 umbrella header（聚合 kwcc_base/ui/bus/js/io 头文件）
-│   ├── kwcc_io.h    # I/O 模块声明
+│   ├── kwcc_io.c/h  # I/O Reactor（select() 非阻塞 FD 管理器）
+│   ├── kwcc.h       # 入口 umbrella header（聚合所有模块头文件）
 │   └── llog.h       # 日志包装器 (解决 macOS syslog.h 宏冲突)
 ├── app/             # 脚本层
 │   ├── main.js      # 模块入口（loadJs 加载示例模块）
@@ -170,7 +171,7 @@ loadJs("app/modules/examples/calc/calc_view.js"); // 注册视图
   - `#define NANOVG_GL3_IMPLEMENTATION`
 - **两阶段构建**:
   1. 编译 host tool (`mquickjs_build.c` + `mqjs_stdlib.c`) → 生成 `mqjs_stdlib.h`
-  2. 编译主二进制 (mquickjs.c + cutils.c + dtoa.c + libm.c + main.m + kwcc.c + kwcc_ui.c + kwcc_js.c + kwcc_bus.c)
+  2. 编译主二进制 (mquickjs.c + cutils.c + dtoa.c + libm.c + main.m + kwcc_mempool.c + kwcc_config.c + kwcc_ui.c + kwcc_js.c + kwcc_bus.c + kwcc_io.c)
 - **链接框架**:
   - `-framework Cocoa -framework OpenGL -framework IOKit -framework QuartzCore`
 - **静态集成**: 仅将核心 4 个 .c 文件编译进最终的可执行文件。
@@ -189,69 +190,39 @@ loadJs("app/modules/examples/calc/calc_view.js"); // 注册视图
 实现 `bridge.c`。在 JS 中写一个简单的循环，点击按钮时控制台能打印 "Hello"。
 
 ### 第四步：完整计算器示例 ✅
-实现了一个完整的计算器 demo：
-- 4x4 按钮网格布局，无错位
-- 深色显示区 + 右对齐白色文字
-- 完整的四则运算、小数点、清除逻辑
-- `MU_OPT_NOCLOSE` 隐藏关闭按钮，标题栏无多余图标
-- JS 拆分为 `main.js`（UI）+ `calc_logic.js`（业务逻辑），归档至 `app/examples/calculator/`
+实现了一个完整的计算器 demo。
 
 ### 第五步：库源码分析与记忆系统 ✅
-对 microui、sokol、nanovg 三个库进行了源码级分析，总结出：
-- 布局系统工作机制（layoutRow/-1 含义/状态切换）
-- Widget ID 生成规则（fnv-1a 哈希）
-- 立即模式状态持久化机制
-- 真实字体测量（nvgTextBounds 替代硬编码）
-- 坐标系统一方案（high_dpi=false）
-- 调试检查清单
-
-所有经验保存到 `.claude/memory/` 目录下的 6 个专题文件中。
+对 microui、sokol、nanovg 三个库进行了源码级分析，经验保存到 `.claude/memory/` 目录。
 
 ### 第六步：GitHub 发布流程 ✅
-项目已部署到 GitHub，主分支为 `main`。发布流程文档保存在 `.claude/memory/deploy_workflow.md`。
+项目已部署到 GitHub，主分支为 `main`。
 
 ### 第七步：集成 nanosvg ✅
-集成 nanosvg 实现 SVG 文件渲染：
-- `setup.sh` 下载 `nanosvg.h` 到 `deps/nanosvg/`
-- `ui.svg(path, x, y, w, h)` 桥接 API
-- SVG 作为 `MU_COMMAND_SVG`（type=32）插入 microui 命令队列，通过 zindex 排序确保正确窗口层级
-- nanosvg 解析的 SVG 元素通过 NanoVG bezier 路径渲染
-- 独立示例：`app/examples/svg/main.js`
-### 第八步：SVG 缓存增强（内联字符串 + 帧安全 128 槽缓存）✅
+集成 nanosvg 实现 SVG 文件渲染。
 
-将 SVG 渲染从每帧重复解析升级为 128 槽 FNV-1a 哈希缓存：
-
-- `mu_SvgCommand` 从变长结构体（`char path[1]`）改为固定大小（`int cache_idx`），~20 字节
-- 内联 SVG 检测：`data[0] == '<'` → 调用 `nsvgParse`，否则 `nsvgParseFromFile`
-- **帧安全淘汰机制**：跳过 `frame_id >= 当前帧` 的槽位，禁止淘汰当前帧正在使用的缓存
-- 缓存结构体 (`svg_cache_t`) 通过 `kwcc.h` 的 extern 声明共享给 `main.m`，由渲染端从缓存取 image，生命周期完全由缓存管理
-- `nsvgParse` 会修改输入字符串，使用 `strdup` 后 `free` 避免副作用
-- 文件移动到 `app/examples/svg/` 目录，与示例代码内聚
+### 第八步：SVG 缓存增强 ✅
+128 槽 FNV-1a 哈希缓存 + 帧安全淘汰机制。
 
 ### 第九步：store-data-flow-v2 单向数据流架构 ✅
-
-将旧版全局变量 + 同步回调模式升级为单向数据流 + 模块注册体系：
-
-- **runtime/store.js**：`createStore` 双参数 dispatch（module, actionName），零字符串解析
-- **runtime/bus.js**：EventBus 精确匹配 + `*` 末尾通配 + `onGroup/offGroup` 分组解绑
-- **模块注册**：`registerModule(name, mod)` / `registerModuleView(name, renderFn)` / `registerTopic(name, topics)`
-- **C 层事件**：`kwcc_dispatch_event` 通过 `$bus.emit` 触发 JS 事件，button/slider 控件自动 dispatch
-- **窗口挡板**：`ui.sync(key, visible)` + C 层可见性拦截，支持状态驱动窗口显隐
-- **示例迁移**：calculator、test、svg 全部迁移到 `app/modules/examples/` 目录
-- **加载保护**：`loadJs(path)` 防止重复加载，`register*` 内部去重防止重复注册
+单向数据流 + 模块注册 + topic 事件总线。
 
 ### 第十步：提取 EventBus 到 kwcc_bus 独立模块 ✅
+C→JS 消息总线桥接独立模块。
 
-将 C→JS 消息总线桥接从 `kwcc_ui.c` 提取到独立 `kwcc_bus.c/h` 模块：
-
-- `kwcc_bus.c`：topic map + `kwcc_dispatch_event` + `kwcc_bind_topic` + `kwcc_bus_begin_frame`
-- `kwcc_bus.h`：纯消息总线声明，无 microui 类型
-- `kwcc_ui.c`：移除 bus 代码，include `kwcc_bus.h`，`kwcc_begin_frame` 内部调 `kwcc_bus_begin_frame`
-- topic map 的 ID 类型从 `mu_Id` 改为 `int`，通用分发服务
+### 第十一步：Slab 内存池系统 ✅
+Phase 1-7 全部完成：L0-L7 分层池、key_map、常量表、GC、TLV 序列化、Config 层、$config JS API、代理机制、dump 功能。24/24 测试通过。
 
 ---
 
-## 7. 开发规范（强制规则）
+## 7. 测试体系
+
+- **纯 C 测试**：`tests/test_mempool.c`（46 测试）、`tests/test_config.c`（19 测试）
+- **C handler 测试**：`tests/test_config_js.c`（16 测试）
+- **JS 集成测试**：`tests/test_config_js.js`（14 测试）
+- **测试记录**：`tests/TESTING_MEMPOOL.md` — 24 个测试点全部通过
+
+## 8. 开发规范（强制规则）
 
 1. **出现错误 → 分析根因 → 出方案 → 确定范围 → 等确认 → 再实施**
 2. **以方案为主，不因问题打乱计划**

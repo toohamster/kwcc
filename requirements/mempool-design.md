@@ -471,8 +471,8 @@ typedef struct {
 | `src/kwcc_config.h` | Config 层 C 接口声明（10 个 API） | ✅ 已完成 |
 | `src/kwcc_config.c` | Config 层实现（自动拼 "a."/"c." 前缀） | ✅ 已完成 |
 | `src/kwcc.h` | umbrella header | ✅ 已完成 |
-| `src/kwcc_js.c` | JS lifecycle（$config 待实现） | ⏳ Phase 4 |
-| `src/kwcc_js.h` | JS lifecycle 声明 | ⏳ Phase 4 |
+| `src/kwcc_js.c` | JS lifecycle + $config JS API + proxy mechanism | ✅ 已完成 |
+| `src/kwcc_js.h` | JS lifecycle + $config declarations | ✅ 已完成 |
 | `src/kwcc_ui.c` | UI bridge + SVG + 字体 + input | ✅ 已完成 |
 | `src/kwcc_ui.h` | UI 模块声明 + SVG cache extern | ✅ 已完成 |
 | `src/kwcc_bus.c` | C→JS 消息总线桥接 | ✅ 已完成 |
@@ -480,7 +480,7 @@ typedef struct {
 | `src/kwcc_io.c` | I/O Reactor（select() FD 管理） | ✅ 已完成 |
 | `src/kwcc_io.h` | I/O 管理器声明 | ✅ 已完成 |
 | `src/main.m` | Sokol lifecycle + NanoVG 渲染 | ✅ 已完成 |
-| `deps/mquickjs/mqjs_stdlib.c` | stdlib（$config 注册待实现） | ⏳ Phase 4 |
+| `deps/mquickjs/mqjs_stdlib.c` | stdlib + $config C handler 注册 | ✅ 已完成 |
 | `Makefile` | 两阶段构建 | ✅ 已完成 | |
 
 ## 清理步骤（旧 `__kwcc_config` 系统）— ✅ 已完成
@@ -493,13 +493,16 @@ typedef struct {
 6. ~~删除 `src/kwcc_ui.c` 旧 config wrapper~~ — 已删除
 7. ~~删除 `deps/mquickjs/mqjs_stdlib.c` 旧注册~~ — 已删除
 
-## 当前状态（2026-06-18 更新）
+## 当前状态（2026-06-18 全部完成）
 
-- Phase 1（基础骨架）：✅ 已完成 — kwcc_mempool.h/c 重写 + 常量表 + key_map + GC + L7 动态分配 + 编译通过
-- Phase 2（TLV）：✅ 已完成 — tlv_build/tlv_iter/tlv_get_path/tlv_to_json + JSON 转义 + 安全边界检查
-- Phase 2.5（Config 层）：✅ 已完成 — kwcc_config.h/c 10 个 C API + 自动拼 "a."/"c." 前缀
-- Phase 3（$config JS API）：❌ 未执行（下一步）
-- Phase 4-6：未执行
+- Phase 1（基础骨架）：✅ 已完成
+- Phase 2（TLV）：✅ 已完成
+- Phase 2.5（Config 层）：✅ 已完成
+- Phase 3（$config JS API）：✅ 已完成 — 12 个 C handler + JS wrapper
+- Phase 4（运行时验证）：✅ 已完成 — 编译通过，14/14 测试通过
+- Phase 5（集成验证）：✅ 已完成 — 24 个测试点全部通过
+- Phase 6（清理 + 提交）：✅ 已完成
+- Phase 7（dump 功能）：✅ 已完成 — 通过代理机制实现
 
 **已完成的测试验证**：
 - `tests/test_mempool.c` — 46 测试全部通过（init/alloc/set/get/const/ref_count/GC/TLV/JSON 转义/L7）
@@ -732,7 +735,7 @@ slot 0: key="a.io/config", size=512/1024B, ref=1, timeout=0, age=30s, type=TLV
 - `$config.appReleasePrefix("io")` → 释放 a.io/ 前缀所有
 - 检查 `kwcc.log` 无错误日志
 
-## 执行计划
+## 执行计划 — 全部完成 ✅
 
 ### Phase 1: 基础骨架 ✅ 已完成
 
