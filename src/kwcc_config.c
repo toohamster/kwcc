@@ -52,6 +52,18 @@ void kwcc_config_set_app_bool(const char *key, int val) {
     kwcc_mempool_set(s, &v, sizeof(v));
 }
 
+void kwcc_config_set_app_json(const char *key, const char *json_val) {
+    if (!key || !json_val) return;
+    char full[256];
+    kwcc_config_build_key(full, sizeof(full), "a", key);
+    if (!full[0]) return;
+
+    size_t len = strlen(json_val) + 1;
+    kwcc_mempool_slot_t *s = kwcc_mempool_alloc(KWCC_MEMPOOL_TYPE_JSON, full, (uint32_t)len, 0);
+    if (!s) return;
+    kwcc_mempool_set(s, json_val, (uint32_t)len);
+}
+
 void kwcc_config_set_app_tlv(const char *key, const uint8_t *tlv_data, uint32_t tlv_len) {
     if (!key || !tlv_data || tlv_len == 0) return;
     char full[256];

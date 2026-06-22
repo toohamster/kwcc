@@ -249,7 +249,7 @@ JSValue kwcc_js_config_set_app_json(JSContext *ctx, JSValue *this_val, int argc,
     if (!key) return JS_UNDEFINED;
     const char *val = JS_ToCString(ctx, argv[1], &vbuf);
     if (!val) return JS_UNDEFINED;
-    kwcc_config_set_app_string(key, val);
+    kwcc_config_set_app_json(key, val);
     return JS_UNDEFINED;
 }
 
@@ -281,6 +281,21 @@ JSValue kwcc_js_config_get_app(JSContext *ctx, JSValue *this_val, int argc, JSVa
     }
     const char *val = kwcc_config_get_app(key, default_val);
     if (!val) return JS_UNDEFINED;
+
+    /* Check slot type — if JSON, parse and return object */
+    kwcc_mempool_slot_t *slot = kwcc_config_get_app_slot(key);
+    if (slot && slot->type == KWCC_MEMPOOL_TYPE_JSON) {
+        JSValue global = JS_GetGlobalObject(ctx);
+        JSValue json_obj = JS_GetPropertyStr(ctx, global, "JSON");
+        JSValue parse_fn = JS_GetPropertyStr(ctx, json_obj, "parse");
+        JSValue json_str = JS_NewString(ctx, val);
+        JS_StackCheck(ctx, 3);
+        JS_PushArg(ctx, json_str);
+        JS_PushArg(ctx, parse_fn);
+        JS_PushArg(ctx, json_obj);
+        return JS_Call(ctx, 1);
+    }
+
     return JS_NewString(ctx, val);
 }
 
@@ -402,6 +417,7 @@ void kwcc_register_config_js(JSContext *ctx) {
         "$config.appSetString = function(k, v) { kwcc_js_config_set_app_string(k, v); };\n"
         "$config.appSetBool = function(k, v) { kwcc_js_config_set_app_bool(k, v); };\n"
         "$config.appSetJson = function(k, v) { kwcc_js_config_set_app_json(k, JSON.stringify(v)); };\n"
+        "$config.appSetJsonString = function(k, v) { kwcc_js_config_set_app_string(k, v); };\n"
         "$config.appSetTlv = function(k, v) { kwcc_js_config_set_app_tlv(k, v); };\n"
         "$config.appGet = function(k, d) { return kwcc_js_config_get_app(k, d); };\n"
         "$config.appGetTlv = function(k, p, d) {\n"

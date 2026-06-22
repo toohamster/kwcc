@@ -12,6 +12,7 @@
 void    kwcc_config_set_app_int(const char *key, int32_t val);
 void    kwcc_config_set_app_string(const char *key, const char *val);
 void    kwcc_config_set_app_bool(const char *key, int val);
+void    kwcc_config_set_app_json(const char *key, const char *json_val);
 void    kwcc_config_set_app_tlv(const char *key, const uint8_t *tlv_data, uint32_t tlv_len);
 const char *kwcc_config_get_app(const char *key, const char *default_value);
 void    kwcc_config_release_app(const char *key);

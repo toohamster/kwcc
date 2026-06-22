@@ -41,10 +41,16 @@ $config.appSetBool("test/disabled", false);
 var disabled = $config.appGet("test/disabled", "1");
 assert(disabled === "0", "appSetBool(false) => " + disabled);
 
-/* Test 6: appSetJson + appGet */
+/* Test 6: appSetJson + appGet (returns parsed object) */
 $config.appSetJson("test/json", { key: "value" });
-var json_str = $config.appGet("test/json", "");
-assert(json_str === '{"key":"value"}', "appSetJson/appGet => " + json_str);
+var json_obj = $config.appGet("test/json", "");
+assert(json_obj !== null && json_obj.key === "value", "appSetJson/appGet returns parsed object (key=" + json_obj.key + ")");
+
+/* Test 6b: appSetJsonString + appGet (returns string, JS-side parse optional) */
+$config.appSetJsonString("test/json_str", '{"a":"1"}');
+var json_str = $config.appGet("test/json_str", "");
+var json_obj2 = JSON.parse(json_str);
+assert(json_obj2.a === "1", "appSetJsonString/appGet returns string, JS parse works (a=" + json_obj2.a + ")");
 
 /* Test 7: appSetTlv + appGetTlv with path */
 $config.appSetTlv("test/tlv", { timeout: "30", enabled: "true" });

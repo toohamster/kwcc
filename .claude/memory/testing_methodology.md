@@ -84,6 +84,16 @@ tests/*.o
    - `git status` 看有没有 .o、可执行文件、不需要的中间文件混入
    - 确认 `.gitignore` 覆盖完整
 
+## 测试记录
+
+每个功能开发完成后，**必须更新对应的 `tests/TESTING_*.md`**：
+- 按功能模块分文件：`TESTING_MEMPOOL.md`、`TESTING_NETWORK.md` 等
+- 列出方案中定义的所有测试点
+- 标注每个测试点的状态（✅ 通过 / ❌ 失败 / ⏳ 待测试）
+- 注明测试类型（纯 C / C handler / JS 集成）和测试文件
+- 让其他人能清楚看到做了什么、测了什么、还有什么没测
+- 新增功能模块时，新建对应的 `TESTING_XXX.md` 文件
+
 需要的 .o 文件清单：
 ```
 mquickjs.o cutils.o dtoa.o libm.o    # mquickjs core
