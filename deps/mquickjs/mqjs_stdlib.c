@@ -33,6 +33,18 @@
 typedef struct JSContext JSContext;
 typedef unsigned long long JSValue;
 JSValue js_kwcc_ui(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue kwcc_js_config_set_app_int(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue kwcc_js_config_set_app_string(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue kwcc_js_config_set_app_bool(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue kwcc_js_config_set_app_json(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue kwcc_js_config_set_app_tlv(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue kwcc_js_config_get_app(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue kwcc_js_config_get_app_tlv_path(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue kwcc_js_config_get_app_tlv_json(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue kwcc_js_config_release_app(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue kwcc_js_config_release_app_prefix(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue kwcc_js_config_set_core_tlv(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue kwcc_js_config_set_max_pools(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 #endif
 
 /* defined in mqjs_example.c */
@@ -382,6 +394,18 @@ static const JSPropDef js_global_object[] = {
     JS_CFUNC_DEF("print", 1, js_print),
 #ifdef CONFIG_KWCC
     JS_CFUNC_DEF("kwcc_ui", 3, js_kwcc_ui),
+    JS_CFUNC_DEF("kwcc_js_config_set_app_int", 2, kwcc_js_config_set_app_int),
+    JS_CFUNC_DEF("kwcc_js_config_set_app_string", 2, kwcc_js_config_set_app_string),
+    JS_CFUNC_DEF("kwcc_js_config_set_app_bool", 2, kwcc_js_config_set_app_bool),
+    JS_CFUNC_DEF("kwcc_js_config_set_app_json", 2, kwcc_js_config_set_app_json),
+    JS_CFUNC_DEF("kwcc_js_config_set_app_tlv", 2, kwcc_js_config_set_app_tlv),
+    JS_CFUNC_DEF("kwcc_js_config_get_app", 2, kwcc_js_config_get_app),
+    JS_CFUNC_DEF("kwcc_js_config_get_app_tlv_path", 3, kwcc_js_config_get_app_tlv_path),
+    JS_CFUNC_DEF("kwcc_js_config_get_app_tlv_json", 2, kwcc_js_config_get_app_tlv_json),
+    JS_CFUNC_DEF("kwcc_js_config_release_app", 1, kwcc_js_config_release_app),
+    JS_CFUNC_DEF("kwcc_js_config_release_app_prefix", 1, kwcc_js_config_release_app_prefix),
+    JS_CFUNC_DEF("kwcc_js_config_set_core_tlv", 2, kwcc_js_config_set_core_tlv),
+    JS_CFUNC_DEF("kwcc_js_config_set_max_pools", 2, kwcc_js_config_set_max_pools),
 #endif
 #ifdef CONFIG_CLASS_EXAMPLE
     JS_PROP_CLASS_DEF("Rectangle", &js_rectangle_class),

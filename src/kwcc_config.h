@@ -17,6 +17,8 @@ const char *kwcc_config_get_app(const char *key, const char *default_value);
 void    kwcc_config_release_app(const char *key);
 void    kwcc_config_release_app_prefix(const char *key);
 
+void   *kwcc_config_get_app_slot(const char *key);   /* returns kwcc_mempool_slot_t* */
+
 /* ═══ Core 域（自动拼 "c." 前缀）═══ */
 
 void    kwcc_config_set_core_tlv(const char *key, const uint8_t *tlv_data, uint32_t tlv_len);

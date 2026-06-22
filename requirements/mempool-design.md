@@ -415,8 +415,8 @@ $config.setMaxPools = function(t, n) { kwcc_js_config_set_max_pools(t, n); };
 | `kwcc_js_config_set_app_json` | `JS_ToCString`（JSON 字符串） | `kwcc_config_set_app_string` |
 | `kwcc_js_config_set_app_tlv` | `kwcc_js_value_to_tlv` | `kwcc_config_set_app_tlv` |
 | `kwcc_js_config_get_app` | `kwcc_config_get_app` → `JS_NewString` | — |
-| `kwcc_js_config_get_app_tlv_path` | `kwcc_config_get_core_slot` → `tlv_get_path` → `JS_NewString` | — |
-| `kwcc_js_config_get_app_tlv_json` | `kwcc_config_get_core_slot` → `tlv_to_json` → `JS_NewString` | — |
+| `kwcc_js_config_get_app_tlv_path` | `kwcc_config_get_app_slot` → `tlv_get_path` → `JS_NewString` | — |
+| `kwcc_js_config_get_app_tlv_json` | `kwcc_config_get_app_slot` → `tlv_to_json` → `JS_NewString` | — |
 | `kwcc_js_config_release_app` | — | `kwcc_config_release_app` |
 | `kwcc_js_config_release_app_prefix` | — | `kwcc_config_release_app_prefix` |
 | `kwcc_js_config_set_core_tlv` | `kwcc_js_value_to_tlv` | `kwcc_config_set_core_tlv` |

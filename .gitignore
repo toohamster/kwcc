@@ -20,3 +20,5 @@ mvp_test
 kwcc
 docker/
 *.log
+tests/bin/
+tests/*.o

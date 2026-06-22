@@ -74,6 +74,9 @@ loadJs("app/modules/examples/svg/svg_view.js");
 initStore();
 initEvents();
 
+/* ── Phase 6: $config integration tests ── */
+load("tests/test_config_js.js");
+
 /* ── frame function (called every frame from C) ── */
 function onFrame() {
     var i, key, m;

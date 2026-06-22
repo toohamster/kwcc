@@ -1,10 +1,12 @@
-/* kwcc_js.c — kwcc JS lifecycle + runtime support (stdlib stubs + JS bindings) */
+/* kwcc_js.c — kwcc JS lifecycle + runtime support (stdlib stubs + $config JS API) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "mquickjs/mquickjs.h"
 #include "mquickjs/mquickjs_priv.h"
 #include "kwcc_js.h"
+#include "kwcc_mempool.h"
+#include "kwcc_config.h"
 #include "kwcc_base.h"
 #include "llog.h"
 #include "mquickjs/mqjs_stdlib.h"
@@ -20,6 +22,7 @@ JSContext *kwcc_create_js(void) {
         log_fatal("kwcc: JS_NewContext failed (not enough memory?)");
         return NULL;
     }
+    kwcc_register_config_js(ctx);
     return ctx;
 }
 
@@ -123,4 +126,298 @@ JSValue js_kwcc_ui(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
     const char *method = JS_ToCString(ctx, argv[0], &buf);
     JSValue result = g_ui_callback(ctx, method, argc - 1, argv + 1);
     return result;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * $config JS API — Phase 4
+ * C handler layer: JSValue → C value conversion → delegate to config layer
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* ── TLV conversion helper ──────────────────────────────────── */
+
+typedef struct {
+    JSContext *ctx;
+    JSValue    js_obj;
+    JSValue    js_keys;
+    int        key_count;
+    int        key_index;
+} kwcc_js_tlv_pack_state_t;
+
+static int kwcc_js_tlv_pack_cb(const char **out_key, const char **out_value,
+                                uint8_t *out_type, size_t *out_vlen, void *user_data) {
+    kwcc_js_tlv_pack_state_t *st = (kwcc_js_tlv_pack_state_t *)user_data;
+    if (st->key_index >= st->key_count) return 0;
+
+    JSValue js_key = JS_GetPropertyUint32(st->ctx, st->js_keys, (uint32_t)st->key_index);
+    JSCStringBuf kbuf;
+    const char *key = JS_ToCString(st->ctx, js_key, &kbuf);
+
+    JSValue js_val = JS_GetPropertyStr(st->ctx, st->js_obj, key);
+
+    if (JS_GetClassID(st->ctx, js_val) == JS_CLASS_OBJECT) {
+        size_t sub_len = 0;
+        uint8_t *sub_tlv = kwcc_js_value_to_tlv(st->ctx, js_val, &sub_len);
+        if (sub_tlv) {
+            *out_key = key;
+            *out_value = (const char *)sub_tlv;
+            *out_type = KWCC_MEMPOOL_TLV_OBJECT;
+            *out_vlen = sub_len;
+            st->key_index++;
+            return 1;
+        }
+    } else {
+        JSCStringBuf vbuf;
+        const char *val = JS_ToCString(st->ctx, js_val, &vbuf);
+        if (val) {
+            *out_key = key;
+            *out_value = val;
+            *out_type = KWCC_MEMPOOL_TLV_FIELD;
+            *out_vlen = strlen(val);
+            st->key_index++;
+            return 1;
+        }
+    }
+
+    st->key_index++;
+    return 1;
+}
+
+uint8_t *kwcc_js_value_to_tlv(JSContext *ctx, JSValue js_val, size_t *out_len) {
+    /* Use js_object_keys internal API directly */
+    JSValue args[1];
+    args[0] = js_val;
+    JSValue keys_result = js_object_keys(ctx, &js_val, 1, args);
+    if (JS_IsException(keys_result)) { *out_len = 0; return NULL; }
+
+    JSValue js_len = JS_GetPropertyStr(ctx, keys_result, "length");
+    int key_count = 0;
+    JS_ToInt32(ctx, &key_count, js_len);
+
+    kwcc_js_tlv_pack_state_t st;
+    st.ctx = ctx;
+    st.js_obj = js_val;
+    st.js_keys = keys_result;
+    st.key_count = key_count;
+    st.key_index = 0;
+
+    uint8_t *tlv = kwcc_mempool_tlv_build(kwcc_js_tlv_pack_cb, &st, out_len);
+    return tlv;
+}
+
+/* ── C handlers: App domain ─────────────────────────────────── */
+
+JSValue kwcc_js_config_set_app_int(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    JSCStringBuf kbuf;
+    const char *key = JS_ToCString(ctx, argv[0], &kbuf);
+    if (!key) return JS_UNDEFINED;
+    int32_t val = 0;
+    JS_ToInt32(ctx, &val, argv[1]);
+    kwcc_config_set_app_int(key, val);
+    return JS_UNDEFINED;
+}
+
+JSValue kwcc_js_config_set_app_string(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    JSCStringBuf kbuf, vbuf;
+    const char *key = JS_ToCString(ctx, argv[0], &kbuf);
+    if (!key) return JS_UNDEFINED;
+    const char *val = JS_ToCString(ctx, argv[1], &vbuf);
+    if (!val) return JS_UNDEFINED;
+    kwcc_config_set_app_string(key, val);
+    return JS_UNDEFINED;
+}
+
+JSValue kwcc_js_config_set_app_bool(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    JSCStringBuf kbuf;
+    const char *key = JS_ToCString(ctx, argv[0], &kbuf);
+    if (!key) return JS_UNDEFINED;
+    int val = (argv[1] == JS_TRUE) ? 1 : 0;
+    kwcc_config_set_app_bool(key, val);
+    return JS_UNDEFINED;
+}
+
+JSValue kwcc_js_config_set_app_json(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    JSCStringBuf kbuf, vbuf;
+    const char *key = JS_ToCString(ctx, argv[0], &kbuf);
+    if (!key) return JS_UNDEFINED;
+    const char *val = JS_ToCString(ctx, argv[1], &vbuf);
+    if (!val) return JS_UNDEFINED;
+    kwcc_config_set_app_string(key, val);
+    return JS_UNDEFINED;
+}
+
+JSValue kwcc_js_config_set_app_tlv(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    JSCStringBuf kbuf;
+    const char *key = JS_ToCString(ctx, argv[0], &kbuf);
+    if (!key) return JS_UNDEFINED;
+    size_t tlv_len = 0;
+    uint8_t *tlv = kwcc_js_value_to_tlv(ctx, argv[1], &tlv_len);
+    if (tlv) {
+        kwcc_config_set_app_tlv(key, tlv, (uint32_t)tlv_len);
+        free(tlv);
+    }
+    return JS_UNDEFINED;
+}
+
+JSValue kwcc_js_config_get_app(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    JSCStringBuf kbuf;
+    const char *key = JS_ToCString(ctx, argv[0], &kbuf);
+    if (!key) return JS_UNDEFINED;
+    const char *default_val = NULL;
+    if (argc >= 2) {
+        JSCStringBuf dbuf;
+        default_val = JS_ToCString(ctx, argv[1], &dbuf);
+    }
+    const char *val = kwcc_config_get_app(key, default_val);
+    if (!val) return JS_UNDEFINED;
+    return JS_NewString(ctx, val);
+}
+
+JSValue kwcc_js_config_release_app(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    JSCStringBuf kbuf;
+    const char *key = JS_ToCString(ctx, argv[0], &kbuf);
+    if (!key) return JS_UNDEFINED;
+    kwcc_config_release_app(key);
+    return JS_UNDEFINED;
+}
+
+JSValue kwcc_js_config_release_app_prefix(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    JSCStringBuf kbuf;
+    const char *key = JS_ToCString(ctx, argv[0], &kbuf);
+    if (!key) return JS_UNDEFINED;
+    kwcc_config_release_app_prefix(key);
+    return JS_UNDEFINED;
+}
+
+/* ── C handlers: Core domain ────────────────────────────────── */
+
+JSValue kwcc_js_config_set_core_tlv(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    JSCStringBuf kbuf;
+    const char *key = JS_ToCString(ctx, argv[0], &kbuf);
+    if (!key) return JS_UNDEFINED;
+    size_t tlv_len = 0;
+    uint8_t *tlv = kwcc_js_value_to_tlv(ctx, argv[1], &tlv_len);
+    if (tlv) {
+        kwcc_config_set_core_tlv(key, tlv, (uint32_t)tlv_len);
+        free(tlv);
+    }
+    return JS_UNDEFINED;
+}
+
+/* ── C handlers: TLV getters ────────────────────────────────── */
+
+JSValue kwcc_js_config_get_app_tlv_path(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    JSCStringBuf kbuf, pbuf;
+    const char *key = JS_ToCString(ctx, argv[0], &kbuf);
+    if (!key) return JS_UNDEFINED;
+    const char *path = JS_ToCString(ctx, argv[1], &pbuf);
+    if (!path) return JS_UNDEFINED;
+    kwcc_mempool_slot_t *slot = kwcc_config_get_app_slot(key);
+    if (!slot || !slot->data || slot->type != KWCC_MEMPOOL_TYPE_TLV) {
+        if (argc >= 3) return argv[2];
+        return JS_UNDEFINED;
+    }
+    size_t vlen = 0;
+    const char *val = kwcc_mempool_tlv_get_path(slot->data, slot->size, path, &vlen);
+    if (!val) {
+        if (argc >= 3) return argv[2];
+        return JS_UNDEFINED;
+    }
+    return JS_NewStringLen(ctx, val, vlen);
+}
+
+JSValue kwcc_js_config_get_app_tlv_json(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    JSCStringBuf kbuf;
+    const char *key = JS_ToCString(ctx, argv[0], &kbuf);
+    if (!key) return JS_UNDEFINED;
+    kwcc_mempool_slot_t *slot = kwcc_config_get_app_slot(key);
+    if (!slot || !slot->data || slot->type != KWCC_MEMPOOL_TYPE_TLV) {
+        if (argc >= 2) return argv[1];
+        return JS_UNDEFINED;
+    }
+    size_t json_len = 0;
+    char *json = kwcc_mempool_tlv_to_json(slot->data, slot->size, &json_len);
+    if (json) {
+        JSValue result = JS_NewStringLen(ctx, json, json_len);
+        kwcc_mempool_tlv_free_json(json);
+        return result;
+    }
+    if (argc >= 2) return argv[1];
+    return JS_UNDEFINED;
+}
+
+/* ── C handler: Pool management ─────────────────────────────── */
+
+JSValue kwcc_js_config_set_max_pools(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    JSCStringBuf tbuf;
+    const char *type_str = JS_ToCString(ctx, argv[0], &tbuf);
+    if (!type_str) return JS_UNDEFINED;
+    int max = 0;
+    JS_ToInt32(ctx, &max, argv[1]);
+    if (strcmp(type_str, "*") == 0) {
+        for (int i = 0; i < KWCC_MEMPOOL_MAX_TYPES; i++) {
+            kwcc_config_set_max_pools(i, max);
+        }
+    } else if (strncmp(type_str, "l", 1) == 0 && strlen(type_str) > 1) {
+        int t = atoi(type_str + 1);
+        if (t >= 0 && t < KWCC_MEMPOOL_MAX_TYPES) {
+            kwcc_config_set_max_pools(t, max);
+        }
+    }
+    return JS_UNDEFINED;
+}
+
+/* ── Register $config JS API ────────────────────────────────── */
+
+void kwcc_register_config_js(JSContext *ctx) {
+    JSValue global_obj = JS_GetGlobalObject(ctx);
+    JSValue config = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, global_obj, "$config", config);
+
+    const char *wrapper =
+        "$config.appSetInt = function(k, v) { kwcc_js_config_set_app_int(k, v); };\n"
+        "$config.appSetString = function(k, v) { kwcc_js_config_set_app_string(k, v); };\n"
+        "$config.appSetBool = function(k, v) { kwcc_js_config_set_app_bool(k, v); };\n"
+        "$config.appSetJson = function(k, v) { kwcc_js_config_set_app_json(k, JSON.stringify(v)); };\n"
+        "$config.appSetTlv = function(k, v) { kwcc_js_config_set_app_tlv(k, v); };\n"
+        "$config.appGet = function(k, d) { return kwcc_js_config_get_app(k, d); };\n"
+        "$config.appGetTlv = function(k, p, d) {\n"
+        "    if (p) { return kwcc_js_config_get_app_tlv_path(k, p, d); }\n"
+        "    return kwcc_js_config_get_app_tlv_json(k, d);\n"
+        "};\n"
+        "$config.appRelease = function(k) { kwcc_js_config_release_app(k); };\n"
+        "$config.appReleasePrefix = function(k) { kwcc_js_config_release_app_prefix(k); };\n"
+        "$config.coreSetTlv = function(k, v) { kwcc_js_config_set_core_tlv(k, v); };\n"
+        "$config.setMaxPools = function(t, n) { kwcc_js_config_set_max_pools(t, n); };\n";
+
+    JSValue result = JS_Eval(ctx, wrapper, strlen(wrapper), "<$config>", JS_EVAL_REPL);
+    if (JS_IsException(result)) {
+        JSValue exc = JS_GetException(ctx);
+        JSCStringBuf buf;
+        const char *s = JS_ToCString(ctx, exc, &buf);
+        log_error("$config JS_Eval: %s", s ? s : "(none)");
+    }
 }

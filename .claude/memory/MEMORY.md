@@ -94,6 +94,13 @@
 - 版本号自动递增规则（vX.Y.Z）
 - 保留远程分支、留在当前分支等注意事项
 
+### [测试方法论](testing_methodology.md)
+- **C 端优先测试**：C 端功能在 C 端验证，JS 端不方便
+- 三层测试策略：纯 C 测试 → C handler 测试 → JS 集成测试
+- 排查问题流程：先 C 层 → 再 C handler → 最后 JS wrapper
+- 编译技巧：不链接 kwcc_ui.o，避免 nanosvg/NVG 依赖
+- Phase 4 TLV 调试教训：不要在 JS 层反复调试
+
 ## 用户工作流偏好（强制遵守）
 
 ### 文件读取原则

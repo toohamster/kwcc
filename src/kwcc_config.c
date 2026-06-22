@@ -103,6 +103,14 @@ void kwcc_config_release_app_prefix(const char *key) {
     }
 }
 
+void *kwcc_config_get_app_slot(const char *key) {
+    if (!key) return NULL;
+    char full[256];
+    kwcc_config_build_key(full, sizeof(full), "a", key);
+    if (!full[0]) return NULL;
+    return (void *)kwcc_mempool_get(full);
+}
+
 /* ═══ Core 域（"c." 前缀）═══ */
 
 void kwcc_config_set_core_tlv(const char *key, const uint8_t *tlv_data, uint32_t tlv_len) {
