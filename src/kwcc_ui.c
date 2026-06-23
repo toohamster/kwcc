@@ -80,7 +80,7 @@ static int kwcc_get_current_visibility(void) {
 /* ── Per-frame begin (UI state only; bus reset handled by kwcc_bus) ── */
 
 void kwcc_begin_frame(void) {
-    kwcc_bus_begin_frame();
+    kwcc_ui_bus_begin_frame();
     g_kwcc_ui_sync_count = 0;
     g_kwcc_ui_win_top = 0;
 }
@@ -88,7 +88,7 @@ void kwcc_begin_frame(void) {
 static void kwcc_on_window_close(mu_Context *ctx, const char *title) {
     (void)ctx;
     log_info("on_window_close: %s", title);
-    kwcc_dispatch_event(g_kwcc_ui_js_ctx, title, "close");
+    kwcc_ui_bus_dispatch_event(title, "close");
 }
 
 /* ── SVG cache ─────────────────────────────────────────────── */
@@ -347,7 +347,7 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         }
         int res = mu_button_ex(&g_kwcc_mu, text ? text : "", 0, MU_OPT_ALIGNCENTER);
         if ((res & MU_RES_SUBMIT) && topic) {
-            kwcc_dispatch_event(g_kwcc_ui_js_ctx, topic, "click");
+            kwcc_ui_bus_dispatch_event(topic, "click");
         }
         return JS_NewBool(res & MU_RES_SUBMIT);
     }
@@ -374,7 +374,7 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         mu_Real prev = g_kwcc_ui_slider_val;
         mu_slider_ex(&g_kwcc_mu, &g_kwcc_ui_slider_val, flow, fhigh, 0.01f, "%g", MU_OPT_ALIGNCENTER);
         if (g_kwcc_ui_slider_val != prev && topic) {
-            kwcc_dispatch_event(g_kwcc_ui_js_ctx, topic, "change");
+            kwcc_ui_bus_dispatch_event(topic, "change");
         }
         return JS_NewFloat64(ctx, g_kwcc_ui_slider_val);
     }

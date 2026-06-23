@@ -175,6 +175,7 @@ static void init(void) {
 
     kwcc_mempool_init();       /* 0. memory pool */
     g_js_ctx = kwcc_create_js();    /* 1. JSContext + config init */
+    kwcc_ui_bus_set_js_ctx(g_js_ctx);  /* set JSContext for UI bus */
     kwcc_ui_init();               /* 2. microui text callbacks */
     kwcc_register_ui(g_js_ctx);     /* 3. UI methods */
 

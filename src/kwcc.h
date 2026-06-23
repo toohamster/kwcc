@@ -6,6 +6,7 @@
 #include "kwcc_mempool.h"
 #include "kwcc_config.h"
 #include "kwcc_bus.h"
+#include "kwcc_ui_bus.h"
 #include "kwcc_ui.h"
 #include "kwcc_js.h"
 #include "kwcc_io.h"
