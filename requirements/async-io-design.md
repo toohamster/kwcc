@@ -654,7 +654,7 @@ curl 自带 `--max-time` 参数，C 层不需要额外处理。
 
 在实施 Step 3 之前，需要先完成 `kwcc_bus` 的拆分（详见 `requirements/bus-split-design.md`）：
 
-1. **kwcc_bus.c 重写为 NORMAL 链表 + LIGHT map** — `kwcc_bus_subscribe/unsubscribe/light_bind/emit`，零业务耦合
+1. **kwcc_bus.c 重写为 topic 属性 map + NORMAL 链表** — `kwcc_bus_register_topic/subscribe/unsubscribe/emit`，零业务耦合
 2. **topic map 移到 kwcc_ui.c** — microui 专用，不再在 bus 中
 3. **kwcc_js.c 新增 `kwcc_js_on_bus_event`** — 作为 bus consumer 注册回调，不耦合到 bus
 4. **现有调用点替换** — `kwcc_dispatch_event` → `kwcc_bus_emit`
