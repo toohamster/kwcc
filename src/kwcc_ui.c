@@ -12,7 +12,6 @@
 #include "kwcc_js.h"
 
 #include "nanosvg/nanosvg.h"
-#include "kwcc_bus.h"
 
 /* Extern: NVG context set in main.m */
 extern NVGcontext *g_kwcc_vg;

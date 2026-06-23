@@ -1,51 +1,122 @@
-/* kwcc_bus.c — C→JS message bus bridge */
+/* kwcc_bus.c — Generic C Pub/Sub event bus (zero external dependencies)
+ *
+ * Design: linked list of topic groups, each group has a fixed-size callback array.
+ * - subscribe: find/create topic group, add callback entry, return sub_id
+ * - unsubscribe: find sub_id by scan, mark inactive
+ * - publish: iterate groups, match topic, trigger all active callbacks in group
+ */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include "mquickjs/mquickjs.h"
-#include "llog.h"
+#include <stdint.h>
 #include "kwcc_bus.h"
+#include "llog.h"
 
-/* ── Topic map ─────────────────────────────────────────────── */
+/* ── Callback entry within a topic group ── */
 
-#define KWCC_BUS_TOPIC_MAP_SIZE 256
-static struct { int id; char topic[128]; } g_kwcc_bus_topic_map[KWCC_BUS_TOPIC_MAP_SIZE];
-static int g_kwcc_bus_topic_map_count = 0;
+#define KWCC_BUS_GROUP_MAX_CB 16
 
-/* ── Bind: register ID → topic mapping ─────────────────────── */
+typedef struct {
+    uint64_t        id;
+    kwcc_bus_cb_t   cb;
+    void           *user_data;
+    int             in_use;
+} kwcc_bus_cb_entry_t;
 
-void kwcc_bind_topic(int id, const char *topic) {
-    if (g_kwcc_bus_topic_map_count < KWCC_BUS_TOPIC_MAP_SIZE && topic) {
-        g_kwcc_bus_topic_map[g_kwcc_bus_topic_map_count].id = id;
-        strncpy(g_kwcc_bus_topic_map[g_kwcc_bus_topic_map_count].topic, topic, 127);
-        g_kwcc_bus_topic_map[g_kwcc_bus_topic_map_count].topic[127] = '\0';
-        g_kwcc_bus_topic_map_count++;
+/* ── Topic group node ── */
+
+typedef struct kwcc_bus_group {
+    char                  *topic;
+    kwcc_bus_cb_entry_t    callbacks[KWCC_BUS_GROUP_MAX_CB];
+    int                    cb_count;
+    struct kwcc_bus_group *next;
+} kwcc_bus_group_t;
+
+/* ── Global state ── */
+
+static kwcc_bus_group_t *g_kwcc_bus_head = NULL;
+static uint64_t          g_kwcc_bus_next_id = 1;
+
+/* ── Match: exact / wildcard "*" / prefix (ends with '/') ── */
+
+static int match(const char *pattern, const char *topic) {
+    if (strcmp(pattern, topic) == 0) return 1;
+    if (strcmp(pattern, "*") == 0) return 1;
+    size_t plen = strlen(pattern);
+    if (plen > 0 && pattern[plen - 1] == '/' && strncmp(pattern, topic, plen) == 0)
+        return 1;
+    return 0;
+}
+
+/* ── Init ── */
+
+void kwcc_bus_init(void) {
+    g_kwcc_bus_head = NULL;
+    g_kwcc_bus_next_id = 1;
+}
+
+/* ── Subscribe: find/create topic group, add callback ── */
+
+kwcc_bus_sub_id_t kwcc_bus_subscribe(const char *topic, kwcc_bus_cb_t cb, void *user_data) {
+    if (!topic || !cb) return 0;
+
+    /* Find existing group */
+    kwcc_bus_group_t *grp = g_kwcc_bus_head;
+    while (grp) {
+        if (strcmp(grp->topic, topic) == 0) break;
+        grp = grp->next;
+    }
+
+    /* Create new group if not found */
+    if (!grp) {
+        grp = calloc(1, sizeof(*grp));
+        if (!grp) { log_error("bus: calloc failed"); return 0; }
+        grp->topic = strdup(topic);
+        grp->next = g_kwcc_bus_head;
+        g_kwcc_bus_head = grp;
+    }
+
+    /* Find empty slot in group */
+    for (int i = 0; i < KWCC_BUS_GROUP_MAX_CB; i++) {
+        if (!grp->callbacks[i].in_use) {
+            grp->callbacks[i].id = g_kwcc_bus_next_id;
+            grp->callbacks[i].cb = cb;
+            grp->callbacks[i].user_data = user_data;
+            grp->callbacks[i].in_use = 1;
+            grp->cb_count++;
+            return g_kwcc_bus_next_id++;
+        }
+    }
+
+    log_warn("bus: topic group full (topic='%s', max=%d)", topic, KWCC_BUS_GROUP_MAX_CB);
+    return 0;
+}
+
+/* ── Unsubscribe: find sub_id, mark inactive ── */
+
+void kwcc_bus_unsubscribe(kwcc_bus_sub_id_t id) {
+    for (kwcc_bus_group_t *grp = g_kwcc_bus_head; grp; grp = grp->next) {
+        for (int i = 0; i < KWCC_BUS_GROUP_MAX_CB; i++) {
+            if (grp->callbacks[i].in_use && grp->callbacks[i].id == id) {
+                grp->callbacks[i].in_use = 0;
+                grp->cb_count--;
+                return;
+            }
+        }
     }
 }
 
-/* ── Per-frame reset ───────────────────────────────────────── */
+/* ── Publish: iterate groups, match, trigger callbacks ── */
 
-void kwcc_bus_begin_frame(void) {
-    g_kwcc_bus_topic_map_count = 0;
-}
+void kwcc_bus_publish(const char *topic, const void *data, size_t len) {
+    if (!topic) return;
 
-/* ── Event dispatch: C → JS via $bus.emit ──────────────────── */
-
-void kwcc_dispatch_event(JSContext *ctx, const char *topic, const char *action) {
-    char t[256], a[128], buf[512];
-    int tj = 0;
-    for (int i = 0; topic[i] && tj < 254; i++) {
-        char c = topic[i];
-        if (c == '\\' || c == '\'') t[tj++] = '\\';
-        t[tj++] = c;
+    for (kwcc_bus_group_t *grp = g_kwcc_bus_head; grp; grp = grp->next) {
+        if (!match(grp->topic, topic)) continue;
+        for (int i = 0; i < KWCC_BUS_GROUP_MAX_CB; i++) {
+            if (grp->callbacks[i].in_use) {
+                grp->callbacks[i].cb(topic, data, len, grp->callbacks[i].user_data);
+            }
+        }
     }
-    t[tj] = '\0';
-    int aj = 0;
-    for (int i = 0; action[i] && aj < 126; i++) {
-        char c = action[i];
-        if (c == '\\' || c == '\'') a[aj++] = '\\';
-        a[aj++] = c;
-    }
-    a[aj] = '\0';
-    snprintf(buf, sizeof(buf), "$bus.emit('%s', '%s', new Object());", t, a);
-    JS_Eval(ctx, buf, strlen(buf), "<dispatch>", 0);
 }

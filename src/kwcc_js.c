@@ -8,10 +8,31 @@
 #include "kwcc_mempool.h"
 #include "kwcc_config.h"
 #include "kwcc_base.h"
+#include "kwcc_bus.h"
 #include "llog.h"
 #include "mquickjs/mqjs_stdlib.h"
 
 #define KWCC_MEM_SIZE (4 * 1024 * 1024)
+
+/* ── Bus consumer: forward C bus events to JS $bus ── */
+
+static void kwcc_js_on_bus_event(const char *topic, const void *data, size_t len, void *user_data) {
+    JSContext *ctx = (JSContext *)user_data;
+    if (!ctx || !topic) return;
+
+    char buf[512];
+    char safe_topic[256];
+    int tj = 0;
+    for (int i = 0; topic[i] && tj < 254; i++) {
+        char c = topic[i];
+        if (c == '\\' || c == '\'') safe_topic[tj++] = '\\';
+        safe_topic[tj++] = c;
+    }
+    safe_topic[tj] = '\0';
+
+    snprintf(buf, sizeof(buf), "$bus.emit('%s', '', new Object());", safe_topic);
+    JS_Eval(ctx, buf, strlen(buf), "<bus>", JS_EVAL_REPL);
+}
 
 /* ── JS lifecycle ───────────────────────────────────────────── */
 
@@ -23,6 +44,7 @@ JSContext *kwcc_create_js(void) {
         return NULL;
     }
     kwcc_register_config_js(ctx);
+    kwcc_bus_subscribe("*", kwcc_js_on_bus_event, ctx);
     return ctx;
 }
 

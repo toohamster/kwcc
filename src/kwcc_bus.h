@@ -1,11 +1,16 @@
-/* kwcc_bus.h — C→JS message bus bridge */
+/* kwcc_bus.h — Generic C Pub/Sub event bus (zero external dependencies) */
 #ifndef KWCC_BUS_H
 #define KWCC_BUS_H
 
-#include "mquickjs/mquickjs.h"
+#include <stddef.h>
+#include <stdint.h>
 
-void kwcc_dispatch_event(JSContext *ctx, const char *topic, const char *action);
-void kwcc_bind_topic(int id, const char *topic);
-void kwcc_bus_begin_frame(void);  /* reset topic map per frame */
+typedef uint64_t kwcc_bus_sub_id_t;
+typedef void (*kwcc_bus_cb_t)(const char *topic, const void *data, size_t len, void *user_data);
+
+void              kwcc_bus_init(void);
+kwcc_bus_sub_id_t kwcc_bus_subscribe(const char *topic, kwcc_bus_cb_t cb, void *user_data);
+void              kwcc_bus_unsubscribe(kwcc_bus_sub_id_t id);
+void              kwcc_bus_publish(const char *topic, const void *data, size_t len);
 
 #endif
