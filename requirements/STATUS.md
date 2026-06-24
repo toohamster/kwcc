@@ -2,36 +2,26 @@
 
 > 更新于 2026-06-24
 
-## 已完成 ✅
+## 开发时间线
 
-| 文件 | 状态 | 说明 |
-|------|------|------|
-| `mempool-design.md` | ✅ 全部完成 | Phase 1-7 全部完成，24/24 测试通过 |
-| `bus-split-design.md` | ✅ 全部完成 | 7 步全部完成，19/19 测试通过，kwcc_bus 拆分为纯 C Pub/Sub + UI 桥接 + JS 白名单 |
-| `bus-split-implementation-plan.md` | ✅ 全部完成 | 执行计划已全部实施 |
-| `extract-bus-module.md` | ✅ 已完成 | bus 模块已提取到 kwcc_bus.c/h |
-| `extract-ui-module.md` | ✅ 已完成 | UI/JS/config 模块已拆分 |
-| `naming-fix.md` | ✅ 已完成 | 命名规范整改已完成 |
-| `store-data-flow-v2.md` | ✅ 已完成 | 单向数据流 v2 已实施 |
-| `store-data-flow-v2-plan.md` | ✅ 已完成 | 开发计划已执行完毕 |
-| `svg-enhancement-scheme.md` | ✅ 已完成 | SVG 缓存增强已实施 |
-| `calculator-scheme.md` | ✅ 已完成 | 计算器示例已完成 |
-
-## 待论证 ⏳
-
-| 文件 | 状态 | 说明 |
-|------|------|------|
-| `async-io-design.md` | ⏳ 待论证 | 单线程异步 I/O + Promise，bus 拆分已完成，可启动 |
-| `microui-id-override.md` | ⏳ 待论证 | microui ID 覆盖机制，优先级在 async-io 之后 |
-
-## 已废弃 ❌
-
-| 文件 | 状态 | 说明 |
-|------|------|------|
-| `core-memory-pool.md` | ❌ 已废弃 | 已被 mempool-design.md (v7) 取代 |
-| `core-memory-pool-plan.md` | ❌ 已废弃 | 已被 mempool-design.md (v7) 取代 |
-| `store-data-flow.md` | ❌ 已废弃 | v1 版本，已被 v2 取代 |
-| `mquickjs-cfunc-registration.md` | ⚠️ 参考资料 | C 函数注册方案，作为技术参考保留 |
+| # | 方案 | 状态 | 演进关系 | 测试 |
+|---|------|------|----------|------|
+| 1 | `core-memory-pool.md` | ❌ 已废弃 | → 被 mempool-design (v7) 取代 | — |
+| 2 | `core-memory-pool-plan.md` | ❌ 已废弃 | → 被 mempool-design (v7) 取代 | — |
+| 3 | `mempool-design.md` | ✅ 全部完成 | 取代 core-memory-pool | 24/24 |
+| 4 | `store-data-flow.md` | ❌ 已废弃 | → 被 v2 取代 | — |
+| 5 | `store-data-flow-v2.md` | ✅ 已完成 | 取代 v1 | — |
+| 6 | `store-data-flow-v2-plan.md` | ✅ 已完成 | — | — |
+| 7 | `svg-enhancement-scheme.md` | ✅ 已完成 | — | — |
+| 8 | `calculator-scheme.md` | ✅ 已完成 | — | — |
+| 9 | `extract-ui-module.md` | ✅ 已完成 | jsapi 重命名为 kwcc_js | — |
+| 10 | `extract-bus-module.md` | ✅ 已完成 | → 被 bus-split 重构取代 | — |
+| 11 | `naming-fix.md` | ✅ 已完成 | — | — |
+| 12 | `bus-split-design.md` | ✅ 全部完成 | 从 extract-bus-module 演进，拆分为三层 | 19/19 |
+| 13 | `bus-split-implementation-plan.md` | ✅ 全部完成 | — | — |
+| 14 | `async-io-design.md` | ⏳ 待实施 | 依赖 bus-split，已解除 | — |
+| 15 | `microui-id-override.md` | ⏳ 待论证 | — | — |
+| 16 | `mquickjs-cfunc-registration.md` | ⚠️ 参考 | C 函数注册技术参考 | — |
 
 ## 代码清理 🧹
 

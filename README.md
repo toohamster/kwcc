@@ -77,22 +77,27 @@ make && ./kwcc
 
 ## 文档
 
-**已完成**：
-- [spec.md](spec.md) — 完整项目规范
-- [requirements/mempool-design.md](requirements/mempool-design.md) — Slab 内存池方案
-- [requirements/bus-split-design.md](requirements/bus-split-design.md) — Bus 拆分方案
-- [requirements/bus-split-implementation-plan.md](requirements/bus-split-implementation-plan.md) — Bus 拆分实施计划
-- [requirements/store-data-flow-v2.md](requirements/store-data-flow-v2.md) — 单向数据流方案
-- [requirements/store-data-flow-v2-plan.md](requirements/store-data-flow-v2-plan.md) — 单向数据流实施计划
-- [requirements/svg-enhancement-scheme.md](requirements/svg-enhancement-scheme.md) — SVG 缓存增强方案
-- [requirements/calculator-scheme.md](requirements/calculator-scheme.md) — 计算器示例方案
-- [requirements/extract-bus-module.md](requirements/extract-bus-module.md) — Bus 模块提取方案
-- [requirements/extract-ui-module.md](requirements/extract-ui-module.md) — UI 模块提取方案
-- [requirements/naming-fix.md](requirements/naming-fix.md) — 命名规范整改方案
+按开发时间线排列，标注演进关系：
 
-**待实施**：
-- [requirements/async-io-design.md](requirements/async-io-design.md) — 异步 I/O + Promise 方案
-- [requirements/microui-id-override.md](requirements/microui-id-override.md) — microui ID 覆盖机制
+| # | 文档 | 状态 | 演进关系 |
+|---|------|------|----------|
+| 1 | [core-memory-pool.md](requirements/core-memory-pool.md) | ❌ 已废弃 | → 被 mempool-design (v7) 取代 |
+| 2 | [core-memory-pool-plan.md](requirements/core-memory-pool-plan.md) | ❌ 已废弃 | → 被 mempool-design (v7) 取代 |
+| 3 | [mempool-design.md](requirements/mempool-design.md) | ✅ 完成 | 取代 core-memory-pool，24/24 测试 |
+| 4 | [store-data-flow.md](requirements/store-data-flow.md) | ❌ 已废弃 | → 被 v2 取代 |
+| 5 | [store-data-flow-v2.md](requirements/store-data-flow-v2.md) | ✅ 完成 | 取代 v1 |
+| 6 | [store-data-flow-v2-plan.md](requirements/store-data-flow-v2-plan.md) | ✅ 完成 | — |
+| 7 | [svg-enhancement-scheme.md](requirements/svg-enhancement-scheme.md) | ✅ 完成 | — |
+| 8 | [calculator-scheme.md](requirements/calculator-scheme.md) | ✅ 完成 | — |
+| 9 | [extract-ui-module.md](requirements/extract-ui-module.md) | ✅ 完成 | jsapi 重命名为 kwcc_js |
+| 10 | [extract-bus-module.md](requirements/extract-bus-module.md) | ✅ 完成 | → 被 bus-split 重构取代 |
+| 11 | [naming-fix.md](requirements/naming-fix.md) | ✅ 完成 | — |
+| 12 | [bus-split-design.md](requirements/bus-split-design.md) | ✅ 完成 | 从 extract-bus-module 演进，19/19 测试 |
+| 13 | [bus-split-implementation-plan.md](requirements/bus-split-implementation-plan.md) | ✅ 完成 | — |
+| 14 | [async-io-design.md](requirements/async-io-design.md) | ⏳ 待实施 | 依赖 bus-split，已解除 |
+| 15 | [microui-id-override.md](requirements/microui-id-override.md) | ⏳ 待论证 | — |
+| 16 | [mquickjs-cfunc-registration.md](requirements/mquickjs-cfunc-registration.md) | ⚠️ 参考 | C 函数注册技术参考 |
+| 17 | [spec.md](spec.md) | — | 完整项目规范 |
 
 ## 许可证
 
