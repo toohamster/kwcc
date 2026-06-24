@@ -149,54 +149,37 @@ subscribe 同理。
 
 ## 第三部分：JS 桥接 — 白名单 + `notify_c`
 
-### 白名单
-
-从 config 读取，控制哪些 topic 转发到 JS，减少不必要的 `JS_Eval`。
+从 config 读取白名单，每次事件触发时直接匹配逗号分隔列表，不额外缓存。
 
 ```c
 /* kwcc_js.c */
-#define KWCC_JS_BUS_WHITELIST_MAX 32
 
-static char g_js_bus_whitelist[KWCC_JS_BUS_WHITELIST_MAX][128];
-static int  g_js_bus_whitelist_count = 0;
-
-static void kwcc_js_init_bus_whitelist(void) {
-    const char *str = kwcc_config_get_core("js/bus_whitelist", "");
-    if (!str || str[0] == '\0') { g_js_bus_whitelist_count = 0; return; }
-    if (strcmp(str, "*") == 0) {
-        g_js_bus_whitelist[0][0] = '*';
-        g_js_bus_whitelist[0][1] = '\0';
-        g_js_bus_whitelist_count = 1;
-        return;
-    }
+/* 白名单匹配（逗号分隔的前缀列表）*/
+static int match_whitelist(const char *whitelist, const char *topic) {
     char buf[2048];
-    strncpy(buf, str, sizeof(buf) - 1);
+    strncpy(buf, whitelist, sizeof(buf) - 1);
     char *tok = strtok(buf, ",");
-    while (tok && g_js_bus_whitelist_count < KWCC_JS_BUS_WHITELIST_MAX) {
-        strncpy(g_js_bus_whitelist[g_js_bus_whitelist_count], tok, 127);
-        g_js_bus_whitelist_count++;
+    while (tok) {
+        size_t len = strlen(tok);
+        if (len > 0 && tok[len - 1] == '/') {
+            if (strncmp(topic, tok, len) == 0) return 1;
+        } else if (strcmp(topic, tok) == 0) {
+            return 1;
+        }
         tok = strtok(NULL, ",");
-    }
-}
-```
-
-### 白名单匹配 + `notify_c` action
-
-```c
-static int js_bus_is_allowed(const char *topic) {
-    if (g_js_bus_whitelist_count == 0) return 0;
-    if (g_js_bus_whitelist[0][0] == '*' && g_js_bus_whitelist[0][1] == '\0') return 1;
-    for (int i = 0; i < g_js_bus_whitelist_count; i++) {
-        const char *entry = g_js_bus_whitelist[i];
-        size_t elen = strlen(entry);
-        if (strcmp(entry, topic) == 0) return 1;
-        if (elen > 0 && entry[elen - 1] == '/' && strncmp(topic, entry, elen) == 0) return 1;
     }
     return 0;
 }
 
 static void kwcc_js_on_bus_event(const char *topic, const void *data, size_t len, void *user_data) {
-    if (!js_bus_is_allowed(topic)) return;  /* 白名单外，不转发 */
+    const char *whitelist = kwcc_config_get_core("bus/js_whitelist", "*");
+    if (whitelist[0] == '*' && whitelist[1] == '\0') {
+        /* * = 全部转发 */
+    } else if (whitelist[0] == '\0') {
+        return;  /* 空 = 不转发 */
+    } else if (!match_whitelist(whitelist, topic)) {
+        return;  /* 不在白名单内 */
+    }
 
     JSContext *ctx = (JSContext *)user_data;
     char buf[512];
@@ -210,14 +193,13 @@ static void kwcc_js_on_bus_event(const char *topic, const void *data, size_t len
 ### JS 侧配置
 
 ```javascript
-/* 调试模式：全部转发 */
-$config.coreSetString("js/bus_whitelist", "*");
+/* 默认（不配置）：全部转发 */
 
 /* 生产模式：只转发需要的 */
-$config.coreSetString("js/bus_whitelist", "ui/,http/end/,http/error/");
+$config.coreSetTlv("bus", { js_whitelist: "ui/,http/end/,http/error/" });
 
 /* 静默模式：不转发任何 C bus 事件 */
-$config.coreSetString("js/bus_whitelist", "");
+$config.coreSetTlv("bus", { js_whitelist: "" });
 ```
 
 ---
