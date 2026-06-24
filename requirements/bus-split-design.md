@@ -31,7 +31,7 @@
 │  零外部依赖，不 include mquickjs                                │
 ├──────────────────────────────────────────────────────────┤
 │  kwcc_js.c（JS 桥接层，bus consumer）                         │
-│  kwcc_bus_subscribe("*", kwcc_js_on_bus_event, ctx)              │
+│  kwcc_bus_subscribe("/*", kwcc_js_on_bus_event, ctx)             │
 │  白名单检查 → JS_Eval $bus.emit(topic, "notify_c", ...)          │
 └──────────────────────────────────────────────────────────┘
         ↑ 任何 C 模块都能直接用
@@ -46,7 +46,7 @@
 
 ## 基础工具：kwcc_base.h/c
 
-Topic 只允许 `A-Z a-z 0-9 / _` 字符。所有入口强制清洗，不合规字符直接丢弃。
+Topic 只允许 `A-Z a-z 0-9 / _` 字符。subscribe 支持 `/*` 通配符（匹配所有 topic）。
 
 ```c
 /* kwcc_base.h */
@@ -56,25 +56,42 @@ int  kwcc_base_topic_check(const char *topic);
 
 ```c
 /* kwcc_base.c */
+
+/* 清洗：末尾是 /* 时保留，其余 * 全部丢弃 */
 void kwcc_base_topic_sanitize(char *out, size_t out_size, const char *in) {
+    size_t len = strlen(in);
+    int keep_star = (len >= 2 && in[len-2] == '/' && in[len-1] == '*');
+
     int j = 0;
-    for (int i = 0; in[i] && j < out_size - 1; i++) {
+    size_t limit = keep_star ? len - 2 : len;
+    for (size_t i = 0; i < limit && j < (int)out_size - 3; i++) {
         char c = in[i];
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
             (c >= '0' && c <= '9') || c == '/' || c == '_') {
             out[j++] = c;
         }
     }
+    if (keep_star) {
+        out[j++] = '/';
+        out[j++] = '*';
+    }
     out[j] = '\0';
 }
 
+/* 校验：拒绝空字符串、全是 / 的主题 */
 int kwcc_base_topic_check(const char *topic) {
     if (topic[0] == '\0') return 0;
-    int has_content = 0;
-    for (int i = 0; topic[i]; i++) {
-        if (topic[i] != '/') { has_content = 1; break; }
+    if (strcmp(topic, "/*") == 0) return 1;  /* 通配符合法 */
+
+    size_t len = strlen(topic);
+    if (len >= 2 && topic[len-2] == '/' && topic[len-1] == '*') {
+        /* 去掉 /* 检查前面部分 */
+        len -= 2;
     }
-    return has_content;  /* 全是 / 返回 0 */
+    for (size_t i = 0; i < len; i++) {
+        if (topic[i] != '/') return 1;
+    }
+    return 0;  /* 全是 / */
 }
 ```
 
@@ -120,6 +137,8 @@ typedef struct kwcc_bus_group {
 ### API
 
 ```c
+#define KWCC_BUS_WILDCARD "/*"
+
 typedef uint64_t kwcc_bus_sub_id_t;
 typedef void (*kwcc_bus_cb_t)(const char *topic, const void *data, size_t len, void *user_data);
 
@@ -145,16 +164,26 @@ void kwcc_bus_publish(const char *topic, const void *data, size_t len) {
 
 subscribe 同理。
 
+### 通配符常量
+
+`kwcc_bus.h` 定义 `#define KWCC_BUS_WILDCARD "/*"`，`kwcc_bus.c` 的 match 函数使用该常量。
+
+`kwcc_base.c` 的 `topic_check` 中 `strcmp(topic, "/*")` 保留硬编码 — 这是校验规则（`/*` 作为合法 topic），不是通配符语义。
+
 ---
 
 ## 第三部分：JS 桥接 — 白名单 + `notify_c`
 
 从 config 读取白名单，每次事件触发时直接匹配逗号分隔列表，不额外缓存。
 
+白名单规则：
+- `*` → 全部转发
+- `""` → 不转发
+- 逗号分隔前缀列表 → 前缀匹配
+
 ```c
 /* kwcc_js.c */
 
-/* 白名单匹配（逗号分隔的前缀列表）*/
 static int match_whitelist(const char *whitelist, const char *topic) {
     char buf[2048];
     strncpy(buf, whitelist, sizeof(buf) - 1);
@@ -230,8 +259,10 @@ bus 话题：
 | 模式 | 示例 | 匹配 |
 |------|------|------|
 | 精确 | `"http/end/req_1"` | 只匹配 `http/end/req_1` |
-| `*` 通配 | `"*"` | 匹配所有 topic |
+| `/*` 通配 | `"/*"` | 匹配所有 topic |
 | 前缀 | `"http/"` | 匹配所有以 `http/` 开头的 topic |
+
+由 `kwcc_bus_match_topic(pattern, topic)` 实现，pattern 来自 subscribe 的 topic，topic 来自 publish 的事件。
 
 ---
 

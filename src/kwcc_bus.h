@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define KWCC_BUS_WILDCARD "/*"
+
 typedef uint64_t kwcc_bus_sub_id_t;
 typedef void (*kwcc_bus_cb_t)(const char *topic, const void *data, size_t len, void *user_data);
 

@@ -13,187 +13,128 @@
 1. topic map（ID→topic 映射）— 纯 UI 内部需求
 2. `kwcc_dispatch_event` — UI→JS 的事件桥接
 
-把它叫作"bus"是名不副实的。它只是一个 UI 专用的 C→JS 事件转发器。
-
 ### 决策
 
-拆成两个独立的东西：
-
-- **`kwcc_ui_bus.c/h`** — UI→JS 事件桥接，UI 层内部使用
-- **`kwcc_bus.c/h`** — 通用 C 事件总线，独立基础设施
+- **`kwcc_ui_bus.c/h`** — UI→JS 事件桥接
+- **`kwcc_bus.c/h`** — 通用 C 事件总线
 
 ### 原因
 
-如果 bus 耦合了 mquickjs（因为 dispatch 需要 JS_Eval），任何依赖 bus 的模块都间接依赖 JS。HTTP 模块、系统监控模块这些纯 C 模块就没法用 bus 做事件解耦了。
-
-拆开后：
-- `kwcc_ui_bus.c` 可以 include mquickjs，它本来就是 UI 和 JS 之间的桥
-- `kwcc_bus.c` 零外部依赖，像 `kwcc_mempool` 一样是纯 C 基础设施
+bus 如果耦合了 mquickjs，任何依赖 bus 的模块都间接依赖 JS。拆开后 `kwcc_bus.c` 零外部依赖，像 `kwcc_mempool` 一样是纯 C 基础设施。
 
 ---
 
 ## 决策 2：函数命名遵守 `kwcc_<module>_<action>` 规范
 
-### 问题
-
-原 `kwcc_dispatch_event` 没有模块前缀，不符合项目命名规范。
-
-### 决策
-
-- UI 桥接：`kwcc_ui_bus_dispatch_event`
-- 通用 bus：`kwcc_bus_subscribe` / `kwcc_bus_unsubscribe` / `kwcc_bus_publish`
-
-### 原因
-
-命名是架构的体现。`kwcc_ui_bus_dispatch_event` 一眼就知道是 UI bus 模块的函数，`kwcc_dispatch_event` 看不出来属于谁。
+原 `kwcc_dispatch_event` 没有模块前缀。改为 `kwcc_ui_bus_dispatch_event`（UI）和 `kwcc_bus_publish`（bus）。
 
 ---
 
-## 决策 3：UI 桥接抽出为独立文件 `kwcc_ui_bus.c/h`
+## 决策 3：UI 桥接抽出为独立文件
 
-### 问题
-
-最开始考虑把 UI 桥接代码直接塞进 `kwcc_ui.c`。
-
-### 决策
-
-抽出为独立的 `kwcc_ui_bus.c/h`。
-
-### 原因
-
-UI 桥接有完整的 API（begin_frame / bind_topic / dispatch_event / set_js_ctx），有独立的数据结构（topic map），放在 `kwcc_ui.c` 里会让 UI 文件膨胀。独立文件职责清晰，也方便以后测试。
+UI 桥接有完整 API 和数据结构，放 `kwcc_ui.c` 里会让文件膨胀。独立文件职责清晰。
 
 ---
 
 ## 决策 4：bus 不需要 NORMAL/LIGHT 模式
 
-### 问题
-
-之前设计了 NORMAL（真订阅，ref_count）和 LIGHT（轻绑定，bindOnce）两种模式。后来发现这过度设计了。
-
-### 决策
-
-去掉 LIGHT 模式，bus 只有一种订阅方式：`subscribe → publish → unsubscribe`。
-
-### 原因
-
-LIGHT 模式是为了解决 UI 每帧重置的问题，但 UI 已经抽到 `kwcc_ui_bus.c` 里了，有自己的 topic map。通用 bus 不需要知道 UI 的特殊需求。
+之前设计了两种模式，过度设计。UI 的特殊需求已经由 `kwcc_ui_bus.c` 自己的 topic map 处理了，通用 bus 不需要知道。
 
 ---
 
-## 决策 5：bus 用哈希数组（组概念）管理 subscriber
+## 决策 5：bus 用 topic 组 + 固定数组管理 subscriber
 
-### 问题
-
-一开始用链表管理 subscriber，每个节点是一个订阅。后来讨论发现更好的方式。
-
-### 决策
-
-subscriber 链表中的每个节点是一个 **topic 组**，组内用哈希表管理该 topic 下的所有回调：
-
-```
-subscriber list:
-  [topic="*"]      → { hash: { id=1→cb_a, id=5→cb_b } }
-  [topic="http/"]  → { hash: { id=2→cb_c, id=3→cb_d } }
-```
-
-- `subscribe(topic, cb, user_data)` → 找到或创建 topic 组 → 哈希表新增条目 → 返回 sub_id
-- `unsubscribe(sub_id)` → 找到对应 topic 组 → 哈希表删除该条目 → 完成
-- `publish(topic)` → 遍历 topic 链表 → 匹配 → 遍历组内哈希表 → 触发所有回调
-
-### 原因
-
-1. **unsubscribe 不修改链表** — 只操作哈希表，publish 遍历时链表结构不变，安全
-2. **不需要 ref_count** — 链表是只读的，哈希表的增删不影响遍历
-3. **GC 简单** — 组内哈希为空时删除整个组节点，不需要复杂的引用计数
-4. **概念清晰** — subscriber 是 topic 组，不是单个订阅
+subscriber 链表中的每个节点是一个 topic 组，组内用固定大小数组（16）管理回调。不用哈希表，因为 16 个回调已经足够。
 
 ---
 
-## 决策 6：GC 不是 pub 事件，是 publish 内部触发
+## 决策 6：topic sanitization — 清洗 + 校验两步走
 
 ### 问题
 
-GC 怎么触发？三种方案：
-- A. publish 内部检查阈值后触发
-- B. 作为 bus 上的特殊 topic（`__bus/gc`）
-- C. 外部定时器
+topic 字符串可能包含非法字符（引号、反斜杠等），会破坏 `JS_Eval` 的字符串。
 
 ### 决策
 
-选方案 A：publish 完成后检查 inactive 数量，超过阈值则触发 GC 压缩。
+- `kwcc_base_topic_sanitize` — 只保留 `A-Z a-z 0-9 / _`，末尾 `/*` 通配符保留，其余 `*` 丢弃
+- `kwcc_base_topic_check` — 拒绝空字符串、全是 `/` 的 topic
 
 ### 原因
 
-方案 B 有循环问题 — GC 修改 subscriber 结构，而 publish 正在遍历。虽然可以用"复制新数组 + 原子替换"来解决，但不值得。方案 C 需要外部调用方记得调，容易忘。方案 A 对调用方透明，自动管理。
+sanitize 去非法字符，check 验结构合法性。两个函数分工不同，不能合并。
 
 ---
 
-## 决策 7：不区分 NORMAL/LIGHT，topic 本身就包含完整语义
+## 决策 7：`/*` 是唯一的通配符
 
 ### 问题
 
-一度考虑给 `kwcc_bus_publish` 加一个 action 参数来和 UI 事件格式对齐。
+subscribe 用什么匹配所有 topic？`*` 还是 `/*`？
 
 ### 决策
 
-不加 action 参数。`publish(topic, data, len)` 就够了。
+`/*` 是 bus subscribe 端的通配符。白名单端用 `*` 表示"全部转发"。两边各用各的方式。
 
 ### 原因
 
-UI 事件的 action 有意义（click/change），因为 topic 是控件标识。非 UI 事件的 topic 本身就包含完整语义（`sys/network/connected`、`http/end/req_1`），再加 action 是多余的。为了"格式统一"增加不必要的参数不值得。
+`/*` 作为通配符，前缀 `/` 明确了它是路径后缀，不会和普通 topic 名冲突。白名单是前缀匹配，`*` 作为"全部"的标记更直观。
 
 ---
 
-## 决策 8：bus 不处理消息路由，路由是模块内部的事
+## 决策 8：JS 桥接白名单从 config 读取，不额外缓存
 
 ### 问题
 
-多个模块订阅同一个 topic 时，如何知道谁该处理这条消息？
+白名单要不要在 JS 桥接里缓存？
 
 ### 决策
 
-bus 不处理这个问题。两种解决方式由调用方自行选择：
-
-1. **topic 区分** — 用不同的 topic（`net/request/module_a` vs `net/request/module_b`）
-2. **数据内过滤** — 所有订阅者都收到，各自判断数据是否属于自己
+不缓存。每次 `kwcc_js_on_bus_event` 直接从 config 读。config 层本身有 mempool 缓存。
 
 ### 原因
 
-bus 的职责是"topic 匹配 → 触发回调"。消息路由是业务逻辑，应该在模块内部实现。比如 network 模块内部维护 `request_id → callback` 映射，对外提供 `network_request(url, cb)` 接口，但 bus 只负责把数据传到 network 模块。
+额外的缓存数组（`g_js_bus_whitelist[32][128]`）和 init 函数是多余的。config 读一次就是 O(1)（mempool 查找），没必要再套一层。
 
 ---
 
-## 决策 9：JSContext 生命周期在当前项目中不是问题
+## 决策 9：bus → JS 的 action 固定为 `"notify_c"`
 
 ### 问题
 
-如果 JSContext 被销毁重建，UI 桥接和 JS 桥接的订阅需要重新注册。
+bus 事件转发到 JS 时，action 传什么？
 
 ### 决策
 
-不处理。当前 JSContext 只在启动时创建一次、退出时销毁一次，没有热重载。
+固定 `"notify_c"`，标识事件来自 C bus。
 
 ### 原因
 
-`kwcc_create_js()` 在 `main.m` 中只调用一次。如果未来做 JS 热重载，再处理也不迟。
+空字符串没有语义。`notify_c` 让 JS 端 handler 能区分事件来源（UI 按钮是 `click`，C bus 是 `notify_c`）。
 
 ---
 
-## 决策 10：两套 Bus，独立运行
+## 决策 10：白名单和 bus subscribe 的通配规则不同
 
-### 问题
-
-UI 桥接和通用 bus 用同一套 topic 命名会不会冲突？
-
-### 决策
-
-两套系统独立运行：
-- `kwcc_ui_bus` — UI→JS 桥接，topic map 在 UI 内部
-- `kwcc_bus` — 通用 C Pub/Sub，subscriber 链表
-
-它们通过 topic 字符串对齐语义，但实现完全独立。JS 侧的 `$bus` 是第三套系统，由 JS 桥接层转发。
+| | bus subscribe | JS 白名单 |
+|---|---|---|
+| 全部匹配 | `/*` | `*` |
+| 前缀匹配 | `http/` | `http/` |
+| sanitize | 保留末尾 `/*`，丢弃其他 `*` | 不涉及 |
 
 ### 原因
 
-UI 桥接是直接 JS_Eval 发到 JS bus，不经过 C bus。非 UI 事件先走 C bus，再由 JS 桥接转发到 JS bus。两条路径不同，不能混为一套。
+bus subscribe 的 `/*` 是路径匹配规则。白名单是前缀匹配，`*` 单独出现表示"全部"，不需要路径语义。
+
+---
+
+## 决策 11：去掉冗余变量时保留核心逻辑
+
+### 教训
+
+用户要求去掉 `kwcc_js_init_bus_whitelist` + `g_js_bus_whitelist` 数组时，不应连带删掉逗号分隔的白名单解析逻辑。改动前必须分析完整函数职责。
+
+---
+
+## 决策 12：两套 Bus，独立运行
+
+UI 桥接（直接 JS_Eval）和 bus（subscriber 链表）是两条独立路径，最终都到 `$bus.emit`。topic 命名不需要强制区分来源。

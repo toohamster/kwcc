@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "mquickjs/mquickjs.h"
+#include "kwcc_base.h"
 #include "llog.h"
 #include "kwcc_ui_bus.h"
 
@@ -31,9 +32,15 @@ void kwcc_ui_bus_begin_frame(void) {
 /* ── Bind: register ID → topic mapping ─────────────────────── */
 
 void kwcc_ui_bus_bind_topic(int id, const char *topic) {
-    if (g_kwcc_ui_topic_count < KWCC_UI_TOPIC_MAP_SIZE && topic) {
+    char safe[256];
+    kwcc_base_topic_sanitize(safe, sizeof(safe), topic);
+    if (!kwcc_base_topic_check(safe)) {
+        log_warn("ui_bus: bind_topic skipped, invalid topic: '%s'", topic);
+        return;
+    }
+    if (g_kwcc_ui_topic_count < KWCC_UI_TOPIC_MAP_SIZE) {
         g_kwcc_ui_topic_map[g_kwcc_ui_topic_count].id = id;
-        strncpy(g_kwcc_ui_topic_map[g_kwcc_ui_topic_count].topic, topic, 127);
+        strncpy(g_kwcc_ui_topic_map[g_kwcc_ui_topic_count].topic, safe, 127);
         g_kwcc_ui_topic_map[g_kwcc_ui_topic_count].topic[127] = '\0';
         g_kwcc_ui_topic_count++;
     }
@@ -43,10 +50,18 @@ void kwcc_ui_bus_bind_topic(int id, const char *topic) {
 
 void kwcc_ui_bus_dispatch_event(const char *topic, const char *action) {
     if (!g_kwcc_ui_bus_js_ctx || !topic) return;
+
+    char safe[256];
+    kwcc_base_topic_sanitize(safe, sizeof(safe), topic);
+    if (!kwcc_base_topic_check(safe)) {
+        log_warn("ui_bus: dispatch skipped, invalid topic: '%s'", topic);
+        return;
+    }
+
     char t[256], a[128], buf[512];
     int tj = 0;
-    for (int i = 0; topic[i] && tj < 254; i++) {
-        char c = topic[i];
+    for (int i = 0; safe[i] && tj < 254; i++) {
+        char c = safe[i];
         if (c == '\\' || c == '\'') t[tj++] = '\\';
         t[tj++] = c;
     }

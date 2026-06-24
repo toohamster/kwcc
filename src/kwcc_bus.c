@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "kwcc_bus.h"
+#include "kwcc_base.h"
 #include "llog.h"
 
 /* ── Callback entry within a topic group ── */
@@ -39,9 +40,9 @@ static uint64_t          g_kwcc_bus_next_id = 1;
 
 /* ── Match: exact / wildcard "*" / prefix (ends with '/') ── */
 
-static int match(const char *pattern, const char *topic) {
+static int kwcc_bus_match_topic(const char *pattern, const char *topic) {
     if (strcmp(pattern, topic) == 0) return 1;
-    if (strcmp(pattern, "*") == 0) return 1;
+    if (strcmp(pattern, KWCC_BUS_WILDCARD) == 0) return 1;
     size_t plen = strlen(pattern);
     if (plen > 0 && pattern[plen - 1] == '/' && strncmp(pattern, topic, plen) == 0)
         return 1;
@@ -60,10 +61,17 @@ void kwcc_bus_init(void) {
 kwcc_bus_sub_id_t kwcc_bus_subscribe(const char *topic, kwcc_bus_cb_t cb, void *user_data) {
     if (!topic || !cb) return 0;
 
+    char safe[256];
+    kwcc_base_topic_sanitize(safe, sizeof(safe), topic);
+    if (!kwcc_base_topic_check(safe)) {
+        log_warn("bus: subscribe skipped, invalid topic: '%s'", topic);
+        return 0;
+    }
+
     /* Find existing group */
     kwcc_bus_group_t *grp = g_kwcc_bus_head;
     while (grp) {
-        if (strcmp(grp->topic, topic) == 0) break;
+        if (strcmp(grp->topic, safe) == 0) break;
         grp = grp->next;
     }
 
@@ -71,7 +79,7 @@ kwcc_bus_sub_id_t kwcc_bus_subscribe(const char *topic, kwcc_bus_cb_t cb, void *
     if (!grp) {
         grp = calloc(1, sizeof(*grp));
         if (!grp) { log_error("bus: calloc failed"); return 0; }
-        grp->topic = strdup(topic);
+        grp->topic = strdup(safe);
         grp->next = g_kwcc_bus_head;
         g_kwcc_bus_head = grp;
     }
@@ -111,11 +119,18 @@ void kwcc_bus_unsubscribe(kwcc_bus_sub_id_t id) {
 void kwcc_bus_publish(const char *topic, const void *data, size_t len) {
     if (!topic) return;
 
+    char safe[256];
+    kwcc_base_topic_sanitize(safe, sizeof(safe), topic);
+    if (!kwcc_base_topic_check(safe)) {
+        log_warn("bus: publish skipped, invalid topic: '%s'", topic);
+        return;
+    }
+
     for (kwcc_bus_group_t *grp = g_kwcc_bus_head; grp; grp = grp->next) {
-        if (!match(grp->topic, topic)) continue;
+        if (!kwcc_bus_match_topic(grp->topic, safe)) continue;
         for (int i = 0; i < KWCC_BUS_GROUP_MAX_CB; i++) {
             if (grp->callbacks[i].in_use) {
-                grp->callbacks[i].cb(topic, data, len, grp->callbacks[i].user_data);
+                grp->callbacks[i].cb(safe, data, len, grp->callbacks[i].user_data);
             }
         }
     }

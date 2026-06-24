@@ -7,16 +7,16 @@
 
 ## 实施总览
 
-按方案分 6 步实施。每步完成后验证编译通过。
+按方案分 7 步实施。每步完成后验证编译通过。
 
 | Step | 内容 | 新增/修改文件 | 依赖 |
 |------|------|--------------|------|
 | 1 | 新建 `kwcc_ui_bus.h/c` | `src/kwcc_ui_bus.h`, `src/kwcc_ui_bus.c` | 无 |
-| 2 | 重写 `kwcc_bus.h/c` | `src/kwcc_bus.h`, `src/kwcc_bus.c` | 无 |
-| 3 | bus 纯 C 测试 | `tests/test_bus.c` | Step 2 |
-| 4 | kwcc_js.c 加入 bus consumer | `src/kwcc_js.c` | Step 2 |
-| 5 | 替换调用点 | `src/kwcc_ui.c`, `src/main.m` | Step 1 |
-| 6 | 编译验证 | — | Step 1-5 |
+| 2 | 新建 `kwcc_base.h/c` | `src/kwcc_base.h`, `src/kwcc_base.c` | 无 |
+| 3 | 重写 `kwcc_bus.h/c` | `src/kwcc_bus.h`, `src/kwcc_bus.c` | Step 2 |
+| 4 | bus 纯 C 测试 | `tests/test_bus.c` | Step 3 |
+| 5 | kwcc_js.c 加白名单 + bus consumer | `src/kwcc_js.c` | Step 2, 3 |
+| 6 | 编译验证 | `Makefile` | Step 1-5 |
 | 7 | 运行时验证 | — | Step 6 |
 
 ---
@@ -41,173 +41,124 @@ void kwcc_ui_bus_dispatch_event(const char *topic, const char *action);
 
 ### `src/kwcc_ui_bus.c`
 
-- 从 `kwcc_bus.c` 搬入 topic map（`g_kwcc_ui_topic_map`）
+- 从 `kwcc_bus.c` 搬入 topic map
 - 实现 `kwcc_ui_bus_begin_frame` / `kwcc_ui_bus_bind_topic` / `kwcc_ui_bus_dispatch_event`
-- JSContext 通过 `kwcc_ui_bus_set_js_ctx` 设置
+- 入口加 `kwcc_base_topic_sanitize` + `kwcc_base_topic_check`
 
-**验证**：`make` 编译通过（旧 `kwcc_bus.c` 还在，不影响）
+**验证**：`make` 编译通过
 
 ---
 
-## Step 2: 重写 `kwcc_bus.h/c`
+## Step 2: 新建 `kwcc_base.h/c`
 
-**目的**：将 `kwcc_bus.c` 重写为纯 C Pub/Sub，零 mquickjs 依赖。
+**目的**：topic 清洗 + 校验工具函数。
+
+### `src/kwcc_base.h`
+
+```c
+void kwcc_base_topic_sanitize(char *out, size_t out_size, const char *in);
+int  kwcc_base_topic_check(const char *topic);
+```
+
+### `src/kwcc_base.c`
+
+- `kwcc_base_topic_sanitize`：只保留 `A-Z a-z 0-9 / _`，末尾 `/*` 通配符保留
+- `kwcc_base_topic_check`：拒绝空字符串、全是 `/` 的 topic
+
+**验证**：`make` 编译通过
+
+---
+
+## Step 3: 重写 `kwcc_bus.h/c`
+
+**目的**：纯 C Pub/Sub，零 mquickjs 依赖。
 
 ### `src/kwcc_bus.h`
 
 ```c
-#ifndef KWCC_BUS_H
-#define KWCC_BUS_H
-
-#include <stddef.h>
+#define KWCC_BUS_WILDCARD "/*"
 
 typedef uint64_t kwcc_bus_sub_id_t;
-typedef void (*kwcc_bus_cb_t)(const char *topic, const void *data,
-                               size_t len, void *user_data);
+typedef void (*kwcc_bus_cb_t)(const char *topic, const void *data, size_t len, void *user_data);
 
 void              kwcc_bus_init(void);
 kwcc_bus_sub_id_t kwcc_bus_subscribe(const char *topic, kwcc_bus_cb_t cb, void *user_data);
 void              kwcc_bus_unsubscribe(kwcc_bus_sub_id_t id);
 void              kwcc_bus_publish(const char *topic, const void *data, size_t len);
-
-#endif
 ```
 
 ### `src/kwcc_bus.c`
 
-- 删除 `#include "mquickjs/mquickjs.h"`
-- 删除 topic map（已搬到 `kwcc_ui_bus.c`）
-- 删除 `kwcc_dispatch_event` / `kwcc_bind_topic` / `kwcc_bus_begin_frame`
-- 实现 topic 组链表：
-  - `kwcc_bus_group_t` — 每个节点是一个 topic 组
-  - `kwcc_bus_cb_entry_t[16]` — 组内回调数组
-  - `kwcc_bus_subscribe` — 找/创建组，加回调
-  - `kwcc_bus_unsubscribe` — 找到 sub_id，标记 inactive
-  - `kwcc_bus_publish` — 遍历组，匹配 topic，触发回调
+- 删除 `#include "mquickjs/mquickjs.h"` 和旧 API
+- 实现 topic 组链表（`KWCC_BUS_GROUP_MAX_CB = 16`）
+- publish/subscribe 入口加 `kwcc_base_topic_sanitize` + `kwcc_base_topic_check`
+- 支持 `/*` 通配符匹配所有 topic
+- match 函数使用 `KWCC_BUS_WILDCARD` 常量
+- match 函数命名为 `kwcc_bus_match_topic`
 
 **验证**：`make` 编译通过
 
 ---
 
-## Step 3: bus 纯 C 测试
+## Step 4: bus 纯 C 测试
 
-**目的**：验证 bus 作为独立 C 基础设施的正确性，不依赖 JS/UI。
+**目的**：验证 bus 作为独立 C 基础设施的正确性。
 
 ### `tests/test_bus.c`
-
-测试点：
 
 | # | 测试 | 验证 |
 |---|------|------|
 | 1 | `kwcc_bus_init` 后 publish 不 crash | 空 bus 安全 |
 | 2 | subscribe + publish 单次回调 | 基本功能 |
-| 3 | 同一个 topic 多个 subscriber | 组内多回调 |
-| 4 | unsubscribe 后不再触发 | 取消有效 |
-| 5 | unsubscribe 不影响其他 subscriber | 隔离性 |
-| 6 | topic 精确匹配 | `match("a/b", "a/b")` |
-| 7 | topic 前缀匹配 | `match("http/", "http/end/req_1")` |
-| 8 | topic `*` 通配 | `match("*", "any/topic")` |
+| 3 | unsubscribe 后不再触发 | 取消有效 |
+| 4 | unsubscribe 不影响其他 subscriber | 隔离性 |
+| 5 | 同一个 topic 多个 subscriber 全触发 | 组内多回调 |
+| 6 | topic 精确匹配 | `"a/b"` 匹配 `"a/b"`，不匹配 `"a/b/extra"` |
+| 7 | topic 前缀匹配 | `"http/"` 匹配 `"http/end/req_1"` |
+| 8 | `/*` 通配匹配 | `"/*"` 匹配所有 topic |
 | 9 | publish 不匹配的 topic | 不应触发 |
-| 10 | 多个 topic 组，publish 只触发匹配的 | 组隔离 |
-| 11 | sub_id 唯一性 | 每个 subscribe 返回不同 ID |
-| 12 | unsubscribe 不存在的 ID | 不 crash |
+| 10 | sub_id 唯一性 | 每个 subscribe 返回不同 ID |
+| 11 | unsubscribe 不存在的 ID | 不 crash |
+| 12 | data passthrough | user_data 正确传递 |
+| 13 | topic sanitization `"net*work"` | → `"network"`（`*` 被丢弃） |
+| 14 | topic sanitization `"network/*"` | → `"network/*"`（末尾通配符保留） |
+| 15 | topic_check 拒绝空字符串 | 返回 0 |
+| 16 | topic_check 拒绝全是 `/` | `"///"` 返回 0 |
+| 17 | subscribe 无效 topic 返回 0 | 空 topic 不注册 |
+| 18 | group 满 16 个返回 0 | 同 topic 超 16 个 subscriber 失败 |
 
-```c
-/* 示例：test_bus.c */
-#include <stdio.h>
-#include <assert.h>
-#include "kwcc_bus.h"
-
-static int g_cb_count = 0;
-static void *g_cb_data = NULL;
-
-static void test_cb(const char *topic, const void *data, size_t len, void *user_data) {
-    g_cb_count++;
-    g_cb_data = user_data;
-}
-
-void test_subscribe_publish() {
-    kwcc_bus_init();
-    g_cb_count = 0;
-    kwcc_bus_sub_id_t id = kwcc_bus_subscribe("test/topic", test_cb, (void*)0x123);
-    assert(id > 0);
-    kwcc_bus_publish("test/topic", NULL, 0);
-    assert(g_cb_count == 1);
-    assert(g_cb_data == (void*)0x123);
-}
-
-void test_unsubscribe() {
-    g_cb_count = 0;
-    kwcc_bus_sub_id_t id = kwcc_bus_subscribe("test", test_cb, NULL);
-    kwcc_bus_unsubscribe(id);
-    kwcc_bus_publish("test", NULL, 0);
-    assert(g_cb_count == 0);
-}
-
-/* ... 其余测试 */
-
-int main() {
-    test_subscribe_publish();
-    printf("PASS: subscribe_publish\n");
-    test_unsubscribe();
-    printf("PASS: unsubscribe\n");
-    /* ... */
-    return 0;
-}
-```
-
-**验证**：`gcc tests/test_bus.c src/kwcc_bus.c -I. -o tests/test_bus && tests/test_bus` 全部通过
+**验证**：`gcc tests/test_bus.c src/kwcc_bus.c src/kwcc_base.c deps/log/log.c -I. -Ideps -D_GNU_SOURCE -o tests/bin/test_bus && tests/bin/test_bus` 全部通过
 
 ---
 
-## Step 4: kwcc_js.c 加入 bus consumer
+## Step 5: kwcc_js.c 加白名单 + bus consumer
 
-**目的**：JS 桥接层作为 bus consumer 订阅所有 C 事件。
+**目的**：JS 桥接层作为 bus consumer 订阅 C 事件，白名单控制转发。
 
 ### `src/kwcc_js.c` 改动
 
 ```c
-/* JS 桥接回调 — 收到 bus 事件后转发到 JS $bus */
-static void kwcc_js_on_bus_event(const char *topic, const void *data,
-                                  size_t len, void *user_data) {
-    JSContext *ctx = (JSContext *)user_data;
-    if (!ctx || !topic) return;
+/* 白名单匹配（逗号分隔前缀）*/
+static int match_whitelist(const char *whitelist, const char *topic);
 
-    char buf[512];
-    snprintf(buf, sizeof(buf), "$bus.emit('%s', '', new Object());", topic);
-    JS_Eval(ctx, buf, strlen(buf), "<bus>", JS_EVAL_REPL);
-}
-
-/* 在 kwcc_create_js() 中调用 */
-void kwcc_js_bus_init(JSContext *ctx) {
-    kwcc_bus_subscribe("*", kwcc_js_on_bus_event, ctx);
+/* bus 事件回调 */
+static void kwcc_js_on_bus_event(const char *topic, const void *data, size_t len, void *user_data) {
+    const char *whitelist = kwcc_config_get_core("bus/js_whitelist", "*");
+    if (whitelist[0] == '*' && whitelist[1] == '\0') {
+        /* * = 全部转发 */
+    } else if (whitelist[0] == '\0') {
+        return;  /* 空 = 不转发 */
+    } else if (!match_whitelist(whitelist, topic)) {
+        return;  /* 不在白名单内 */
+    }
+    /* 转发到 JS，action = "notify_c" */
 }
 ```
 
-**验证**：`make` 编译通过
-
----
-
-## Step 5: 替换调用点
-
-**目的**：所有旧 API 调用替换为新 API。
-
-### 改动点
-
-| 文件 | 旧调用 | 新调用 |
-|------|--------|--------|
-| `src/kwcc_ui.c` button handler | `kwcc_dispatch_event(ctx, topic, "click")` | `kwcc_ui_bus_dispatch_event(topic, "click")` |
-| `src/kwcc_ui.c` slider handler | `kwcc_dispatch_event(ctx, topic, "change")` | `kwcc_ui_bus_dispatch_event(topic, "change")` |
-| `src/kwcc_ui.c` window close | `kwcc_dispatch_event(ctx, title, "close")` | `kwcc_ui_bus_dispatch_event(title, "close")` |
-| `src/main.m` frame start | `kwcc_bus_begin_frame()` | `kwcc_ui_bus_begin_frame()` |
-| `src/main.m` init | — | `kwcc_ui_bus_set_js_ctx(g_js_ctx)` |
-| `src/main.m` init | — | `kwcc_bus_init()` + `kwcc_js_bus_init(g_js_ctx)` |
-
-### `src/kwcc.h` 更新
+### `kwcc_create_js()` 中调用
 
 ```c
-#include "kwcc_ui_bus.h"   /* 新增 */
-#include "kwcc_bus.h"      /* 保留，但 API 变了 */
+kwcc_bus_subscribe(KWCC_BUS_WILDCARD, kwcc_js_on_bus_event, ctx);
 ```
 
 **验证**：`make` 编译通过
@@ -220,7 +171,7 @@ void kwcc_js_bus_init(JSContext *ctx) {
 make clean && make
 ```
 
-必须通过，无警告。
+必须通过，无警告。Makefile 加 `kwcc_base.c`。
 
 ---
 
@@ -243,7 +194,6 @@ make run
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
-| `kwcc_bus.c` 重写遗漏旧函数引用 | 编译错误 | Step 2 完成后仔细检查 grep |
-| bus 测试不通过 | 核心功能有 bug | Step 3 先跑 C 测试，不依赖 JS |
-| JSContext 未正确传递给 UI bus | dispatch 无效 | Step 5 中 `kwcc_ui_bus_set_js_ctx` 必须在 `kwcc_create_js` 后调用 |
-| topic 组链表 match 逻辑错误 | 事件不触发 | Step 3 C 测试覆盖 match 逻辑，Step 7 运行时验证 |
+| topic sanitization 逻辑错误 | 合法 topic 被丢弃 | Step 4 测试覆盖 |
+| JSContext 未正确传递 | dispatch 无效 | `kwcc_ui_bus_set_js_ctx` 在 `kwcc_create_js` 后调用 |
+| 白名单配置不生效 | 事件不转发或全转发 | 测试默认 `*`、`""`、前缀三种模式 |

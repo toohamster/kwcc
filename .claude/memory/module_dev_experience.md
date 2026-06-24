@@ -86,3 +86,80 @@
 5. **`src/` 和 `deps/` 变更一律不重置**，先 `git diff` 确认
 6. **用代理机制**（`g_kwcc_js_cfun_handlers`）避免改 `mqjs_stdlib.c`
 7. **每次功能完成后更新测试记录**（`tests/TESTING_*.md`）
+
+### 沟通教训
+
+**回答不要敷衍，要让用户能看懂**
+- 用户说看不懂时，不要用更复杂的话重复解释
+- 要从用户角度出发，用简单的语言、具体的例子说明
+- 回答前先看全貌，不要只盯着局部
+
+**用户问题没结束前，不要写代码**
+- 讨论阶段只做分析，得到用户肯定后再编码
+- 用户的问题可能有多层，不要急着跳到实施
+
+---
+
+## Bus 重构（bus split）— 2026-06-24
+
+### 背景
+将 `kwcc_bus.c`（52 行，混杂 UI topic map + JS dispatch）拆分为三个独立模块：
+- `kwcc_ui_bus.c/h` — UI→JS 事件桥接
+- `kwcc_bus.c/h` — 通用 C Pub/Sub，零 mquickjs 依赖
+- `kwcc_base.h/c` — topic 清洗 + 校验工具
+7 步全部完成，19 个测试点全部通过。
+
+### 架构决策
+
+**`/*` 通配符是 topic group 的一种 pattern，不是独立机制**：
+- `/*` 存储在 topic group 链表中，和 `"calc/btn0"` 用同一个数据结构
+- `kwcc_bus_match_topic` 三种匹配：精确、`/*` 通配、`/` 前缀
+- 曾讨论把 `/*` 单独分离为 global_cbs 数组，但引入两套存储 + unsubscribe 归属问题，复杂度翻倍不可取
+
+**两套通配符约定，各用各的**：
+- bus subscribe：`/*` = 匹配所有 topic
+- JS 白名单：`*` = 全部转发，逗号分隔前缀列表 = 前缀匹配
+- 两者语义不同，不要混淆
+
+**JS 白名单不额外缓存**：
+- 每次 `kwcc_js_on_bus_event` 直接从 config 读 `bus/js_whitelist`
+- config 层本身有 mempool 缓存，再套一层是多余的
+
+**`KWCC_BUS_WILDCARD` 常量定义在 `kwcc_bus.h`**：
+- `kwcc_bus.c` 的 `kwcc_bus_match_topic` 用该常量
+- `kwcc_base.c` 的 `topic_check` 中 `strcmp(topic, "/*")` 保留硬编码 — 这是校验规则，不是通配符语义
+
+**`KWCC_BUS_GROUP_MAX_CB = 16` 未经论证**：
+- 写方案时拍脑袋选的数字，没有数据支撑
+- 当前实际使用每个 topic 只有 1-2 个 subscriber
+
+### 教训
+
+**1. static 函数也要遵守命名规范**
+- `match` 太泛，改为 `kwcc_bus_match_topic`
+- 主流开源项目（Linux kernel、Nginx、SQLite）static 和 non-static 用同一模块前缀
+- Redis 不加前缀，被认为是代码风格弱点
+
+**2. 命名规范写的时候就遵守**
+- 讨论时随手写 `g_global_cbs`，没有加 `kwcc_bus_` 前缀
+- `module_dev_experience.md` 已经记录过这条教训，又犯了
+
+**3. sanitize bug：`out[j] = '\0'` 写在了 `/*` 追加之前**
+- 导致 `/*` 被截断为空字符串
+- 修复：把 `out[j] = '\0'` 移到函数末尾
+
+**4. 不要提出"看似更优"但引入复杂度的方案**
+- 分离 `/*` 到 global_cbs 看似语义更清晰，但 unsubscribe 要遍历两边
+- 简单方案优于"更优雅"的方案
+
+### 技术细节
+
+**`kwcc_bus_match_topic(pattern, topic)` 三种匹配**：
+- 精确：`strcmp(pattern, topic) == 0`
+- 通配：`strcmp(pattern, KWCC_BUS_WILDCARD) == 0`，匹配所有
+- 前缀：pattern 以 `/` 结尾且 `strncmp(pattern, topic, plen) == 0`
+
+**topic 清洗规则**：
+- 只保留 `A-Z a-z 0-9 / _`
+- 末尾 `/*` 保留（通配符），其余 `*` 丢弃
+- 四个入口都加 sanitize + check：bus publish、bus subscribe、ui_bus dispatch、ui_bus bind_topic

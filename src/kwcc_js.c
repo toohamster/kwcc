@@ -16,21 +16,38 @@
 
 /* ── Bus consumer: forward C bus events to JS $bus ── */
 
-static void kwcc_js_on_bus_event(const char *topic, const void *data, size_t len, void *user_data) {
-    JSContext *ctx = (JSContext *)user_data;
-    if (!ctx || !topic) return;
-
-    char buf[512];
-    char safe_topic[256];
-    int tj = 0;
-    for (int i = 0; topic[i] && tj < 254; i++) {
-        char c = topic[i];
-        if (c == '\\' || c == '\'') safe_topic[tj++] = '\\';
-        safe_topic[tj++] = c;
+/* 白名单匹配（逗号分隔的前缀列表）*/
+static int match_whitelist(const char *whitelist, const char *topic) {
+    char buf[2048];
+    strncpy(buf, whitelist, sizeof(buf) - 1);
+    char *tok = strtok(buf, ",");
+    while (tok) {
+        size_t len = strlen(tok);
+        if (len > 0 && tok[len - 1] == '/') {
+            if (strncmp(topic, tok, len) == 0) return 1;
+        } else if (strcmp(topic, tok) == 0) {
+            return 1;
+        }
+        tok = strtok(NULL, ",");
     }
-    safe_topic[tj] = '\0';
+    return 0;
+}
 
-    snprintf(buf, sizeof(buf), "$bus.emit('%s', '', new Object());", safe_topic);
+static void kwcc_js_on_bus_event(const char *topic, const void *data, size_t len, void *user_data) {
+    const char *whitelist = kwcc_config_get_core("bus/js_whitelist", "*");
+    if (whitelist[0] == '*' && whitelist[1] == '\0') {
+        /* * = 全部转发 */
+    } else if (whitelist[0] == '\0') {
+        return;  /* 空 = 不转发 */
+    } else if (!match_whitelist(whitelist, topic)) {
+        return;  /* 不在白名单内 */
+    }
+
+    JSContext *ctx = (JSContext *)user_data;
+    char buf[512];
+    char safe[256];
+    kwcc_base_topic_sanitize(safe, sizeof(safe), topic);
+    snprintf(buf, sizeof(buf), "$bus.emit('%s', 'notify_c', new Object());", safe);
     JS_Eval(ctx, buf, strlen(buf), "<bus>", JS_EVAL_REPL);
 }
 
@@ -44,7 +61,7 @@ JSContext *kwcc_create_js(void) {
         return NULL;
     }
     kwcc_register_config_js(ctx);
-    kwcc_bus_subscribe("*", kwcc_js_on_bus_event, ctx);
+    kwcc_bus_subscribe(KWCC_BUS_WILDCARD, kwcc_js_on_bus_event, ctx);
     return ctx;
 }
 
