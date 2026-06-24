@@ -1,12 +1,14 @@
 # requirements/ 目录方案状态汇总
 
-> 更新于 2026-06-22
+> 更新于 2026-06-24
 
 ## 已完成 ✅
 
 | 文件 | 状态 | 说明 |
 |------|------|------|
 | `mempool-design.md` | ✅ 全部完成 | Phase 1-7 全部完成，24/24 测试通过 |
+| `bus-split-design.md` | ✅ 全部完成 | 7 步全部完成，19/19 测试通过，kwcc_bus 拆分为纯 C Pub/Sub + UI 桥接 + JS 白名单 |
+| `bus-split-implementation-plan.md` | ✅ 全部完成 | 执行计划已全部实施 |
 | `extract-bus-module.md` | ✅ 已完成 | bus 模块已提取到 kwcc_bus.c/h |
 | `extract-ui-module.md` | ✅ 已完成 | UI/JS/config 模块已拆分 |
 | `naming-fix.md` | ✅ 已完成 | 命名规范整改已完成 |
@@ -19,10 +21,7 @@
 
 | 文件 | 状态 | 说明 |
 |------|------|------|
-| `bus-split-design.md` | ⏳ 待论证（优先级最高） | kwcc_bus 拆分为纯 C 事件总线 + JS 桥接层 |
-| `async-io-design.md` | ⏳ 待论证（依赖 bus 拆分） | 单线程异步 I/O + Promise，已合并为统一方案 |
-| `async-io-promise.md` | 📁 保留参考 | 旧方案，内容已合并到 async-io-design.md |
-| `async-io-implementation-plan.md` | 📁 保留参考 | 旧实施计划，内容已合并到 async-io-design.md |
+| `async-io-design.md` | ⏳ 待论证 | 单线程异步 I/O + Promise，bus 拆分已完成，可启动 |
 | `microui-id-override.md` | ⏳ 待论证 | microui ID 覆盖机制，优先级在 async-io 之后 |
 
 ## 已废弃 ❌
@@ -34,8 +33,13 @@
 | `store-data-flow.md` | ❌ 已废弃 | v1 版本，已被 v2 取代 |
 | `mquickjs-cfunc-registration.md` | ⚠️ 参考资料 | C 函数注册方案，作为技术参考保留 |
 
+## 代码清理 🧹
+
+| 操作 | 说明 |
+|------|------|
+| 删除 `src/kwcc_pool.h/c` | 旧版三层 Slab 内存池，已被 kwcc_mempool (L0-L7) 取代，无引用 |
+
 ## 下一步可以做
 
-1. **bus-split-design.md** — kwcc_bus 拆分（优先级最高，async-io 前置依赖）
-2. **async-io-design.md** — 异步 I/O + Promise（依赖 bus 拆分完成后实施）
-3. **microui-id-override.md** — 窗口 ID 覆盖机制（待论证）
+1. **async-io-design.md** — 异步 I/O + Promise（bus 拆分已完成，前置依赖已满足）
+2. **microui-id-override.md** — 窗口 ID 覆盖机制（待论证）
