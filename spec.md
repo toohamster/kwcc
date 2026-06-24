@@ -60,12 +60,14 @@
 │   └── mquickjs/    #   mquickjs 解释器核心 + 构建工具
 ├── src/             # 项目 C 源码
 │   ├── main.m       # Sokol 窗口生命周期与渲染主循环 (Objective-C)
-│   ├── kwcc_base.h  # 纯 C 基础设施（类型声明）
+│   ├── kwcc_base.h  # 纯 C 基础设施（内存池常量 + topic 清洗/校验声明）
+│   ├── kwcc_base.c  # topic 清洗 + 校验实现
 │   ├── kwcc_mempool.h/c # Slab 内存池：L0-L7 分层池、key_map、常量表、GC、TLV 序列化
 │   ├── kwcc_config.h/c  # Config 层：App/Core 域存取接口，自动拼 "a."/"c." 前缀
 │   ├── kwcc_ui.c/h  # UI 模块（g_mu、microui 桥接、input、SVG、字体、register_ui）
-│   ├── kwcc_js.c/h  # JS lifecycle + $config JS API + C handler 层 + 代理机制
-│   ├── kwcc_bus.c/h # C→JS 消息总线桥接（topic map + dispatch_event + bind_topic）
+│   ├── kwcc_js.c/h  # JS lifecycle + $config JS API + C handler 层 + 代理机制 + bus consumer + JS 白名单
+│   ├── kwcc_ui_bus.c/h # UI→JS 事件桥接（topic map + bind_topic + dispatch_event + begin_frame）
+│   ├── kwcc_bus.c/h # 通用 C Pub/Sub 事件总线（subscribe/publish/unsubscribe，零 mquickjs 依赖）
 │   ├── kwcc_io.c/h  # I/O Reactor（select() 非阻塞 FD 管理器）
 │   ├── kwcc.h       # 入口 umbrella header（聚合所有模块头文件）
 │   └── llog.h       # 日志包装器 (解决 macOS syslog.h 宏冲突)
@@ -157,7 +159,7 @@ loadJs("app/modules/examples/calc/calc_view.js"); // 注册视图
 
 **每帧渲染**：`onFrame()` 遍历所有已注册模块，自动调用 `ui.sync(key, visible)` + `render(state)`。
 
-**事件流**：用户操作 → microui → C 层全局回调 → `kwcc_bus.c` → `kwcc_dispatch_event` → `$bus.emit(topic, action, data)` → JS handler → `$store.dispatch(module, action, payload)` → state 更新 → 下一帧 `onFrame` 刷新。
+**事件流**：用户操作 → microui → C 层全局回调 → `kwcc_ui_bus.c` → `$bus.emit(topic, action, data)` → JS handler → `$store.dispatch(module, action, payload)` → state 更新 → 下一帧 `onFrame` 刷新。C bus 事件（如 I/O）通过 `kwcc_bus_publish` → JS consumer（白名单过滤）→ `$bus.emit(topic, 'notify_c', data)` → JS handler。
 
 **状态持久化**：`$loadedFiles` 记录 JS 文件加载次数，防止重复加载。`registerModule/View/Topic` 内部去重，防止重复注册。
 
@@ -171,7 +173,7 @@ loadJs("app/modules/examples/calc/calc_view.js"); // 注册视图
   - `#define NANOVG_GL3_IMPLEMENTATION`
 - **两阶段构建**:
   1. 编译 host tool (`mquickjs_build.c` + `mqjs_stdlib.c`) → 生成 `mqjs_stdlib.h`
-  2. 编译主二进制 (mquickjs.c + cutils.c + dtoa.c + libm.c + main.m + kwcc_mempool.c + kwcc_config.c + kwcc_ui.c + kwcc_js.c + kwcc_bus.c + kwcc_io.c)
+  2. 编译主二进制 (mquickjs.c + cutils.c + dtoa.c + libm.c + main.m + kwcc_mempool.c + kwcc_config.c + kwcc_ui.c + kwcc_js.c + kwcc_bus.c + kwcc_ui_bus.c + kwcc_base.c + kwcc_io.c)
 - **链接框架**:
   - `-framework Cocoa -framework OpenGL -framework IOKit -framework QuartzCore`
 - **静态集成**: 仅将核心 4 个 .c 文件编译进最终的可执行文件。
@@ -213,11 +215,14 @@ C→JS 消息总线桥接独立模块。
 ### 第十一步：Slab 内存池系统 ✅
 Phase 1-7 全部完成：L0-L7 分层池、key_map、常量表、GC、TLV 序列化、Config 层、$config JS API、代理机制、dump 功能。24/24 测试通过。
 
+### 第十二步：Bus 拆分重构 ✅
+kwcc_bus 拆分为三层：kwcc_bus（纯 C Pub/Sub）+ kwcc_ui_bus（UI→JS 桥接）+ kwcc_base（topic 清洗/校验）。JS 白名单 + `KWCC_BUS_WILDCARD` 常量 + `kwcc_bus_match_topic`。19/19 测试通过。
+
 ---
 
 ## 7. 测试体系
 
-- **纯 C 测试**：`tests/test_mempool.c`（46 测试）、`tests/test_config.c`（19 测试）
+- **纯 C 测试**：`tests/test_mempool.c`（46 测试）、`tests/test_config.c`（19 测试）、`tests/test_bus.c`（19 测试）
 - **C handler 测试**：`tests/test_config_js.c`（16 测试）
 - **JS 集成测试**：`tests/test_config_js.js`（14 测试）
 - **测试记录**：`tests/TESTING_MEMPOOL.md` — 24 个测试点全部通过

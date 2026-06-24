@@ -1,20 +1,23 @@
 # C 层完整架构状态
 
-> 基于多文件架构（`kwcc_mempool.c` + `kwcc_config.c` + `kwcc_ui.c` + `kwcc_js.c` + `kwcc_bus.c` + `kwcc_io.c`）
+> 基于多文件架构（`kwcc_mempool.c` + `kwcc_config.c` + `kwcc_ui.c` + `kwcc_js.c` + `kwcc_bus.c` + `kwcc_ui_bus.c` + `kwcc_base.c` + `kwcc_io.c`）
 
 ## 文件职责分布
 
 | 文件 | 职责 |
 |------|------|
-| `kwcc_base.h` | 纯 C 类型声明 |
+| `kwcc_base.h` | 纯 C 基础设施：内存池编译常量 + topic 清洗/校验声明 |
+| `kwcc_base.c` | topic 清洗（`kwcc_base_topic_sanitize`）+ 校验（`kwcc_base_topic_check`） |
 | `kwcc_mempool.h/c` | L0-L7 Slab 内存池：alloc/set/get/release/GC/key_map/常量表/TLV 序列化 |
 | `kwcc_config.h/c` | Config 层：get_core/get_app 前缀封装，C 业务模块读取接口 |
 | `kwcc_ui.c` | `g_kwcc_mu` + UI 桥接 + input + SVG + 字体 + js_ui_dispatch + register_ui |
 | `kwcc_ui.h` | UI 模块声明 + SVG cache extern |
-| `kwcc_js.c` | `kwcc_create/destroy_js` + stdlib stubs + kwcc_ui 桥接 |
+| `kwcc_ui_bus.c` | UI→JS 事件桥接：topic map + bind_topic + dispatch_event + begin_frame |
+| `kwcc_ui_bus.h` | UI 桥接声明（4 个 API） |
+| `kwcc_bus.c` | 通用 C Pub/Sub 事件总线：subscribe/publish/unsubscribe，零 mquickjs 依赖 |
+| `kwcc_bus.h` | 事件总线声明 + `KWCC_BUS_WILDCARD` 常量 |
+| `kwcc_js.c` | `kwcc_create/destroy_js` + stdlib stubs + kwcc_ui 桥接 + bus consumer + JS 白名单 |
 | `kwcc_js.h` | JS lifecycle + stubs 声明 |
-| `kwcc_bus.c` | C→JS 消息总线桥接：topic map + dispatch_event + bind_topic + frame 重置 |
-| `kwcc_bus.h` | 消息总线声明 |
 | `kwcc_io.c` | I/O Reactor：select() 非阻塞 FD 管理器 |
 | `kwcc_io.h` | I/O 管理器声明 |
 | `kwcc.h` | 入口 umbrella header（include 各模块头文件） |
@@ -58,11 +61,18 @@
 | `g_kwcc_ui_svg_cache_next` | `int` | SVG 缓存轮转指针 |
 | `g_kwcc_ui_frame_counter` | `int` | 帧计数器 |
 
+### kwcc_ui_bus.c
+| 变量 | 类型 | 用途 |
+|------|------|------|
+| `g_kwcc_ui_topic_map[256]` | struct { int id, topic[128] } | 每帧 ID→topic 映射 |
+| `g_kwcc_ui_topic_count` | `int` | topic map 计数 |
+| `g_kwcc_ui_bus_js_ctx` | `JSContext*` (static) | JS 上下文 |
+
 ### kwcc_bus.c
 | 变量 | 类型 | 用途 |
 |------|------|------|
-| `g_kwcc_bus_topic_map[256]` | struct { int id, topic[128] } | 每帧 ID→topic 映射 |
-| `g_kwcc_bus_topic_map_count` | `int` | topic map 计数 |
+| `g_kwcc_bus_head` | `kwcc_bus_group_t*` (static) | topic group 链表头 |
+| `g_kwcc_bus_next_id` | `uint64_t` (static) | 下一个 subscriber ID |
 
 ### kwcc_io.c
 | 变量 | 类型 | 用途 |
@@ -131,12 +141,28 @@
 | `kwcc_config_release_core(key)` | 自动拼 "c." 前缀 → mempool release |
 | `kwcc_config_set_max_pools(type, max)` | 转发到 mempool |
 
-### 事件系统（kwcc_bus.c）
+### Topic 工具（kwcc_base.c）
 | 函数 | 功能 |
 |------|------|
-| `kwcc_bind_topic(id, topic)` | 存入 g_kwcc_bus_topic_map |
-| `kwcc_dispatch_event(ctx, topic, action)` | JS_Eval 调用 `$bus.emit(topic, action, new Object())` |
-| `kwcc_bus_begin_frame()` | 每帧重置 g_kwcc_bus_topic_map_count = 0 |
+| `kwcc_base_topic_sanitize(out, out_size, in)` | 清洗 topic：只保留 A-Z a-z 0-9 / _，末尾 /* 保留 |
+| `kwcc_base_topic_check(topic)` | 校验 topic：拒绝空字符串、全是 / 的 topic |
+
+### UI→JS 桥接（kwcc_ui_bus.c）
+| 函数 | 功能 |
+|------|------|
+| `kwcc_ui_bus_set_js_ctx(ctx)` | 设置 JS 上下文 |
+| `kwcc_ui_bus_begin_frame()` | 每帧重置 topic map |
+| `kwcc_ui_bus_bind_topic(id, topic)` | 存入 ID→topic 映射，入口 sanitize + check |
+| `kwcc_ui_bus_dispatch_event(topic, action)` | JS_Eval 调用 `$bus.emit(topic, action, new Object())`，入口 sanitize + check |
+
+### C Pub/Sub 事件总线（kwcc_bus.c）
+| 函数 | 功能 |
+|------|------|
+| `kwcc_bus_init()` | 初始化 bus（清空链表 + 重置 ID） |
+| `kwcc_bus_subscribe(topic, cb, user_data)` | 订阅 topic，入口 sanitize + check，返回 sub_id |
+| `kwcc_bus_unsubscribe(id)` | 按 sub_id 取消订阅 |
+| `kwcc_bus_publish(topic, data, len)` | 发布事件，入口 sanitize + check，匹配触发回调 |
+| `kwcc_bus_match_topic(pattern, topic)` (static) | 匹配：精确 / `/*` 通配 / `/` 前缀 |
 
 ### I/O Reactor（kwcc_io.c）
 | 函数 | 功能 |
@@ -251,12 +277,15 @@ ui.svg(path_or_svg, x, y, w, h)
 
 1. **button dispatch action 固定为 "click"**：topic 已经唯一标识按钮，handler 不需要识别 action
 2. **slider 值用 static 变量**：避免局部地址陷阱（microui 用 &value 作为 ID）
-3. **topic map 每帧清零**：g_kwcc_bus_topic_map_count = 0 在 begin_frame 中，不保留跨帧数据
+3. **topic map 每帧清零**：g_kwcc_ui_topic_count = 0 在 ui_bus_begin_frame 中，不保留跨帧数据
 4. **deferred 机制已移除**：on_window_close 直接 dispatch，不再先存数组
 5. **on_window_close 收到的是 title 不是 topic**：dispatch 的 topic 参数是 title 字符串（待 v2 完成后修复）
 6. **Config 存储用 mempool 方案**：通过 kwcc_mempool_alloc/set/get/release 管理，config 层自动拼 "a."/"c." 前缀
 7. **ref_count 初始值为 1**：alloc 调用者隐式持有引用，必须显式 release 才能被 GC 回收
 8. **const 表匹配不占 slab chunk**：匹配到常量后 slot->data 指向常量区，slot->type=CONST
+9. **bus 拆分为三层**：kwcc_bus（纯 C Pub/Sub）+ kwcc_ui_bus（UI→JS 桥接）+ kwcc_base（topic 工具）
+10. **bus → JS 白名单**：`bus/js_whitelist` config 控制，`*`=全部、`""`=不转发、逗号前缀=前缀匹配
+11. **bus → JS action 固定 `notify_c`**：标识事件来自 C bus，区别于 UI 的 `click`/`change`
 
 ## JS 框架 API（main.js）
 
