@@ -1,7 +1,7 @@
 # 方案：单线程异步 I/O + Promise 链式调用
 
-> 状态：待论证
-> 优先级：继 ID 覆盖机制之后的下一项
+> 状态：待实施
+> 前置依赖：bus 拆分已完成（✅），可启动
 > 创建于 2026-06-22
 > 合并自 `async-io-promise.md` + `async-io-implementation-plan.md`
 
@@ -93,7 +93,7 @@ fork 独立 `kwcc_curl` 子进程，建立非阻塞 pipe，构造 curl 参数，
 ```
 kwcc_http.c 依赖：
 ├── kwcc_io.c/h   — FD 管理（select + 非阻塞 read）
-├── kwcc_bus.c/h  — 事件发射（NORMAL + LIGHT 双模式，零业务耦合）
+├── kwcc_bus.c/h  — 事件发射（kwcc_bus_publish，零业务耦合）
 ├── picohttpparser — HTTP 响应解析
 └── libc（malloc/free/fork/exec/waitpid）
 
@@ -105,7 +105,7 @@ kwcc_http.c 不依赖：
 
 这保证了：
 1. **独立编译**：`kwcc_http.o` 不链接任何 JS 相关代码
-2. **独立测试**：可写纯 C 测试 mock `kwcc_bus_emit` 回调，验证 HTTP 解析逻辑
+2. **独立测试**：可写纯 C 测试 mock `kwcc_bus_publish` 回调，验证 HTTP 解析逻辑
 3. **可替换**：未来 `kwcc_curl` 可替换为自研 socket 实现，接口不变
 
 ### 配置管理
@@ -197,21 +197,6 @@ void        kwcc_http_set_config(const char *key, const char *value);  /* 可选
 - 返回 `-2`：数据不完整，继续累积
 - 返回 `-1`：HTTP 协议错误
 - 返回 `> 0`：header 解析成功，返回值 = body 起始偏移
-
-### 配置管理
-
-C 层默认值，不依赖外部 config 系统：
-```c
-static const char *g_kwcc_http_bin_path = "curl";
-static const char *g_kwcc_http_parser_mode = "raw";  /* "raw" or "body" */
-static int g_kwcc_http_timeout = 30;
-```
-
-JS 侧可选通过 `$config` 覆盖：
-```javascript
-$config.coreSetTlv("http/bin_path", "/usr/local/bin/curl");
-$config.coreSetTlv("http/timeout", "60");
-```
 
 ### kwcc_http_request() 流程
 
@@ -310,7 +295,7 @@ static void kwcc_http_dispatch_end(kwcc_http_req_t *req, int error,
     char topic[64];
     snprintf(topic, sizeof(topic), error ? "http/error/%s" : "http/end/%s", req->req_id);
 
-    kwcc_bus_emit(topic, NULL, 0);  /* JS 桥接层收到 topic 后，从回调注册表查找对应 handler */
+    kwcc_bus_publish(topic, NULL, 0);  /* JS 桥接层收到 topic 后，从回调注册表查找对应 handler */
 }
 ```
 
@@ -318,7 +303,7 @@ static void kwcc_http_dispatch_end(kwcc_http_req_t *req, int error,
 - `http/end/<req_id>` — 每个请求的响应走独立 topic
 - `http/progress/<req_id>` — 每个请求的进度走独立 topic
 - JS 桥接层收到 `http/end/req_1` 后，从 req_id 回调注册表取出对应 resolve/reject
-- `*` 通配仍可收所有事件：`kwcc_bus_subscribe("*", log_all)`
+- `/*` 通配仍可收所有事件：`kwcc_bus_subscribe(KWCC_BUS_WILDCARD, log_all)`
 
 ### JS→C 通信：代理机制
 
@@ -365,7 +350,7 @@ static void kwcc_http_cleanup(kwcc_http_req_t *req) {
 ```c
 char topic[64];
 snprintf(topic, sizeof(topic), "http/progress/%s", req->req_id);
-kwcc_bus_emit(topic, NULL, 0);
+kwcc_bus_publish(topic, NULL, 0);
 ```
 
 60fps 下每秒最多 60 次 dispatch，JS 桥接层收到 topic 后从 req_id 回调注册表路由到对应 handler。
@@ -403,7 +388,7 @@ static void frame(void) {
 $http.request(url, options)            // 发起 HTTP 请求，返回 Promise
 $http.cancel(reqId)                     // 取消请求
 $http.config(key, value)                // 设置配置项
-$http.state = { activeRequests: 0 }    // 运行状态
+$http.state = { activeRequests: 0 };    // 运行状态
 ```
 
 **注意**：`$http.request` 不再需要 reqId 参数，req_id 由 C 侧 kwcc_http 生成并返回。
@@ -436,7 +421,7 @@ void kwcc_register_http_js(JSContext *ctx) {
         "$http.config = function(key, value) {\n"
         "    kwcc_js_mquickjs_call('_http_config', key, value);\n"
         "};\n"
-        "$http.state = { activeRequests: 0 };\n"
+        "$http.state = { activeRequests: 0 };;\n"
     ;
     JS_Eval(ctx, code, strlen(code), "<http>", JS_EVAL_REPL);
 
@@ -517,7 +502,7 @@ $http._fetchAsync = function(method, url, headers, body, onProgress) {
         /* C handler 返回生成的 req_id */
         var reqId = kwcc_js_mquickjs_call("_http_request", method, url, headers, body);
 
-        /* C 侧通过 kwcc_bus_emit("http/end/<reqId>", ...) 发射事件 */
+        /* C 侧通过 kwcc_bus_publish("http/end/<reqId>", ...) 发射事件 */
         /* JS 桥接层收到后，从 req_id 回调注册表中取出对应 resolve/reject */
 
         var onEnd = function(action, data) {
@@ -548,7 +533,6 @@ $http._fetchAsync = function(method, url, headers, body, onProgress) {
     });
 };
 ```
-```
 
 **C 侧 req_id 回调注册表**（在 `kwcc_js.c` 中维护）：
 
@@ -574,7 +558,7 @@ void kwcc_js_http_on_bus_event(const char *topic, const void *data, size_t len);
 /* kwcc_http_cleanup 中发射超时/取消事件 */
 char topic[64];
 snprintf(topic, sizeof(topic), "http/cancel/%s", req->req_id);
-kwcc_bus_emit(topic, NULL, 0);  /* JS 桥接收到后清理 map 条目 */
+kwcc_bus_publish(topic, NULL, 0);  /* JS 桥接收到后清理 map 条目 */
 ```
 
 当 bus 发射 `http/end/req_1` 时，JS 桥接层从 topic 中提取 req_id，查注册表，调用对应的 resolve callback。收到 `http/cancel/req_1` 或 `http/timeout/req_1` 时同样清理 map 条目并 reject Promise。
@@ -650,21 +634,22 @@ curl 自带 `--max-time` 参数，C 层不需要额外处理。
 
 ---
 
-## 前置依赖：kwcc_bus 拆分
+## 前置依赖：kwcc_bus 拆分 ✅ 已完成
 
-在实施 Step 3 之前，需要先完成 `kwcc_bus` 的拆分（详见 `requirements/bus-split-design.md`）：
+`kwcc_bus` 拆分已完成（详见 `requirements/bus-split-design.md`），当前架构：
 
-1. **kwcc_bus.c 重写为 topic 属性 map + NORMAL 链表** — `kwcc_bus_register_topic/subscribe/unsubscribe/emit`，零业务耦合
-2. **topic map 移到 kwcc_ui.c** — microui 专用，不再在 bus 中
-3. **kwcc_js.c 新增 `kwcc_js_on_bus_event`** — 作为 bus consumer 注册回调，不耦合到 bus
-4. **现有调用点替换** — `kwcc_dispatch_event` → `kwcc_bus_emit`
+- **kwcc_bus.c/h** — 通用 C Pub/Sub 事件总线（`kwcc_bus_subscribe`/`kwcc_bus_publish`/`kwcc_bus_unsubscribe`），零 mquickjs 依赖
+- **kwcc_ui_bus.c/h** — UI→JS 事件桥接（topic map + dispatch_event）
+- **kwcc_base.h/c** — topic 清洗 + 校验
 
-**Topic 规范**（详见 bus-split-design.md）：
-- C bus topic：`ui/calc/btn0`, `http/end/req_1`（LIGHT / NORMAL）
-- JS bus topic：JS 侧独立，通过桥接层连通
-- 匹配规则：精确 / `*` 通配 / 前缀匹配
+HTTP 模块作为 bus consumer，通过 `kwcc_bus_publish` 发射事件，JS 桥接层通过白名单过滤后转发到 JS。
 
-完成后再实施 Step 3（HTTP Process Engine）。
+**Topic 匹配规则**：
+- 精确：`strcmp(pattern, topic) == 0`
+- 通配：`KWCC_BUS_WILDCARD`（`/*`）匹配所有
+- 前缀：pattern 以 `/` 结尾且 `strncmp` 匹配
+
+HTTP 的动态 topic（`http/end/req_1`、`http/progress/req_1`）自然匹配 `http/` 前缀订阅。
 
 ---
 
