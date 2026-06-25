@@ -1,6 +1,6 @@
 # requirements/ 目录方案状态汇总
 
-> 更新于 2026-06-24
+> 更新于 2026-06-25
 
 ## 开发时间线
 
@@ -20,6 +20,7 @@
 | 12 | `bus-split-design.md` | ✅ 全部完成 | 从 extract-bus-module 演进，拆分为三层 | 19/19 |
 | 13 | `bus-split-implementation-plan.md` | ✅ 全部完成 | — | — |
 | 14 | `async-io-design.md` | ⏳ 待实施 | 依赖 bus-split，已解除 | — |
+| 14b | `async-io-implementation-plan.md` | ⏳ 待实施 | — | — |
 | 15 | `microui-id-override.md` | ⏳ 待论证 | — | — |
 | 16 | `mquickjs-cfunc-registration.md` | ⚠️ 参考 | C 函数注册技术参考 | — |
 

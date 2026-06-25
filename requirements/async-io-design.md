@@ -142,6 +142,9 @@ kwcc_mempool_release(req->response_slot);
 - 自动 GC 回收，不需要手动 `free`
 - 统一内存管理，可 dump / 统计
 - key = `req_id`，方便按请求追踪
+
+### 数据结构
+
 ```c
 #define KWCC_HTTP_MAX_REQS 8
 #define KWCC_HTTP_INIT_CAP 4096  // 初始缓冲 4KB，按需 realloc
@@ -238,6 +241,7 @@ static void kwcc_http_on_read(int fd, void *user_data) {
         if (req->response_len + n + 4 > req->response_cap) {
             req->response_cap = (req->response_len + n + 4) * 2;
             req->response_buf = realloc(req->response_buf, req->response_cap);
+            if (!req->response_buf) { /* alloc failure, abort request */ kwcc_http_cleanup(req); return; }
         }
         memcpy(req->response_buf + req->response_len, buf, n);
         req->response_len += n;
@@ -330,11 +334,11 @@ JSValue kwcc_js_http_cancel(JSContext *ctx, JSValue *this_val, int argc, JSValue
 
 ```c
 static void kwcc_http_cleanup(kwcc_http_req_t *req) {
+    kwcc_io_unregister(req->pipe_read_fd);
     if (req->pipe_read_fd >= 0) {
         close(req->pipe_read_fd);
         req->pipe_read_fd = -1;
     }
-    kwcc_io_unregister(req->pipe_read_fd);
     waitpid(req->pid, NULL, WNOHANG);  /* 非阻塞收割，防僵尸进程 */
     free(req->response_buf);
     free(req->body);
@@ -402,7 +406,7 @@ $http.state = { activeRequests: 0 };    // 运行状态
 void kwcc_register_http_js(JSContext *ctx) {
     const char *code =
         "var $http = new Object();\n"
-        "$http.request = function(reqId, url, options) {\n"
+        "$http.request = function(url, options) {\n"
         "    var method = 'GET';\n"
         "    var headers = [];\n"
         "    var body = '';\n"
@@ -413,7 +417,7 @@ void kwcc_register_http_js(JSContext *ctx) {
         "        if (options.body) body = options.body;\n"
         "        if (options.onProgress) onProgress = options.onProgress;\n"
         "    }\n"
-        "    return $http._fetchAsync(reqId, method, url, headers, body, onProgress);\n"
+        "    return $http._fetchAsync(method, url, headers, body, onProgress);\n"
         "};\n"
         "$http.cancel = function(reqId) {\n"
         "    kwcc_js_mquickjs_call('_http_cancel', reqId);\n"
@@ -421,7 +425,7 @@ void kwcc_register_http_js(JSContext *ctx) {
         "$http.config = function(key, value) {\n"
         "    kwcc_js_mquickjs_call('_http_config', key, value);\n"
         "};\n"
-        "$http.state = { activeRequests: 0 };;\n"
+        "$http.state = { activeRequests: 0 };\n"
     ;
     JS_Eval(ctx, code, strlen(code), "<http>", JS_EVAL_REPL);
 
@@ -689,11 +693,11 @@ HTTP 的动态 topic（`http/end/req_1`、`http/progress/req_1`）自然匹配 `
 
 新建 `app/runtime/http.js`，包含 MiniPromise 实现和 `$http` 对象。`app/main.js` 加载。
 
-**ES5 语法约束**：
+**ES5 语法约束**：详见 [mquickjs ES5 语法支持](../.claude/memory/mquickjs_es5.md)，关键点：
 - 只用 `var`，不用 `let/const`
 - 只用 `function() {}`，不用箭头函数
-- 用 `new Object()` 代替 `{}` 在语句开头
 - 不用 `...rest` 参数
+- `{}` 在语句开头用 `new Object()` 代替
 
 ---
 
