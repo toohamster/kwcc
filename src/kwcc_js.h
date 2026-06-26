@@ -39,6 +39,11 @@ JSValue kwcc_js_config_set_max_pools(JSContext *ctx, JSValue *this_val, int argc
 JSValue kwcc_js_mempool_dump_stats(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue kwcc_js_mempool_dump_all(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 
+/* $http JS API */
+void kwcc_register_http_js(JSContext *ctx);
+JSValue kwcc_js_http_request(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue kwcc_js_http_cancel(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+
 /* Proxy: dynamic handler dispatch (avoids modifying mqjs_stdlib.c) */
 JSValue kwcc_js_mquickjs_call(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 

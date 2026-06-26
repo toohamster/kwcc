@@ -174,7 +174,9 @@ static void init(void) {
     }
 
     kwcc_mempool_init();       /* 0. memory pool */
-    g_js_ctx = kwcc_create_js();    /* 1. JSContext + config init */
+    kwcc_io_init();            /* 1. I/O reactor */
+    kwcc_http_init();          /* 2. HTTP process engine */
+    g_js_ctx = kwcc_create_js();    /* 3. JSContext + config init */
     kwcc_ui_bus_set_js_ctx(g_js_ctx);  /* set JSContext for UI bus */
     kwcc_ui_init();               /* 2. microui text callbacks */
     kwcc_register_ui(g_js_ctx);     /* 3. UI methods */
@@ -188,7 +190,11 @@ static void frame(void) {
     int w = sapp_width();
     int h = sapp_height();
 
-    /* Each frame: just call onFrame() for rendering */
+    /* 1. I/O reactor polling (non-blocking) */
+    kwcc_io_poll_once();
+    kwcc_http_check_progress();
+
+    /* 2. JS processing + microui rendering */
     kwcc_process_js(g_js_ctx, "onFrame();");
 
     sg_begin_pass(&(sg_pass){

@@ -10,5 +10,6 @@
 #include "kwcc_ui.h"
 #include "kwcc_js.h"
 #include "kwcc_io.h"
+#include "kwcc_http.h"
 
 #endif
