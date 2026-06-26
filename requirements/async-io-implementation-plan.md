@@ -2,12 +2,64 @@
 
 > 基于 `requirements/async-io-design.md` 方案
 > 创建于 2026-06-25
+> 修订于 2026-06-26：架构修正（模块拆分 + 职责归位 + API 简化）
 
 ---
 
 ## Context
 
 kwcc 缺乏网络请求能力，需要引入异步 HTTP 支持。方案设计已完成（4 层架构），Layer 1（I/O Reactor）和前置依赖（bus 拆分）已完成。本计划覆盖 Layer 2-4 的实施。
+
+---
+
+## 修订记录（2026-06-26）
+
+实施过程中发现架构问题，经讨论确认后修正：
+
+### 问题 1：回调注册表职责错位
+
+`g_kwcc_http_cbs`（JSValue 回调注册表）放在了 `kwcc_http.c/h`，但它是 JS 桥接层的业务（存的是 resolve/reject JSValue），不属于 HTTP 服务职责。HTTP 服务只管请求/响应/进度/发布 bus 消息。
+
+**修正**：回调注册表移到 `kwcc_js_http.c`，`kwcc_http.h` 删除 `kwcc_http_register_callback/find_callback/clear_callback` 三个 API。
+
+### 问题 2：bus 事件路由过于庞大
+
+`kwcc_js_on_bus_event` 混了白名单过滤 + HTTP end/error + HTTP progress + HTTP cancel + 默认 `$bus.emit` 转发，后续加功能只会更膨胀。
+
+**修正**：按 topic 前缀分发，每个模块一个独立函数。HTTP 事件抽到 `kwcc_js_on_http_event`，后续新模块遵循同样规则。
+
+### 问题 3：HTTP JS 桥接代码和核心 JS 桥接代码混在一起
+
+`kwcc_js.c` 700+ 行，HTTP 相关代码独立性强，和 config/TLV/bus 白名单没有交互。
+
+**修正**：拆出 `kwcc_js_http.c/h`，`kwcc_js.c` 保留核心职责（JS 生命周期 + bus 消费者总入口 + 代理表 + config/TLV handler）。
+
+### 问题 4：命名不规范
+
+`match_whitelist` 没有模块前缀。
+
+**修正**：改名 `kwcc_js_match_whitelist`。回调注册表命名 `g_kwcc_js_http_cbs`（`kwcc_js_http_` 前缀）。
+
+### 问题 5：JS API 设计不满足需求
+
+原方案有 `_fetchAsync`/`_addCallback`/`_removeCallback` 等内部方法，命名丑陋且暴露给 JS 端。`$http.request` C 桥接和 JS 高层同名导致覆盖冲突。
+
+**修正**：JS API 重新设计：
+- `$http.fetch(url, options)` — 返回 MiniPromise（模拟 web fetch）
+- `$http.cancel(reqId)` — 取消请求
+- `$http.config(key, value)` — 设置配置
+- 不暴露 `_fetchAsync`/`_addCallback`/`_removeCallback`，回调路由全在 C 侧完成
+- C 桥接用全局函数 `kwcc_js_mquickjs_call('kwcc_js_http_request', ...)` 而不挂在 `$http` 上
+- HTTP 响应数据通过 `$store.dispatch` 更新 state，不直接操作 UI（遵循 store 流）
+
+### 问题 6：http/progress 未实现
+
+`kwcc_http_check_progress` 已发布 bus 事件但 JS 端未路由。需要增量解析 header 拿 `Content-Length` 才能提供 loaded/total。
+
+**修正**：
+- `kwcc_http_on_read` 改为增量解析 header：收到数据后先尝试 `phr_parse_response`，解析成功则提取 `Content-Length` 存到 `req->total_size`
+- progress bus data 传 `{loaded, total}` 结构体
+- `kwcc_js_on_http_event` 实现 progress 路由
 
 ---
 
@@ -20,11 +72,11 @@ kwcc 缺乏网络请求能力，需要引入异步 HTTP 支持。方案设计已
 | 1 | kwcc_http.h 头文件 | `src/kwcc_http.h` | 无 |
 | 2 | kwcc_http.c 核心实现 | `src/kwcc_http.c` | Step 1 |
 | 3 | kwcc_http 纯 C 测试 | `tests/test_http.c` | Step 2 |
-| 4 | C binding + 代理表注册 | `src/kwcc_js.c` | Step 2 |
+| 4 | C binding + 代理表注册 | `src/kwcc_js_http.c/h`, `src/kwcc_js.c` | Step 2 |
 | 5 | Frame Hook + init | `src/main.m` | Step 4 |
 | 6 | Makefile 更新 | `Makefile` | Step 1-5 |
 | 7 | 编译验证 | — | Step 6 |
-| 8 | JS $http 对象 + MiniPromise | `app/runtime/http.js`, `app/main.js` | Step 7 |
+| 8 | JS $http.fetch + MiniPromise | `app/runtime/http.js`, `app/main.js` | Step 7 |
 
 ---
 
@@ -101,10 +153,11 @@ static int g_kwcc_http_next_seq = 0;
 1. `kwcc_http_init()` — memset 请求数组
 2. `kwcc_http_request()` — 查空闲槽 → 生成 req_id → bin_path 检测 → pipe + fork → kwcc_io_register
 3. `kwcc_http_cancel()` — kill(pid, SIGTERM) → kwcc_http_cleanup
-4. `kwcc_http_on_read()` (static) — read pipe → realloc 追加 → EOF 时 phr_parse_response → kwcc_http_dispatch_end
+4. `kwcc_http_on_read()` (static) — read pipe → realloc 追加 → 增量解析 header（提取 Content-Length 存到 req->total_size）→ EOF 时完整 phr_parse_response → kwcc_http_dispatch_end
 5. `kwcc_http_dispatch_end()` (static) — `kwcc_bus_publish("http/end/<req_id>", ...)` 或 `"http/error/<req_id>"`
 6. `kwcc_http_cleanup()` (static) — kwcc_io_unregister → close → waitpid → free → memset
-7. `kwcc_http_check_progress()` — 每帧调用，检查 response_len != last_dispatched，变化时 publish `"http/progress/<req_id>"`
+7. `kwcc_http_check_progress()` — 每帧调用，检查 response_len != last_dispatched，变化时 publish `"http/progress/<req_id>"`，bus data 传 `{loaded, total}` 结构体
+8. `kwcc_http_get_result()` — 公共查询 API，供消费者（如 kwcc_js_http）读取解析结果
 
 **Defensive Fixes**（方案已定义，实现时遵守）：
 - Fix 1: realloc +4 + trailing '\0' + NULL 检查
@@ -140,50 +193,92 @@ static int g_kwcc_http_next_seq = 0;
 
 ## Step 4: C binding + 代理表注册
 
-**目的**：JS→C 通信桥梁，通过代理表注册 HTTP handler。
+**目的**：JS→C 通信桥梁，通过代理表注册 HTTP handler。HTTP JS 桥接代码独立为 `kwcc_js_http.c/h`。
 
-### `src/kwcc_js.c` 改动
+### 新增 `src/kwcc_js_http.h`
 
-**1. 代理表新增两项**（`g_kwcc_js_cfun_handlers[]`）：
 ```c
-{ "kwcc_js_http_request", kwcc_js_http_request },
-{ "kwcc_js_http_cancel",  kwcc_js_http_cancel },
+#ifndef KWCC_JS_HTTP_H
+#define KWCC_JS_HTTP_H
+
+#include "mquickjs/mquickjs.h"
+
+void     kwcc_js_on_http_event(const char *topic, const void *data, size_t len, void *user_data);
+JSValue  kwcc_js_http_request(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+JSValue  kwcc_js_http_cancel(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+void     kwcc_register_http_js(JSContext *ctx);
+
+#endif
 ```
 
-**2. 新增 C handler 函数**：
+### 新增 `src/kwcc_js_http.c`
 
-`kwcc_js_http_request(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)`:
-- 提取 argv[0]=method, argv[1]=url, argv[2]=headers, argv[3]=body
+**1. 回调注册表**（JS 桥接层职责，不属于 HTTP 服务）：
+
+```c
+static struct {
+    char     req_id[64];
+    JSValue  on_end_cb;      /* resolve callback */
+    JSValue  on_error_cb;    /* reject callback */
+    JSValue  on_progress_cb; /* onProgress callback */
+    int      in_use;
+} g_kwcc_js_http_cbs[KWCC_HTTP_MAX_REQS];
+```
+
+**2. `kwcc_js_on_http_event`** — 处理 `http/end`、`http/error`、`http/progress`、`http/cancel`：
+- 从 topic 提取 req_id
+- 查 `g_kwcc_js_http_cbs` 注册表
+- 成功事件：调 `kwcc_http_get_result` 读取解析结果，构建 JSValue 响应对象，调 resolve callback
+- 错误/取消事件：构建错误 JSValue，调 reject callback
+- 进度事件：从 bus data 取 `{loaded, total}`，调 onProgress callback
+- 回调执行后清理注册表条目（end/error/cancel 一次性，progress 不清理直到 end）
+
+**3. `kwcc_js_http_request`** C handler：
+- 提取 argv[0]=method, argv[1]=url, argv[2]=headers, argv[3]=body, argv[4]=resolve, argv[5]=reject, argv[6]=onProgress
 - 调用 `kwcc_http_request()`
-- 返回 req_id 字符串（`JS_NewString`）
+- 将 resolve/reject/onProgress 存入 `g_kwcc_js_http_cbs` 注册表
+- 返回 req_id 字符串
 
-`kwcc_js_http_cancel(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)`:
+**4. `kwcc_js_http_cancel`** C handler：
 - 提取 argv[0]=req_id
 - 调用 `kwcc_http_cancel(req_id)`
 
-**3. req_id 回调注册表**：
+**5. `kwcc_register_http_js`**：
+- 注入 `$http` JS 对象壳：`$http.state`、`$http.cancel`、`$http.config`
+- 不注入 `$http.request`（避免和 JS 高层 API 同名冲突）
+- JS 高层 `$http.fetch` 在 `app/runtime/http.js` 中定义，内部调 `kwcc_js_mquickjs_call('kwcc_js_http_request', ...)`
 
+### `src/kwcc_js.c` 改动
+
+**1. `kwcc_js_on_bus_event` 改为按前缀分发**：
 ```c
-#define KWCC_HTTP_CB_MAX 8
-static struct {
-    char     req_id[64];
-    JSValue  on_end_cb;
-    JSValue  on_error_cb;
-    JSValue  on_progress_cb;
-    int      in_use;
-} g_kwcc_http_cbs[KWCC_HTTP_CB_MAX];
+static void kwcc_js_on_bus_event(const char *topic, const void *data, size_t len, void *user_data) {
+    JSContext *ctx = (JSContext *)user_data;
+
+    /* HTTP 事件路由 */
+    if (strncmp(topic, "http/", 5) == 0) {
+        kwcc_js_on_http_event(topic, data, len, user_data);
+        return;
+    }
+
+    /* 未来其他模块事件路由 */
+    /* if (strncmp(topic, "ws/", 3) == 0) { kwcc_js_on_ws_event(...); return; } */
+
+    /* 默认：白名单过滤 + $bus.emit */
+    ...
+}
 ```
 
-**4. bus 事件路由**：
+**2. 删除 HTTP 相关代码**：
+- 删除代理表中 `kwcc_js_http_request`/`kwcc_js_http_cancel` 两项
+- 删除 `kwcc_js_http_request`/`cancel`/`kwcc_register_http_js` 函数实现
+- `match_whitelist` 改名 `kwcc_js_match_whitelist`
 
-`kwcc_js_on_bus_event` 已在 `kwcc_create_js` 中注册为 bus consumer（`KWCC_BUS_WILDCARD`），收到 `http/end/req_1` 等 topic 时：
-- 从 topic 提取 req_id（`topic + strlen("http/end/")`）
-- 查 `g_kwcc_http_cbs` 注册表
-- 调用对应的 resolve/reject callback
+**3. 新增 `#include "kwcc_js_http.h"`**
 
-**5. 新增 `kwcc_register_http_js(JSContext *ctx)`**：
+### `src/kwcc_js.h` 改动
 
-注入 `$http` JS 对象和 MiniPromise（详见 Step 8）。
+删除 `kwcc_js_http_request`/`kwcc_js_http_cancel`/`kwcc_register_http_js` 声明。
 
 **验证**：`make` 编译通过
 
@@ -223,19 +318,22 @@ kwcc_http_init();
 
 ## Step 6: Makefile 更新
 
-**目的**：将 kwcc_http.c 加入编译列表。
+**目的**：将 kwcc_http.c 和 kwcc_js_http.c 加入编译列表。
 
 ### `Makefile` 改动
 
-**1. `MQJS_SRCS` 加 `src/kwcc_http.c`**
+**1. `MQJS_SRCS` 加 `src/kwcc_http.c` 和 `src/kwcc_js_http.c`**
 
 **2. 新增编译规则**：
 ```makefile
 $(OBJ_DIR)/src/kwcc_http.o: src/kwcc_http.c src/kwcc_http.h src/kwcc_base.h src/kwcc_bus.h src/kwcc_io.h src/kwcc_config.h $(MQJS_HEADERS) | $(OBJ_DIR)/src
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJ_DIR)/src/kwcc_js_http.o: src/kwcc_js_http.c src/kwcc_js_http.h src/kwcc_http.h src/kwcc_bus.h src/kwcc_base.h $(MQJS_HEADERS) | $(OBJ_DIR)/src
+	$(CC) $(CFLAGS) -c $< -o $@
 ```
 
-**3. kwcc_js.o 依赖加 `src/kwcc_http.h`**
+**3. kwcc_js.o 依赖加 `src/kwcc_js_http.h`**
 
 **验证**：`make clean && make` 编译通过
 
@@ -256,7 +354,7 @@ make clean && make
 
 ---
 
-## Step 8: JS $http 对象 + MiniPromise
+## Step 8: JS $http.fetch + MiniPromise
 
 **目的**：Layer 4 JS API 层，提供 Promise 风格的 HTTP 请求接口。
 
@@ -264,17 +362,54 @@ make clean && make
 
 **内容**：
 1. `MiniPromise` 实现（ES5 兼容，方案中已有完整代码）
-2. `$http` 对象定义：
-   - `$http.request(url, options)` — 返回 MiniPromise
-   - `$http.cancel(reqId)` — 取消请求
-   - `$http.config(key, value)` — 设置配置
-   - `$http.state = { activeRequests: 0 }` — 运行状态
-3. `$http._fetchAsync(method, url, headers, body, onProgress)` — 内部实现
-4. `$http._addCallback(reqId, type, cb)` / `$http._removeCallback(reqId)` — 回调注册表管理
+2. `$http.fetch(url, options)` — 返回 MiniPromise
+3. 不暴露 `_fetchAsync`/`_addCallback`/`_removeCallback`，回调路由全在 C 侧完成
 
-**回调路由机制**：
-- bus consumer 收到 `http/end/<req_id>` 事件时，`$bus.on("http/end", ...)` 触发
-- 从 event data 中取 req_id，查注册表，调用对应 resolve/reject
+```javascript
+$http.fetch = function(url, options) {
+    var method = "GET";
+    var headers = [];
+    var body = "";
+    var onProgress = null;
+    if (options) {
+        if (options.method) method = options.method;
+        if (options.headers) headers = options.headers;
+        if (options.body) body = options.body;
+        if (options.onProgress) onProgress = options.onProgress;
+    }
+
+    return new MiniPromise(function(resolve, reject) {
+        /* C 桥接通过全局函数调用，不挂在 $http 上，避免同名覆盖 */
+        var reqId = kwcc_js_mquickjs_call('kwcc_js_http_request',
+            method, url, headers, body, resolve, reject, onProgress);
+        if (!reqId) {
+            reject("request failed: unable to start");
+            return;
+        }
+        $http.state.activeRequests = $http.state.activeRequests + 1;
+    });
+};
+```
+
+**业务代码使用模式**（遵循 store 流，不直接操作 UI）：
+```javascript
+// 模块 action 中发起请求，响应后 dispatch 更新 state
+$http.fetch("https://api.example.com/data").then(function(resp) {
+    $store.dispatch("myModule", "loadData", resp.body);
+}).catch(function(err) {
+    $store.dispatch("myModule", "setError", err);
+});
+
+// 带进度
+$http.fetch(url, {
+    method: "POST",
+    headers: ["Content-Type: application/json"],
+    body: '{"key":"val"}',
+    onProgress: function(loaded, total) {
+        $store.dispatch("myModule", "setProgress", { loaded: loaded, total: total });
+    }
+});
+```
 
 ### `app/main.js` 改动
 
@@ -283,19 +418,26 @@ make clean && make
 load("app/runtime/http.js");
 ```
 
-### `src/kwcc_js.c` 改动
+### `src/kwcc_js_http.c` 改动
 
-在 `kwcc_create_js()` 末尾新增：
-```c
-kwcc_register_http_js(ctx);
+在 `kwcc_register_http_js()` 中注入 `$http` 对象壳：
+```javascript
+var $http = new Object();
+$http.state = { activeRequests: 0 };
+$http.cancel = function(reqId) {
+    kwcc_js_mquickjs_call('kwcc_js_http_cancel', reqId);
+};
+$http.config = function(key, value) {
+    $config.coreSetTlv('http/' + key, value);
+};
 ```
 
-`kwcc_register_http_js` 通过 `JS_Eval` 注入 `$http` 对象的 C 桥接部分。
+注意：不注入 `$http.request`，避免和 JS 高层 `$http.fetch` 同名冲突。JS 高层 API 在 `http.js` 中定义。
 
 **验证**：
 1. `make` 编译通过
 2. `make run` 窗口正常显示
-3. 在 JS 控制台测试：`$http.request("https://httpbin.org/get").then(function(r) { log(r); })`
+3. 在 JS 控制台测试：`$http.fetch("https://httpbin.org/get").then(function(r) { log(r.status); })`
 
 ---
 
