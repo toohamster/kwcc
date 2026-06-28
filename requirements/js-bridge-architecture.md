@@ -43,7 +43,17 @@ typedef uint64_t kwcc_js_val_t;
 
 常量由 ops 属性提供，子模块不碰 `JS_NULL`/`JS_UNDEFINED` 等宏。
 
-#### 2. kwcc_js_ops_t — JS 操作接口（属性 + 函数指针）
+#### 2. kwcc_js_cstr_buf_t — C 字符串转换缓冲区
+
+```c
+typedef struct { char buf[5]; } kwcc_js_cstr_buf_t;
+```
+
+子模块不直接操作 `JSCStringBuf`，使用 `kwcc_js_cstr_buf_t` 替代。调用方在栈上声明，传给 `to_cstring`，生命周期由调用方控制——和原始 `JS_ToCString` 的使用模式一致。`buf[5]` 对应 mquickjs 的短字符串阈值：单个 Unicode code point 最多 4 字节 UTF-8 + 1 字节 `\0`。
+
+**不需要 free**：`to_cstring` 返回的指针要么指向调用方的 buf（短字符串），要么指向 JS 内部内存（长字符串），两种情况都不需要手动释放，用完即止。但长字符串指针由 GC 管理，不能跨作用域长期保存——用完即止，不要缓存。
+
+#### 3. kwcc_js_ops_t — JS 操作接口（属性 + 函数指针）
 
 ```c
 typedef struct kwcc_js_ops {
@@ -71,9 +81,9 @@ typedef struct kwcc_js_ops {
     void           (*call_cb)(kwcc_js_ops_t *ops, kwcc_js_val_t cb,
                               int argc, kwcc_js_val_t *argv);
 
-    /* ── C 字符串转换（配对使用，子模块不碰 JSCStringBuf）── */
-    const char *   (*to_cstring)(kwcc_js_ops_t *ops, kwcc_js_val_t val);
-    void           (*free_cstring)(kwcc_js_ops_t *ops, const char *s);
+    /* ── C 字符串转换（两步调用，和原始 JS_ToCString 模式一致）── */
+    const char *   (*to_cstring)(kwcc_js_ops_t *ops, kwcc_js_val_t val,
+                                  kwcc_js_cstr_buf_t *buf);
 
     /* ── 类型判断 ── */
     int            (*is_undefined)(kwcc_js_val_t val);
@@ -91,27 +101,125 @@ typedef struct kwcc_js_ops {
 
     /* ── 数字转换 ── */
     int            (*to_int32)(kwcc_js_ops_t *ops, kwcc_js_val_t val);
+
+    /* ── C→JS 通知（$notify 通道）── */
+    void           (*notify_js)(kwcc_js_ops_t *ops,
+                                const char *type, const char *event,
+                                const char *id, kwcc_js_val_t data,
+                                void (*ack_cleanup)(const char *id));
 } kwcc_js_ops_t;
 ```
 
 **设计要点**：
 - 函数指针第一个参数都是 `ops` 自身，子模块不需要知道 `ctx`
-- `to_cstring` / `free_cstring` 配对，隐藏 `JSCStringBuf` 细节
+- `to_cstring` 保持两步调用模式（调用方提供 buf），和原始 `JS_ToCString` 一致，不跨作用域
 - `call_cb` 内部处理 `JS_StackCheck` + `JS_PushArg` + `JS_Call` 三步，子模块只传参数数组
+- 代理只做映射，不承担引擎内部的内存管理职责（GC、引用计数等由引擎自己管理）
+- `notify_js` 的 `ack_cleanup` 参数：投递前自动调 `ack_cleanup(id)` 释放 C 侧资源（buffer、句柄等）。传入 NULL 表示无需清理（如 Timer 事件）。调用方不需要记着调 release，传了就自动处理
 
-#### 3. kwcc_js_module_t — 模块描述符（规范）
+#### 4. kwcc_js_module_t — 模块描述符（规范）
 
 ```c
 typedef struct kwcc_js_module {
     const char *name;       /* 模块名，用于日志和代理表注册 */
-    void (*load)(kwcc_js_ops_t *ops);         /* 初始化：注入 JS 对象壳 */
+    void (*load)(kwcc_js_ops_t *ops);         /* 初始化：注入 JS 对象壳 + $notify.on(type, handler) */
     void (*register_cfun)(kwcc_js_ops_t *ops); /* 注册代理表 C handler */
     void (*on_bus_event)(const char *topic, const void *data,
                          size_t len, kwcc_js_ops_t *ops); /* bus 事件路由 */
+    void (*unload)(kwcc_js_ops_t *ops);        /* 退出清理：释放长连接/定时器等资源，可为 NULL */
 } kwcc_js_module_t;
 ```
 
-**模块生命周期**：core 统一按 `load → register_cfun → on_bus_event` 顺序调用。
+**模块生命周期**：core 统一按 `load → register_cfun → on_bus_event（运行时）→ unload（退出时）` 顺序调用。`unload` 可为 NULL，WS/Timer 等管理长连接/定时器的模块必须实现。
+
+### C→JS 通知模式：`$notify`
+
+子模块收到 bus 事件后，不直接调 resolve/reject 等 JS 回调，而是通过 `$notify` 通用通知通道把事件信息传给 JS 端。JS 端通过 `$notify.on(type, handler)` 注册处理器，自己做 id → callback 的映射和路由。
+
+**`$notify` vs `$bus` 职责划分**：
+
+| 通道 | 方向 | 场景 |
+|------|------|------|
+| `$notify` | C → JS | 原生事件（HTTP 响应、WS 消息、Timer 触发） |
+| `$bus` | JS → JS | 业务事件（按钮点击、state 变更） |
+
+**C 端职责**：publish bus 事件 + 调 `ops->notify_js` 通知 JS 端
+**JS 端职责**：通过 `$notify.on(type, handler)` 注册处理器，维护 callback 映射 + 调 resolve/reject
+
+这样做的好处：
+- C 端不存 JSValue 回调，不需要维护回调注册表
+- C 端只管"发生了什么"，不管"谁在等"
+- 回调映射是纯 JS 逻辑，写在模块注册的 handler 里，不跨语言边界
+- 新模块只需加一行 `$notify.on(type, handler)` 注册，不改 core 代码
+
+#### JS 端
+
+```javascript
+// $notify — C→JS 通知分发器（由 core 注入）
+var $notify = new Object();
+$notify._handlers = {};
+
+$notify.on = function(type, handler) {
+    $notify._handlers[type] = handler;
+};
+
+// C 端唯一入口
+$notify.emit = function(type, event, id, data) {
+    var handler = $notify._handlers[type];
+    if (handler) handler(event, id, data);
+};
+```
+
+#### C 端 API
+
+`kwcc_js_ops_t` 提供 `notify_js` 函数指针，模块只调这个：
+
+```c
+void (*notify_js)(kwcc_js_ops_t *ops,
+                  const char *type,      /* "http" | "ws" | "timer" */
+                  const char *event,     /* "end" | "error" | "progress" | ... */
+                  const char *id,        /* 通用标识符（reqId / connId / timerId） */
+                  kwcc_js_val_t data,    /* 模块专属数据对象 */
+                  void (*ack_cleanup)(const char *id));  /* 投递前释放 C 侧资源，可为 NULL */
+```
+
+core 实现内部持有 `$notify.emit` 的引用，`ack_cleanup` 在 `call_cb` 之前自动调用。模块不需要知道 `$notify` 的存在，也不需要记着调 release — 传了 `ack_cleanup` 就自动处理。
+
+#### 数据流
+
+```
+C 模块 (http/ws/timer)
+    │ ops->notify_js(ops, "http", "end", reqId, dataObj, ack_cleanup_fn)
+    ▼
+kwcc_js_ops.notify_js (core 实现)
+    │ ① ack_cleanup(id) — 释放 C 侧资源（数据已在 GC 堆）
+    │ ② call_cb($notify.emit, [type, event, id, data])
+    ▼
+$notify.emit(type, event, id, data)
+    │ 查 _handlers[type]
+    │ 调 handler(event, id, data)
+    ▼
+模块 handler（匿名函数，如 $notify.on('http', function(...)）
+    │ 查 callbacks[id]
+    │ 调 resolve/reject
+    ▼
+MiniPromise resolved/rejected
+```
+
+#### payload 设计
+
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| type | 模块类型 | "http", "ws", "timer" |
+| event | 事件类型 | "end", "error", "progress" |
+| id | 通用标识符 | HTTP reqId / WS connId / Timer timerId |
+| data | 模块专属数据（JSValue 对象） | HTTP 响应对象 / WS 消息对象 |
+
+**不设 source 字段**：`$notify` 本身就是 C→JS 通道，来源恒为 C。JS→JS 事件走 `$bus`。
+
+**`$notify` 不经过 `bus/js_whitelist`**：`$notify` 是 C→JS 的直达通道，由 C 端 `ops->notify_js` 触发，信任边界是模块代码本身。如果未来有不可信的数据源需要过滤，应在模块 handler 内部做，而不是在 `$notify` 层加白名单——这里的设计意图是原生事件的零开销直达，不应该增加过滤层。
+
+详见 `requirements/js-http-implementation-plan.md` 中 HTTP 模块使用 `$notify` 的设计。
 
 ---
 
@@ -138,7 +246,6 @@ static void kwcc_js_ops_init(JSContext *ctx) {
     g_kwcc_js_ops.is_function    = js_is_function_impl;
     g_kwcc_js_ops.call_cb        = js_call_cb_impl;
     g_kwcc_js_ops.to_cstring     = js_to_cstring_impl;
-    g_kwcc_js_ops.free_cstring   = js_free_cstring_impl;
     g_kwcc_js_ops.is_undefined   = js_is_undefined_impl;
     g_kwcc_js_ops.is_null        = js_is_null_impl;
     g_kwcc_js_ops.is_exception   = js_is_exception_impl;
@@ -147,13 +254,55 @@ static void kwcc_js_ops_init(JSContext *ctx) {
     g_kwcc_js_ops.array_length   = js_array_length_impl;
     g_kwcc_js_ops.array_get      = js_array_get_impl;
     g_kwcc_js_ops.to_int32       = js_to_int32_impl;
+    g_kwcc_js_ops.notify_js     = js_notify_js_impl;
 }
 ```
 
-### 2. 统一模块注册
+### 2. 注入 `$notify` + 统一模块注册
 
 ```c
+static kwcc_js_val_t s_notify_emit_fn;  /* $notify.emit 的引用 */
+
+/* 注入 $notify 通用通知分发器（在模块注册之前） */
+static void kwcc_js_inject_notify(kwcc_js_ops_t *ops) {
+    const char *code =
+        "var $notify = new Object();\n"
+        "$notify._handlers = {};\n"
+        "$notify.on = function(type, handler) {\n"
+        "    $notify._handlers[type] = handler;\n"
+        "};\n"
+        "$notify.emit = function(type, event, id, data) {\n"
+        "    var handler = $notify._handlers[type];\n"
+        "    if (handler) handler(event, id, data);\n"
+        "};\n";
+    ops->eval(ops, code, strlen(code), "<$notify>", JS_EVAL_REPL);
+
+    /* 获取 $notify.emit 的引用，供 notify_js 实现调用 */
+    kwcc_js_val_t notify_obj = ops->get_str_prop(ops, ops->global_obj, "$notify");
+    s_notify_emit_fn = ops->get_str_prop(ops, notify_obj, "emit");
+}
+
+/* notify_js 实现 — 模块通过 ops->notify_js 调用 */
+static void js_notify_js_impl(kwcc_js_ops_t *ops,
+                               const char *type, const char *event,
+                               const char *id, kwcc_js_val_t data,
+                               void (*ack_cleanup)(const char *id)) {
+    /* ① 先释放 C 侧资源（数据已通过 JSValue 拷贝进 GC 堆） */
+    if (ack_cleanup) ack_cleanup(id);
+
+    /* ② 再投递到 JS 端 */
+    kwcc_js_val_t args[4];
+    args[0] = ops->new_string(ops, type);
+    args[1] = ops->new_string(ops, event);
+    args[2] = ops->new_string(ops, id);
+    args[3] = data;
+    ops->call_cb(ops, s_notify_emit_fn, 4, args);
+}
+
 void kwcc_js_register_modules(kwcc_js_ops_t *ops) {
+    /* 先注入 $notify，模块 load 时才能 $notify.on(type, handler) */
+    kwcc_js_inject_notify(ops);
+
     extern kwcc_js_module_t kwcc_js_http_module;
     kwcc_js_register_module(ops, &kwcc_js_http_module);
     /* 未来加模块只加一行 */
@@ -183,30 +332,7 @@ static void kwcc_js_on_bus_event(const char *topic, const void *data,
 }
 ```
 
-**注意**：模块的 `on_bus_event` 内部自行判断 topic 前缀（如 `http/`），core 不做前缀匹配分发——这样更灵活，模块可以订阅任意 topic。
-
----
-
-## to_cstring / free_cstring 实现策略
-
-`JSCStringBuf` 是栈上 5 字节缓冲区，mquickjs 内联短字符串。子模块不能持有 `JSCStringBuf`（生命周期不可控），所以：
-
-```c
-/* 实现：内部维护线程局部 JSCStringBuf 池，或直接 strdup */
-static const char *js_to_cstring_impl(kwcc_js_ops_t *ops, kwcc_js_val_t val) {
-    JSContext *ctx = (JSContext *)ops->ctx;
-    JSCStringBuf buf;
-    const char *s = JS_ToCString(ctx, val, &buf);
-    /* 如果 s 指向 buf（短字符串内联），需要 strdup 保证生命周期 */
-    return s ? strdup(s) : NULL;
-}
-
-static void js_free_cstring_impl(kwcc_js_ops_t *ops, const char *s) {
-    free((void *)s);
-}
-```
-
-**权衡**：每次 `to_cstring` 都 `strdup` 有性能开销，但子模块的 C 字符串使用场景有限（提取 method/url/body），不是热路径。如果后续有性能问题，可以用 TLS 缓冲池优化。
+**注意**：模块的 `on_bus_event` 内部自行判断 topic 前缀（如 `http/`），core 不做前缀匹配分发——这样更灵活，模块可以订阅任意 topic。当前实现是每个事件遍历所有模块（O(n)），模块数量少时开销可忽略。如果未来模块数增长到十几个，可考虑让模块在描述符中声明 `topic_prefix` 数组，core 按前缀做 O(1) 路由表分发——当前阶段不提前优化。
 
 ---
 
@@ -218,11 +344,13 @@ static void js_free_cstring_impl(kwcc_js_ops_t *ops, const char *s) {
 | 2 | kwcc_js.c 实现 ops 绑定 + 模块注册 | `src/kwcc_js.c` | Step 1 |
 | 3 | 重构现有 HTTP 代码为模块描述符 | `src/kwcc_js.c`（删除内联 HTTP 代码） | Step 2 |
 | 4 | 编译验证 | — | Step 3 |
+| 5 | ops 接口测试 | `tests/test_js_ops.c` | Step 2（可与 Step 3-4 并行） |
 
 ### Step 1: kwcc_js.h 类型定义
 
 在 `kwcc_js.h` 中新增：
 - `kwcc_js_val_t` 类型
+- `kwcc_js_cstr_buf_t` 类型
 - `kwcc_js_ops_t` 结构体
 - `kwcc_js_module_t` 结构体
 - `kwcc_js_register_module()` / `kwcc_js_register_modules()` 声明
@@ -233,9 +361,10 @@ static void js_free_cstring_impl(kwcc_js_ops_t *ops, const char *s) {
 
 ### Step 2: kwcc_js.c ops 实现
 
-1. 实现所有 `js_xxx_impl` 函数
+1. 实现所有 `js_xxx_impl` 函数（包括 `js_notify_js_impl`）
 2. `kwcc_create_js()` 中调用 `kwcc_js_ops_init(ctx)` + `kwcc_js_register_modules(&g_kwcc_js_ops)`
-3. `kwcc_js_on_bus_event` 改为遍历模块列表分发
+3. `kwcc_js_register_modules` 先注入 `$notify`，再逐个注册模块（模块 `load` 中可 `$notify.on(type, handler)`）
+4. `kwcc_js_on_bus_event` 改为遍历模块列表分发
 
 **验证**：`make` 编译通过
 
@@ -248,6 +377,25 @@ static void js_free_cstring_impl(kwcc_js_ops_t *ops, const char *s) {
 **注意**：此步不创建 `kwcc_js_http.c/h`，那是 `js-http-implementation-plan.md` 的内容。此步只确保 `kwcc_js.c` 中的 HTTP 代码通过 ops 接口调用，不再直接用 mquickjs API。
 
 **验证**：`make` 编译通过，`make run` 正常
+
+### Step 5: ops 接口测试（可与 Step 3-4 并行）
+
+**目的**：把 `kwcc_js_ops_t` 的每个函数指针当成内部 ABI 契约做单元测试，而不是只靠 HTTP 模块迁移完之后 `make run` 间接验证。
+
+### `tests/test_js_ops.c`
+
+| # | 测试 | 验证 |
+|---|------|------|
+| 1 | `new_object` + `set_str_prop` + `get_str_prop` | 创建对象、设属性、读属性闭环 |
+| 2 | `new_int32` + `to_int32` | 数字往返正确 |
+| 3 | `new_string` + `to_cstring` | 短字符串内联（≤5字节）和长字符串分支都正确，不需要 free |
+| 4 | `call_cb` | 调 JS 函数、传参数、取返回值 |
+| 5 | `is_function` / `is_undefined` / `is_null` / `is_exception` | 类型判断正确 |
+| 6 | `eval` + `JS_EVAL_REPL` | 执行 JS 代码，隐式全局变量生效 |
+| 7 | `notify_js` + `ack_cleanup` | C→JS `$notify.emit` 通道工作，`$notify.on` handler 被调用，`ack_cleanup` 在投递前被自动调用 |
+| 8 | `array_length` + `array_get` | 数组创建、长度、索引访问 |
+
+测试方法参考 `testing_methodology.md`：独立 mquickjs 环境，不依赖 Sokol/microui/NanoVG。
 
 ### Step 4: 编译验证
 
@@ -268,7 +416,6 @@ make run
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
-| `to_cstring` strdup 性能 | 每次提取 C 字符串都 malloc | 非 hot path，可接受 |
 | `call_cb` argv 数组传递 | 子模块需要构造 kwcc_js_val_t 数组 | 栈上小数组即可，最多 7 个参数 |
 | `kwcc_js_val_t` 和 `JSValue` 实际相同 | 类型安全是编译期的 | `typedef` 提供文档性隔离 |
 | bus 事件分发顺序 | 多模块可能对同一 topic 感兴趣 | 模块内部自行判断前缀，互不干扰 |
