@@ -32,7 +32,7 @@
 8. **`$notify` 作为通用 C→JS 通知通道**：不走 `$bus.emit`（避免字符串拼接和 bus 匹配开销），C 端通过 `ops->notify_js` 直达 `$notify.emit`，按 type 分发给模块 handler。`$notify` 不局限于 HTTP，未来 WS/Timer 等模块遵循同样规则
 9. **MiniPromise 独立为 `promise.js`**：通用基础设施，不与 HTTP 耦合
 10. **cancel 必须触发清理事件**：`kwcc_http_cancel` 发布 `http/cancel/<reqId>` 后，JS 端的 `$notify.on('http', ...)` handler 必须处理 `cancel` 事件（和 `error` 一样调 `reject` + `delete callbacks[id]`），否则 Promise 永久悬挂
-11. **`kwcc_http_get_result` 时序契约 + `ack_cleanup` 自动释放**：`dispatch_end` 后不再立刻 cleanup，标记 `PENDING_ACK`。`http_on_bus_event` 构建 JSValue（数据拷贝进 GC 堆）后调 `notify_js`，`ack_cleanup`（即 `kwcc_http_release_result`）在投递前自动释放 C 侧资源。此契约支持同步和异步 bus
+11. **`kwcc_http_get_result` 时序契约 + `ack_cleanup` 自动释放**：`dispatch_end` 后数据通过 `JS_NewStringLen` 拷贝进 GC 堆，`ack_cleanup`（即 `kwcc_http_release_result`）在投递前自动释放 C 侧资源。此契约支持同步和异步 bus
 12. **僵尸进程回收**：`cleanup` 中 `waitpid(WNOHANG)` 单次尝试可能回收不到（cancel 后子进程还没退出）。需在 `kwcc_http_check_progress` 中加一轮对所有 in_use slot 的 `waitpid(WNOHANG)` 扫描，回收已退出的子进程
 
 ---
@@ -63,7 +63,7 @@ kwcc_js_ops.notify_js (core 实现)
     │ ② call_cb(s_notify_emit_fn, [type, event, id, data])
     ▼
 $notify.emit("http", "end", reqId, data)
-    │ 查 _handlers["http"]
+    │ 查 registry["http"]
     │ 调匿名 handler(event, id, data)
     ▼
 匿名 handler → $http.callbacks[reqId] → resolve/reject
@@ -136,8 +136,8 @@ typedef struct {
 /* Header 访问 API（隐藏 phr_header） */
 int kwcc_http_result_header_count(const char *req_id);
 int kwcc_http_result_get_header(const char *req_id, int index,
-                                const char **name, int *name_len,
-                                const char **value, int *value_len);
+                                const char **name, size_t *name_len,
+                                const char **value, size_t *value_len);
 ```
 
 子模块通过 `kwcc_http_result_header_count` + `kwcc_http_result_get_header` 访问 header，不需要知道 `phr_header`。
@@ -154,11 +154,17 @@ int kwcc_http_result_get_header(const char *req_id, int index,
 
 1. 删除回调注册表（`g_kwcc_http_cbs` + `register/find/clear_callback`）— 回调注册不属于 HTTP 服务
 2. 实现 `kwcc_http_result_header_count` / `kwcc_http_result_get_header`
-3. `kwcc_http_check_progress` 传 `kwcc_http_progress_t` 结构体作为 bus data（progress 事件的数据来源是 bus data，end/error/cancel 事件的数据来源是 `kwcc_http_get_result`）
+3. 新增 `kwcc_http_progress_t` 结构体，`kwcc_http_check_progress` 传此结构体作为 bus data：
+```c
+typedef struct {
+    int loaded;   /* 已接收字节数 */
+    int total;    /* 总字节数，无 Content-Length 时为 -1 */
+} kwcc_http_progress_t;
+```
+   progress 事件的数据来源是 bus data，end/error/cancel 事件的数据来源是 `kwcc_http_get_result`
 4. `kwcc_http_on_read` 增量解析 header 提取 `Content-Length` 存到 `req->total_size`
 5. **僵尸回收**：`kwcc_http_check_progress` 中加一轮对所有 `in_use` slot 的 `waitpid(pid, NULL, WNOHANG)` 扫描，回收已退出但未被 cleanup 捕获的子进程。如果 `waitpid` 返回 `> 0`（子进程已退出），发布 `http/end` 或 `http/error` 事件并调 cleanup
-6. **请求状态机**：`dispatch_end` 后不再立刻 cleanup，改为 `PENDING_ACK` 状态。新增 `kwcc_http_release_result(req_id)` 供 `ack_cleanup` 调用，释放 buffer + cleanup。`check_progress` 中加 `PENDING_ACK` 超时兜底（防止消息丢失导致 slot 泄漏）
-7. **无 Content-Length 哨兵值**：`kwcc_http_progress_t.total` 在无 Content-Length（如 chunked 编码）时设为 `-1`，JS 端据此跳过百分比计算，避免除零。`$http._onNotify` 的 progress 分支检查 `data.total === -1` 时只传 `loaded`
+6. **无 Content-Length 哨兵值**：`kwcc_http_progress_t.total` 在无 Content-Length（如 chunked 编码）时设为 `-1`，JS 端据此跳过百分比计算，避免除零。`$notify.on('http', ...)` handler 的 progress 分支检查 `data.total === -1` 时只传 `loaded`
 
 **验证**：`make` 编译通过
 
@@ -233,16 +239,18 @@ static void http_load(kwcc_js_ops_t *ops) {
 - `$http.callbacks`/`$notify.on('http', ...)` 全部移到 `http.js`，C 端不注入
 - C 端通过 `ops->notify_js(ops, "http", event, id, data, ack_cleanup)` 通知 JS 端
 
-**3. `http_register_cfun`** — 注册代理表 C handler
+**3. `http_register_cfun`** — 注册代理表 C handler：
+
+向 `g_kwcc_js_cfun_handlers` 代理表注册两项：
+- `"kwcc_js_http_request"` → `kwcc_js_http_request`（提取 argv[0]=method, argv[1]=url, argv[2]=headers 数组, argv[3]=body → 调 `kwcc_http_request` → 返回 req_id 字符串）
+- `"kwcc_js_http_cancel"` → `kwcc_js_http_cancel`（提取 argv[0]=req_id → 调 `kwcc_http_cancel`）
 
 **4. `http_on_bus_event`** — 收 bus 事件后构建 JSValue 响应，调 `ops->notify_js`：
 
 - 判断 topic 前缀（`http/end`、`http/error`、`http/progress`、`http/cancel`）
 - 从 topic 提取 req_id
-- **end/error/cancel**：`kwcc_http_get_result` 读取解析结果 + `kwcc_http_result_get_header` 访问 header → 构建 JSValue 响应对象 — **数据通过 `JS_NewStringLen` 拷贝进 GC 堆，不再依赖 C buffer**
-- **progress**：从 bus data（`kwcc_http_progress_t *`）直接读 `loaded`/`total` → 构建 JSValue `{ loaded, total }`
-- end/error/cancel：调 `ops->notify_js(ops, "http", event, req_id, data_obj, kwcc_http_release_result)` — `ack_cleanup` 在投递前自动释放 C 侧资源
-- progress：调 `ops->notify_js(ops, "http", "progress", req_id, data_obj, NULL)` — 请求还在进行中，不释放
+- **end/error/cancel**：`kwcc_http_get_result` 读取解析结果 + `kwcc_http_result_get_header` 访问 header → 构建 JSValue 响应对象 — **数据通过 `JS_NewStringLen` 拷贝进 GC 堆，不再依赖 C buffer** → 调 `ops->notify_js(ops, "http", event, req_id, data_obj, kwcc_http_release_result)`
+- **progress**：从 bus data（`kwcc_http_progress_t *`）直接读 `loaded`/`total` → 构建 JSValue `{ loaded, total }` → 调 `ops->notify_js(ops, "http", "progress", req_id, data_obj, NULL)`
 - **不存任何 JSValue 回调，不维护回调注册表，不持有 JS 函数引用，不手动调 cleanup**
 
 **5. 模块描述符**：
@@ -253,6 +261,7 @@ kwcc_js_module_t kwcc_js_http_module = {
     .load = http_load,
     .register_cfun = http_register_cfun,
     .on_bus_event = http_on_bus_event,
+    .unload = NULL,
 };
 ```
 
@@ -309,7 +318,7 @@ kwcc_js_module_t kwcc_js_http_module = {
 - `$http.callbacks` — req_id → {resolve, reject, onProgress} 映射表（纯 JS 端数据）
 - `$notify.on('http', handler)` — 注册匿名处理器处理 C→JS 通知
 - `$http.fetch` — 调 `kwcc_js_mquickjs_call('kwcc_js_http_request', method, url, headers, body)` 发起请求
-- 不暴露 `_fetchAsync` / `_addCallback` / `_removeCallback`
+- 不暴露内部方法（fetch/cancel/config 是公开 API，其余不暴露）
 - 不包含 MiniPromise 定义
 
 ```javascript
@@ -321,10 +330,13 @@ $notify.on('http', function(event, id, data) {
     if (!cb) return;
     if (event === 'end') {
         cb.resolve(data); delete $http.callbacks[id];
+        $http.state.activeRequests = $http.state.activeRequests - 1;
     } else if (event === 'error') {
         cb.reject(data); delete $http.callbacks[id];
+        $http.state.activeRequests = $http.state.activeRequests - 1;
     } else if (event === 'cancel') {
         cb.reject(data || 'request cancelled'); delete $http.callbacks[id];
+        $http.state.activeRequests = $http.state.activeRequests - 1;
     } else if (event === 'progress') {
         if (cb.onProgress) cb.onProgress(data.loaded, data.total);
     }

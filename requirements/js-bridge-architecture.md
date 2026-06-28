@@ -196,7 +196,7 @@ kwcc_js_ops.notify_js (core 实现)
     │ ② call_cb($notify.emit, [type, event, id, data])
     ▼
 $notify.emit(type, event, id, data)
-    │ 查 _handlers[type]
+    │ 查 registry[type]
     │ 调 handler(event, id, data)
     ▼
 模块 handler（匿名函数，如 $notify.on('http', function(...)）
@@ -380,6 +380,19 @@ static void kwcc_js_on_bus_event(const char *topic, const void *data,
 
 **验证**：`make` 编译通过，`make run` 正常
 
+### Step 4: 编译验证
+
+```bash
+make clean && make
+make run
+```
+
+验证项：
+- [ ] 无编译错误
+- [ ] 无链接错误
+- [ ] `make run` 原有功能不受影响
+- [ ] `kwcc_js_ops_t` 接口可用（ops 函数指针都能正确调用）
+
 ### Step 5: ops 接口测试（可与 Step 3-4 并行）
 
 **目的**：把 `kwcc_js_ops_t` 的每个函数指针当成内部 ABI 契约做单元测试，而不是只靠 HTTP 模块迁移完之后 `make run` 间接验证。
@@ -398,19 +411,6 @@ static void kwcc_js_on_bus_event(const char *topic, const void *data,
 | 8 | `array_length` + `array_get` | 数组创建、长度、索引访问 |
 
 测试方法参考 `testing_methodology.md`：独立 mquickjs 环境，不依赖 Sokol/microui/NanoVG。
-
-### Step 4: 编译验证
-
-```bash
-make clean && make
-make run
-```
-
-验证项：
-- [ ] 无编译错误
-- [ ] 无链接错误
-- [ ] `make run` 原有功能不受影响
-- [ ] `kwcc_js_ops_t` 接口可用（ops 函数指针都能正确调用）
 
 ---
 
