@@ -3,6 +3,10 @@
 > 基于 `requirements/async-io-design.md` 方案
 > 创建于 2026-06-25
 > 修订于 2026-06-26：架构修正（模块拆分 + 职责归位 + API 简化）
+> 修订于 2026-06-28：Step 4 拆分为架构调整 + http 实施实例
+>
+> **前置依赖**：`requirements/bus-split-design.md` ✅ 已完成
+> **被依赖**：`requirements/js-bridge-architecture.md` → `requirements/js-http-implementation-plan.md`
 
 ---
 
@@ -63,7 +67,42 @@ kwcc 缺乏网络请求能力，需要引入异步 HTTP 支持。方案设计已
 
 ---
 
-## 实施总览
+## 修订记录（2026-06-28）
+
+### 问题 7：JS 桥接层架构问题
+
+实施 Step 4 过程中发现 `kwcc_js_http` 等扩展模块直接 include `mquickjs.h` 并调用 mquickjs API，导致：
+- 扩展模块与 mquickjs 强耦合
+- 每个模块重复处理 mquickjs 的坑（include 顺序、JSCStringBuf、三步调用）
+- 注册机制散乱
+
+**修正**：采用 Facade + Plugin 架构（参考 Linux 内核 core + module）：
+- `kwcc_js` 作为 core，封装 mquickjs，通过 `kwcc_js_ops_t`（属性 + 函数指针）对外提供 JS 操作接口
+- 扩展模块通过 `kwcc_js_module_t` 描述符注册进 core，只依赖 `kwcc_js.h`，不碰 mquickjs
+- `kwcc_http.h` 隐藏 `phr_header`，提供 header 访问 API
+
+**Step 4 拆分为**：
+- **架构调整**：`requirements/js-bridge-architecture.md`（前置依赖，先完成）
+- **http 实施实例**：`requirements/js-http-implementation-plan.md`（基于架构调整落地）
+
+---
+
+## 当前状态
+
+| Step | 状态 | 说明 |
+|------|------|------|
+| 1 | ✅ 已完成 | kwcc_http.h |
+| 2 | ✅ 已完成 | kwcc_http.c |
+| 3 | ✅ 已完成 | 纯 C 测试（6/6 通过） |
+| 4 | 🔄 已拆分 | → js-bridge-architecture.md + js-http-implementation-plan.md |
+| 5 | ✅ 已完成 | Frame Hook + init |
+| 6 | ✅ 已完成 | Makefile（kwcc_http.c 已加入） |
+| 7 | ✅ 已完成 | 编译验证 |
+| 8 | 🔄 待实施 | → js-http-implementation-plan.md Step 7 |
+
+---
+
+## 实施总览（原始，供参考）
 
 按方案分 8 步实施。每步完成后验证编译通过。
 
@@ -76,7 +115,7 @@ kwcc 缺乏网络请求能力，需要引入异步 HTTP 支持。方案设计已
 | 5 | Frame Hook + init | `src/main.m` | Step 4 |
 | 6 | Makefile 更新 | `Makefile` | Step 1-5 |
 | 7 | 编译验证 | — | Step 6 |
-| 8 | JS $http.fetch + MiniPromise | `app/runtime/http.js`, `app/main.js` | Step 7 |
+| 8 | JS $http.fetch + MiniPromise | `app/runtime/promise.js`, `app/runtime/http.js`, `app/main.js` | Step 7 |
 
 ---
 

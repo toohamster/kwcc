@@ -65,17 +65,21 @@
 │   ├── kwcc_mempool.h/c # Slab 内存池：L0-L7 分层池、key_map、常量表、GC、TLV 序列化
 │   ├── kwcc_config.h/c  # Config 层：App/Core 域存取接口，自动拼 "a."/"c." 前缀
 │   ├── kwcc_ui.c/h  # UI 模块（g_mu、microui 桥接、input、SVG、字体、register_ui）
-│   ├── kwcc_js.c/h  # JS lifecycle + $config JS API + C handler 层 + 代理机制 + bus consumer + JS 白名单
+│   ├── kwcc_js.c/h  # JS lifecycle + ops/module 类型定义 + bus consumer + 代理表 + JS 白名单
+│   ├── kwcc_js_http.c/h # HTTP JS bridge plugin（回调注册表 + bus 事件路由）[待实施]
 │   ├── kwcc_ui_bus.c/h # UI→JS 事件桥接（topic map + bind_topic + dispatch_event + begin_frame）
 │   ├── kwcc_bus.c/h # 通用 C Pub/Sub 事件总线（subscribe/publish/unsubscribe，零 mquickjs 依赖）
 │   ├── kwcc_io.c/h  # I/O Reactor（select() 非阻塞 FD 管理器）
+│   ├── kwcc_http.c/h # HTTP Process Engine（fork+pipe+curl+picohttpparser+bus dispatch）
 │   ├── kwcc.h       # 入口 umbrella header（聚合所有模块头文件）
 │   └── llog.h       # 日志包装器 (解决 macOS syslog.h 宏冲突)
 ├── app/             # 脚本层
 │   ├── main.js      # 模块入口（loadJs 加载示例模块）
 │   ├── runtime/
 │   │   ├── store.js #   全局状态 + 双参数 dispatch + 中间件
-│   │   └── bus.js   #   EventBus（精确匹配 + *末尾通配 + onGroup/offGroup）
+│   │   ├── bus.js   #   EventBus（精确匹配 + *末尾通配 + onGroup/offGroup）
+│   │   ├── promise.js # MiniPromise（ES5 兼容，通用异步基础设施）[待实施]
+│   │   └── http.js  #   $http.fetch（Promise 风格 HTTP 请求）[待实施]
 │   └── modules/examples/  # 示例模块集合
 │       ├── test/
 │       │   ├── test.js      # test 模块（state + actions + events）
@@ -159,7 +163,7 @@ loadJs("app/modules/examples/calc/calc_view.js"); // 注册视图
 
 **每帧渲染**：`onFrame()` 遍历所有已注册模块，自动调用 `ui.sync(key, visible)` + `render(state)`。
 
-**事件流**：用户操作 → microui → C 层全局回调 → `kwcc_ui_bus.c` → `$bus.emit(topic, action, data)` → JS handler → `$store.dispatch(module, action, payload)` → state 更新 → 下一帧 `onFrame` 刷新。C bus 事件（如 I/O）通过 `kwcc_bus_publish` → JS consumer（白名单过滤）→ `$bus.emit(topic, 'notify_c', data)` → JS handler。
+**事件流**：用户操作 → microui → C 层全局回调 → `kwcc_ui_bus.c` → `$bus.emit(topic, action, data)` → JS handler → `$store.dispatch(module, action, payload)` → state 更新 → 下一帧 `onFrame` 刷新。C bus 事件（如 I/O、HTTP）通过 `kwcc_bus_publish` → JS consumer（白名单过滤 + 模块按前缀分发）→ 对应模块 `on_bus_event` 处理 → 回调 resolve/reject → `$store.dispatch` 更新 state。
 
 **状态持久化**：`$loadedFiles` 记录 JS 文件加载次数，防止重复加载。`registerModule/View/Topic` 内部去重，防止重复注册。
 
@@ -173,7 +177,7 @@ loadJs("app/modules/examples/calc/calc_view.js"); // 注册视图
   - `#define NANOVG_GL3_IMPLEMENTATION`
 - **两阶段构建**:
   1. 编译 host tool (`mquickjs_build.c` + `mqjs_stdlib.c`) → 生成 `mqjs_stdlib.h`
-  2. 编译主二进制 (mquickjs.c + cutils.c + dtoa.c + libm.c + main.m + kwcc_mempool.c + kwcc_config.c + kwcc_ui.c + kwcc_js.c + kwcc_bus.c + kwcc_ui_bus.c + kwcc_base.c + kwcc_io.c)
+  2. 编译主二进制 (mquickjs.c + cutils.c + dtoa.c + libm.c + main.m + kwcc_mempool.c + kwcc_config.c + kwcc_ui.c + kwcc_js.c + kwcc_js_http.c + kwcc_bus.c + kwcc_ui_bus.c + kwcc_base.c + kwcc_io.c + kwcc_http.c)
 - **链接框架**:
   - `-framework Cocoa -framework OpenGL -framework IOKit -framework QuartzCore`
 - **静态集成**: 仅将核心 4 个 .c 文件编译进最终的可执行文件。
@@ -217,6 +221,12 @@ Phase 1-7 全部完成：L0-L7 分层池、key_map、常量表、GC、TLV 序列
 
 ### 第十二步：Bus 拆分重构 ✅
 kwcc_bus 拆分为三层：kwcc_bus（纯 C Pub/Sub）+ kwcc_ui_bus（UI→JS 桥接）+ kwcc_base（topic 清洗/校验）。JS 白名单 + `KWCC_BUS_WILDCARD` 常量 + `kwcc_bus_match_topic`。19/19 测试通过。
+
+### 第十三步：异步 I/O + HTTP Process Engine 🔄
+4 层架构：Layer 1（I/O Reactor）+ Layer 2（kwcc_http.c fork+pipe+curl）+ Layer 3（JS 桥接，待实施）+ Layer 4（JS API，待实施）。Layer 1-2 已完成，6/6 C 测试通过。Layer 3-4 因架构调整拆分至 #18。
+
+### 第十四步：kwcc_js Facade + Plugin 架构 ⏳
+参考 Linux 内核 core + module 模式：`kwcc_js` 封装 mquickjs 为 Facade（`kwcc_js_ops_t` 属性+函数指针），扩展模块遵循 `kwcc_js_module_t` 规范注册进 core，不直接碰 mquickjs。详见 `requirements/js-bridge-architecture.md`。
 
 ---
 

@@ -52,19 +52,22 @@ make && ./kwcc
 ```
 ├── deps/            # 第三方源码 (setup.sh 自动下载)
 ├── src/
-│   ├── main.m       # Sokol 生命周期 + NanoVG 渲染
-│   ├── kwcc_base.h/c # 纯 C 基础设施（内存池常量 + topic 清洗/校验）
+│   ├── main.m          # Sokol 生命周期 + NanoVG 渲染
+│   ├── kwcc_base.h/c   # 纯 C 基础设施（topic 清洗/校验/白名单匹配）
 │   ├── kwcc_mempool.h/c # L0-L7 Slab 内存池 + key_map + 常量表 + GC + TLV
 │   ├── kwcc_config.h/c  # Config 层：App/Core 域存取接口
-│   ├── kwcc_ui.c/h  # UI 模块（g_mu、microui 桥接、input、SVG、字体）
-│   ├── kwcc_js.c/h  # JS lifecycle + bus consumer + JS 白名单
-│   ├── kwcc_ui_bus.c/h # UI→JS 事件桥接（topic map + dispatch_event）
-│   ├── kwcc_bus.c/h # 通用 C Pub/Sub 事件总线（subscribe/publish/unsubscribe）
-│   ├── kwcc.h       # 入口 umbrella header（聚合各模块头文件）
-│   └── kwcc_io.h    # I/O 模块声明
+│   ├── kwcc_ui.c/h      # UI 模块（g_mu、microui 桥接、input、SVG、字体）
+│   ├── kwcc_js.c/h      # JS lifecycle + ops/module 类型定义 + bus consumer + 代理表
+│   ├── kwcc_js_http.c/h # HTTP JS bridge plugin（回调注册表 + bus 事件路由）[待实施]
+│   ├── kwcc_ui_bus.c/h  # UI→JS 事件桥接（topic map + dispatch_event）
+│   ├── kwcc_bus.c/h     # 通用 C Pub/Sub 事件总线（subscribe/publish/unsubscribe）
+│   ├── kwcc_io.c/h      # I/O Reactor（select() 非阻塞 FD 管理器）
+│   ├── kwcc_http.c/h    # HTTP Process Engine（fork+pipe+curl+picohttpparser+bus dispatch）
+│   ├── kwcc.h           # 入口 umbrella header（聚合各模块头文件）
+│   └── llog.h           # 日志包装器（解决 macOS syslog.h 宏冲突）
 ├── app/
-│   ├── main.js      # 模块入口
-│   ├── runtime/     # store.js + bus.js
+│   ├── main.js          # 模块入口
+│   ├── runtime/         # store.js + bus.js + promise.js + http.js
 │   └── modules/examples/  # 示例模块
 └── assets/          # 字体资源
 ```
@@ -94,9 +97,12 @@ make && ./kwcc
 | 11 | [naming-fix.md](requirements/naming-fix.md) | ✅ 完成 | — |
 | 12 | [bus-split-design.md](requirements/bus-split-design.md) | ✅ 完成 | 从 extract-bus-module 演进，19/19 测试 |
 | 13 | [bus-split-implementation-plan.md](requirements/bus-split-implementation-plan.md) | ✅ 完成 | — |
-| 14 | [async-io-design.md](requirements/async-io-design.md) | ⏳ 待实施 | 依赖 bus-split，已解除 |
-| 15 | [microui-id-override.md](requirements/microui-id-override.md) | ⏳ 待论证 | — |
-| 16 | [mquickjs-cfunc-registration.md](requirements/mquickjs-cfunc-registration.md) | ⚠️ 参考 | C 函数注册技术参考 |
+| 14 | [async-io-design.md](requirements/async-io-design.md) | 🔄 实施中 | 依赖 bus-split，已解除 |
+| 15 | [async-io-implementation-plan.md](requirements/async-io-implementation-plan.md) | 🔄 实施中 | Layer 1-2 已完成，Step 4 已拆分 |
+| 16 | [microui-id-override.md](requirements/microui-id-override.md) | ⏳ 待论证 | — |
+| 17 | [mquickjs-cfunc-registration.md](requirements/mquickjs-cfunc-registration.md) | ⚠️ 参考 | C 函数注册技术参考 |
+| 18 | [js-bridge-architecture.md](requirements/js-bridge-architecture.md) | ⏳ 待实施 | Facade + Plugin 架构调整 |
+| 19 | [js-http-implementation-plan.md](requirements/js-http-implementation-plan.md) | ⏳ 待实施 | 依赖 #18 完成 |
 | 17 | [spec.md](spec.md) | — | 完整项目规范 |
 
 ## 许可证
