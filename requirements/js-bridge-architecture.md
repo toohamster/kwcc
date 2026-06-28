@@ -113,9 +113,10 @@ typedef struct kwcc_js_ops {
 **设计要点**：
 - 函数指针第一个参数都是 `ops` 自身，子模块不需要知道 `ctx`
 - `to_cstring` 保持两步调用模式（调用方提供 buf），和原始 `JS_ToCString` 一致，不跨作用域
-- `call_cb` 内部处理 `JS_StackCheck` + `JS_PushArg` + `JS_Call` 三步，子模块只传参数数组
+- `call_cb` 内部处理 `JS_StackCheck` + `JS_PushArg` + `JS_Call` 三步，子模块只传参数数组。`JS_Call` 返回后检查 `JS_IsException(ret)`：如果是异常，log_warn 记录并清除（`JS_GetException`），防止异常状态累积影响后续 JS 执行。子模块不需要处理异常
 - 代理只做映射，不承担引擎内部的内存管理职责（GC、引用计数等由引擎自己管理）
-- `notify_js` 的 `ack_cleanup` 参数：投递前自动调 `ack_cleanup(id)` 释放 C 侧资源（buffer、句柄等）。传入 NULL 表示无需清理（如 Timer 事件）。调用方不需要记着调 release，传了就自动处理
+- `notify_js` 的 `ack_cleanup` 参数：投递前自动调 `ack_cleanup(id)` 释放 C 侧资源（buffer、句柄等）。传入 NULL 表示无需清理（如 progress/Timer 事件）。调用方不需要记着调 release，传了就自动处理。`ack_cleanup` 内部失败时（如 req_id 已被清理）应 log_warn 并安全返回，不影响后续 `call_cb` 执行
+- `s_notify_emit_fn`（`$notify.emit` 的引用）缓存为 static 变量。`$notify.emit` 通过 `global.$notify.emit` 属性链永远可达，GC 不会回收，不需要 `JS_AddGCRef` 保护
 
 #### 4. kwcc_js_module_t — 模块描述符（规范）
 
@@ -155,17 +156,16 @@ typedef struct kwcc_js_module {
 #### JS 端
 
 ```javascript
-// $notify — C→JS 通知分发器（由 core 注入）
-var $notify = new Object();
-$notify._handlers = {};
+// $notify — C→JS 通知分发器（由 core 通过 C API 创建对象 + eval 注入方法）
+$notify.registry = {};
 
 $notify.on = function(type, handler) {
-    $notify._handlers[type] = handler;
+    $notify.registry[type] = handler;
 };
 
 // C 端唯一入口
 $notify.emit = function(type, event, id, data) {
-    var handler = $notify._handlers[type];
+    var handler = $notify.registry[type];
     if (handler) handler(event, id, data);
 };
 ```
@@ -183,7 +183,7 @@ void (*notify_js)(kwcc_js_ops_t *ops,
                   void (*ack_cleanup)(const char *id));  /* 投递前释放 C 侧资源，可为 NULL */
 ```
 
-core 实现内部持有 `$notify.emit` 的引用，`ack_cleanup` 在 `call_cb` 之前自动调用。模块不需要知道 `$notify` 的存在，也不需要记着调 release — 传了 `ack_cleanup` 就自动处理。
+core 实现内部持有 `$notify.emit` 的引用，`ack_cleanup` 在 `call_cb` 之前自动调用。`call_cb` 内部已做异常捕获（`JS_IsException` 检查 + log_warn + 清除），JS handler 抛异常不会中断 C 端执行或累积异常状态。模块不需要知道 `$notify` 的存在，也不需要记着调 release — 传了 `ack_cleanup` 就自动处理。
 
 #### 数据流
 
@@ -261,24 +261,26 @@ static void kwcc_js_ops_init(JSContext *ctx) {
 ### 2. 注入 `$notify` + 统一模块注册
 
 ```c
-static kwcc_js_val_t s_notify_emit_fn;  /* $notify.emit 的引用 */
+static kwcc_js_val_t s_notify_emit_fn;  /* $notify.emit 的引用（global 可达，GC 安全） */
 
 /* 注入 $notify 通用通知分发器（在模块注册之前） */
 static void kwcc_js_inject_notify(kwcc_js_ops_t *ops) {
+    /* 创建 $notify 对象（C API，和 http_load 中 $http 创建方式一致） */
+    kwcc_js_val_t notify_obj = ops->new_object(ops);
+    ops->set_str_prop(ops, ops->global_obj, "$notify", notify_obj);
+
     const char *code =
-        "var $notify = new Object();\n"
-        "$notify._handlers = {};\n"
+        "$notify.registry = {};\n"
         "$notify.on = function(type, handler) {\n"
-        "    $notify._handlers[type] = handler;\n"
+        "    $notify.registry[type] = handler;\n"
         "};\n"
         "$notify.emit = function(type, event, id, data) {\n"
-        "    var handler = $notify._handlers[type];\n"
+        "    var handler = $notify.registry[type];\n"
         "    if (handler) handler(event, id, data);\n"
         "};\n";
     ops->eval(ops, code, strlen(code), "<$notify>", JS_EVAL_REPL);
 
-    /* 获取 $notify.emit 的引用，供 notify_js 实现调用 */
-    kwcc_js_val_t notify_obj = ops->get_str_prop(ops, ops->global_obj, "$notify");
+    /* 缓存 $notify.emit 的引用，供 notify_js 实现调用 */
     s_notify_emit_fn = ops->get_str_prop(ops, notify_obj, "emit");
 }
 
@@ -290,7 +292,7 @@ static void js_notify_js_impl(kwcc_js_ops_t *ops,
     /* ① 先释放 C 侧资源（数据已通过 JSValue 拷贝进 GC 堆） */
     if (ack_cleanup) ack_cleanup(id);
 
-    /* ② 再投递到 JS 端 */
+    /* ② 投递到 JS 端 */
     kwcc_js_val_t args[4];
     args[0] = ops->new_string(ops, type);
     args[1] = ops->new_string(ops, event);

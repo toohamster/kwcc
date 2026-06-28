@@ -31,7 +31,7 @@
 7. **C 端不存 JSValue 回调**：C 端只管 publish 事件 + 调 `ops->notify_js` 通知 JS 端，JS 端通过 `$notify.on('http', handler)` 注册处理器，自己维护 `$http.callbacks` 做 id → resolve/reject 映射
 8. **`$notify` 作为通用 C→JS 通知通道**：不走 `$bus.emit`（避免字符串拼接和 bus 匹配开销），C 端通过 `ops->notify_js` 直达 `$notify.emit`，按 type 分发给模块 handler。`$notify` 不局限于 HTTP，未来 WS/Timer 等模块遵循同样规则
 9. **MiniPromise 独立为 `promise.js`**：通用基础设施，不与 HTTP 耦合
-10. **cancel 必须触发清理事件**：`kwcc_http_cancel` 发布 `http/cancel/<reqId>` 后，JS 端的 `_onNotify` 必须处理 `cancel` 事件（和 `error` 一样调 `reject` + `delete callbacks[id]`），否则 Promise 永久悬挂
+10. **cancel 必须触发清理事件**：`kwcc_http_cancel` 发布 `http/cancel/<reqId>` 后，JS 端的 `$notify.on('http', ...)` handler 必须处理 `cancel` 事件（和 `error` 一样调 `reject` + `delete callbacks[id]`），否则 Promise 永久悬挂
 11. **`kwcc_http_get_result` 时序契约 + `ack_cleanup` 自动释放**：`dispatch_end` 后不再立刻 cleanup，标记 `PENDING_ACK`。`http_on_bus_event` 构建 JSValue（数据拷贝进 GC 堆）后调 `notify_js`，`ack_cleanup`（即 `kwcc_http_release_result`）在投递前自动释放 C 侧资源。此契约支持同步和异步 bus
 12. **僵尸进程回收**：`cleanup` 中 `waitpid(WNOHANG)` 单次尝试可能回收不到（cancel 后子进程还没退出）。需在 `kwcc_http_check_progress` 中加一轮对所有 in_use slot 的 `waitpid(WNOHANG)` 扫描，回收已退出的子进程
 
@@ -60,7 +60,7 @@ kwcc_js_http (on_bus_event)
     ▼
 kwcc_js_ops.notify_js (core 实现)
     │ ① ack_cleanup(reqId) — 释放 C 侧 buffer（数据已在 GC 堆）
-    │ ② call_cb($notify.emit, [type, event, id, data])
+    │ ② call_cb(s_notify_emit_fn, [type, event, id, data])
     ▼
 $notify.emit("http", "end", reqId, data)
     │ 查 _handlers["http"]
@@ -154,7 +154,7 @@ int kwcc_http_result_get_header(const char *req_id, int index,
 
 1. 删除回调注册表（`g_kwcc_http_cbs` + `register/find/clear_callback`）— 回调注册不属于 HTTP 服务
 2. 实现 `kwcc_http_result_header_count` / `kwcc_http_result_get_header`
-3. `kwcc_http_check_progress` 传 `kwcc_http_progress_t` 结构体作为 bus data
+3. `kwcc_http_check_progress` 传 `kwcc_http_progress_t` 结构体作为 bus data（progress 事件的数据来源是 bus data，end/error/cancel 事件的数据来源是 `kwcc_http_get_result`）
 4. `kwcc_http_on_read` 增量解析 header 提取 `Content-Length` 存到 `req->total_size`
 5. **僵尸回收**：`kwcc_http_check_progress` 中加一轮对所有 `in_use` slot 的 `waitpid(pid, NULL, WNOHANG)` 扫描，回收已退出但未被 cleanup 捕获的子进程。如果 `waitpid` 返回 `> 0`（子进程已退出），发布 `http/end` 或 `http/error` 事件并调 cleanup
 6. **请求状态机**：`dispatch_end` 后不再立刻 cleanup，改为 `PENDING_ACK` 状态。新增 `kwcc_http_release_result(req_id)` 供 `ack_cleanup` 调用，释放 buffer + cleanup。`check_progress` 中加 `PENDING_ACK` 超时兜底（防止消息丢失导致 slot 泄漏）
@@ -230,7 +230,7 @@ static void http_load(kwcc_js_ops_t *ops) {
 **设计要点**：
 - `$http` 对象通过 `ops->new_object` + `set_str_prop` 创建，和 `kwcc_register_config_js` 风格一致
 - C 端只注入 C→JS 桥接方法（`cancel`/`config`），纯 JS 逻辑在 `http.js` 中定义
-- `$http.callbacks`/`$http.onNotify`/`$notify.on('http', ...)` 全部移到 `http.js`，C 端不注入
+- `$http.callbacks`/`$notify.on('http', ...)` 全部移到 `http.js`，C 端不注入
 - C 端通过 `ops->notify_js(ops, "http", event, id, data, ack_cleanup)` 通知 JS 端
 
 **3. `http_register_cfun`** — 注册代理表 C handler
@@ -239,10 +239,10 @@ static void http_load(kwcc_js_ops_t *ops) {
 
 - 判断 topic 前缀（`http/end`、`http/error`、`http/progress`、`http/cancel`）
 - 从 topic 提取 req_id
-- `kwcc_http_get_result` 读取解析结果
-- `kwcc_http_result_get_header` 访问 header
-- 构建 JSValue 响应对象（通过 `ops->new_object`、`ops->set_str_prop`）— **数据通过 `JS_NewStringLen` 拷贝进 GC 堆，不再依赖 C buffer**
-- 调 `ops->notify_js(ops, "http", event, req_id, data_obj, kwcc_http_release_result)` — `ack_cleanup` 在投递前自动释放 C 侧资源
+- **end/error/cancel**：`kwcc_http_get_result` 读取解析结果 + `kwcc_http_result_get_header` 访问 header → 构建 JSValue 响应对象 — **数据通过 `JS_NewStringLen` 拷贝进 GC 堆，不再依赖 C buffer**
+- **progress**：从 bus data（`kwcc_http_progress_t *`）直接读 `loaded`/`total` → 构建 JSValue `{ loaded, total }`
+- end/error/cancel：调 `ops->notify_js(ops, "http", event, req_id, data_obj, kwcc_http_release_result)` — `ack_cleanup` 在投递前自动释放 C 侧资源
+- progress：调 `ops->notify_js(ops, "http", "progress", req_id, data_obj, NULL)` — 请求还在进行中，不释放
 - **不存任何 JSValue 回调，不维护回调注册表，不持有 JS 函数引用，不手动调 cleanup**
 
 **5. 模块描述符**：
@@ -359,11 +359,11 @@ $http.fetch = function(url, options) {
 };
 ```
 
-**说明**：`$http.callbacks[id]` 的 key 是 reqId，和 `$notify` payload 中的 `id` 字段对应。`$http.onNotify(event, id, data)` 收到通知后用 `id` 查 `callbacks[id]`。
+**说明**：`$http.callbacks[id]` 的 key 是 reqId，和 `$notify` payload 中的 `id` 字段对应。匿名 handler 收到通知后用 `id` 查 `callbacks[id]`。
 
 **C 端 vs JS 端职责**：
 - C 端（`http_load`）：`ops->new_object` 创建 `$http` + 注入 C→JS 桥接方法（`cancel`/`config`）
-- JS 端（`http.js`）：`callbacks`/`onNotify`/`$notify.on`/`fetch` — 纯 JS 逻辑
+- JS 端（`http.js`）：`callbacks`/`$notify.on`/`fetch` — 纯 JS 逻辑
 
 ### `app/main.js` 加载顺序
 
