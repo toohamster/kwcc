@@ -255,7 +255,8 @@ static void http_load(kwcc_js_ops_t *ops) {
 
 - 判断 topic 前缀（`http/end`、`http/error`、`http/progress`、`http/cancel`）
 - 从 topic 提取 req_id
-- **end/error/cancel**：`kwcc_http_get_result` 读取解析结果 + `kwcc_http_result_get_header` 访问 header → 构建 JSValue 响应对象 — **数据通过 `JS_NewStringLen` 拷贝进 GC 堆，不再依赖 C buffer** → 调 `ops->notify_js(ops, "http", event, req_id, data_obj, kwcc_http_cleanup_by_req_id)`
+- **end/error**：`kwcc_http_get_result` 读取解析结果 + `kwcc_http_result_get_header` 访问 header → 构建 JSValue 响应对象 — **数据通过 `JS_NewStringLen` 拷贝进 GC 堆，不再依赖 C buffer** → 调 `ops->notify_js(ops, "http", event, req_id, data_obj, kwcc_http_cleanup_by_req_id)`
+- **cancel**：构建 JSValue `{ error: "cancelled", reqId: req_id }` → 调 `ops->notify_js(ops, "http", "cancel", req_id, data_obj, NULL)` — cancel 时 `kwcc_http_cancel` 内部已调 cleanup，ack_cleanup 传 NULL 避免二次释放
 - **progress**：从 bus data（`kwcc_http_progress_t *`）直接读 `loaded`/`total` → 构建 JSValue `{ loaded, total }` → 调 `ops->notify_js(ops, "http", "progress", req_id, data_obj, NULL)`
 - **不存任何 JSValue 回调，不维护回调注册表，不持有 JS 函数引用，不手动调 cleanup**
 
