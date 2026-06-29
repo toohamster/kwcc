@@ -167,6 +167,7 @@ typedef struct {
 } kwcc_http_progress_t;
 ```
    progress 事件的数据来源是 bus data，end/error/cancel 事件的数据来源是 `kwcc_http_get_result`
+   **前提**：当前 bus 是同步分发，`kwcc_http_progress_t` 在栈上分配即可。若 bus 未来改为异步（队列化），需改为堆分配或在 `kwcc_http_req_t` 中持久化
 6. `kwcc_http_on_read` 增量解析 header 提取 `Content-Length` 存到 `req->total_size`
 7. **僵尸回收**：`kwcc_http_check_progress` 中加一轮对所有 `in_use` slot 的 `waitpid(pid, NULL, WNOHANG)` 扫描，回收已退出但未被 cleanup 捕获的子进程。如果 `waitpid` 返回 `> 0`（子进程已退出），发布 `http/end` 或 `http/error` 事件并调 cleanup
 8. **无 Content-Length 哨兵值**：`kwcc_http_progress_t.total` 在无 Content-Length（如 chunked 编码）时设为 `-1`，JS 端据此跳过百分比计算，避免除零。`$notify.on('http', ...)` handler 的 progress 分支检查 `data.total === -1` 时只传 `loaded`

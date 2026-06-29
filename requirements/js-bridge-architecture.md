@@ -120,6 +120,7 @@ typedef struct kwcc_js_ops {
 **设计要点**：
 - 函数指针第一个参数都是 `ops` 自身，子模块不需要知道 `ctx`
 - `to_cstring` 保持两步调用模式（调用方提供 buf），和原始 `JS_ToCString` 一致，不跨作用域
+- `is_function` 需要 `ops` 参数（mquickjs 的 `JS_IsFunction` 需要 ctx 检查对象类型），而 `is_undefined`/`is_null`/`is_exception` 不需要 `ops`（纯值比较宏，直接检查 uint64_t 位模式）
 - `call_cb` 内部处理 `JS_StackCheck` + `JS_PushArg` + `JS_Call` 三步，子模块只传参数数组。`JS_Call` 返回后检查 `JS_IsException(ret)`：如果是异常，log_warn 记录并清除（`JS_GetException`），防止异常状态累积影响后续 JS 执行。子模块不需要处理异常
 - 代理只做映射，不承担引擎内部的内存管理职责（GC、引用计数等由引擎自己管理）
 - `notify_js` 的 `ack_cleanup` 参数：投递前自动调 `ack_cleanup(id)` 释放 C 侧资源（buffer、句柄等）。传入 NULL 表示无需清理（如 progress/Timer 事件）。调用方不需要记着调 release，传了就自动处理。`ack_cleanup` 内部失败时（如 req_id 已被清理）应 log_warn 并安全返回，不影响后续 `call_cb` 执行
@@ -321,7 +322,7 @@ void kwcc_js_register_module(kwcc_js_ops_t *ops, kwcc_js_module_t *mod) {
     log_info("js: loading module '%s'", mod->name);
     if (mod->load) mod->load(ops);
     if (mod->register_cfun) mod->register_cfun(ops);
-    g_modules[g_module_count++] = mod;   /* 维护模块列表，供 bus 事件分发 */
+    g_kwcc_js_modules[g_kwcc_js_module_count++] = mod;   /* 维护模块列表，供 bus 事件分发 */
     log_info("js: module '%s' registered", mod->name);
 }
 ```
@@ -329,12 +330,16 @@ void kwcc_js_register_module(kwcc_js_ops_t *ops, kwcc_js_module_t *mod) {
 ### 3. bus 事件按前缀分发
 
 ```c
+#define KWCC_JS_MAX_MODULES 8
+static kwcc_js_module_t *g_kwcc_js_modules[KWCC_JS_MAX_MODULES];
+static int g_kwcc_js_module_count = 0;
+
 static void kwcc_js_on_bus_event(const char *topic, const void *data,
                                   size_t len, void *user_data) {
     /* 按 topic 前缀分发给对应模块的 on_bus_event */
-    for (int i = 0; i < g_module_count; i++) {
-        if (g_modules[i]->on_bus_event) {
-            g_modules[i]->on_bus_event(topic, data, len, &g_kwcc_js_ops);
+    for (int i = 0; i < g_kwcc_js_module_count; i++) {
+        if (g_kwcc_js_modules[i]->on_bus_event) {
+            g_kwcc_js_modules[i]->on_bus_event(topic, data, len, &g_kwcc_js_ops);
         }
     }
     /* 无模块认领的 topic，走默认白名单 + $bus.emit */
