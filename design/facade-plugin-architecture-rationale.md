@@ -436,3 +436,18 @@ int kwcc_http_result_get_header(const char *req_id, int index,
 - C 端只负责桥接（JS→C 调用），不负责业务逻辑
 - 回调映射、Promise 创建、事件处理都是纯 JS 逻辑，放在 JS 文件里更灵活、可读
 - 和 `kwcc_register_config_js` 风格一致：C 端创建对象壳 + 注入桥接，JS 端定义业务方法
+
+---
+
+### C11：`kwcc_js.c` 精简 include，删除 `kwcc_http.h` 和 `picohttpparser.h`
+
+**问题**：重构后 `kwcc_js.c` 不再有 HTTP 业务代码，但 include 列表还残留 `kwcc_http.h` 和 `picohttpparser.h`。
+
+**决策**：删除这两个 include。core 不依赖具体模块的服务层。
+
+**原因**：
+
+1. **依赖方向正确**：core 不知道 HTTP 的存在，模块依赖 core，不是反过来
+2. **编译隔离**：`kwcc_http.h` 改了不需要重编 `kwcc_js.c`
+3. **职责清晰**：core 只管 JS 生命周期 + ops + 模块注册 + bus 分发，不碰任何模块业务
+4. 如果不精简，Facade 就是半成品——代码虽然移走了 HTTP 逻辑，但编译依赖还在

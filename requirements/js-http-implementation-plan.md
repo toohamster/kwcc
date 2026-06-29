@@ -32,7 +32,7 @@
 8. **`$notify` 作为通用 C→JS 通知通道**：不走 `$bus.emit`（避免字符串拼接和 bus 匹配开销），C 端通过 `ops->notify_js` 直达 `$notify.emit`，按 type 分发给模块 handler。`$notify` 不局限于 HTTP，未来 WS/Timer 等模块遵循同样规则
 9. **MiniPromise 独立为 `promise.js`**：通用基础设施，不与 HTTP 耦合
 10. **cancel 必须触发清理事件**：`kwcc_http_cancel` 发布 `http/cancel/<reqId>` 后，JS 端的 `$notify.on('http', ...)` handler 必须处理 `cancel` 事件（和 `error` 一样调 `reject` + `delete callbacks[id]`），否则 Promise 永久悬挂
-11. **`kwcc_http_get_result` 时序契约 + `ack_cleanup` 自动释放**：`dispatch_end` 后数据通过 `JS_NewStringLen` 拷贝进 GC 堆，`ack_cleanup`（即 `kwcc_http_release_result`）在投递前自动释放 C 侧资源。此契约支持同步和异步 bus
+11. **`kwcc_http_get_result` 时序契约 + `ack_cleanup` 自动释放**：`dispatch_end` 后数据通过 `JS_NewStringLen` 拷贝进 GC 堆，`ack_cleanup`（即 `kwcc_http_cleanup_by_req_id`）在投递前自动释放 C 侧资源。此契约支持同步和异步 bus
 12. **僵尸进程回收**：`cleanup` 中 `waitpid(WNOHANG)` 单次尝试可能回收不到（cancel 后子进程还没退出）。需在 `kwcc_http_check_progress` 中加一轮对所有 in_use slot 的 `waitpid(WNOHANG)` 扫描，回收已退出的子进程
 
 ---
@@ -56,7 +56,7 @@ kwcc_http (fork+pipe+curl)
     ▼
 kwcc_js_http (on_bus_event)
     │ 读取 kwcc_http_get_result → 构建 JSValue 响应
-    │ ops->notify_js(ops, "http", "end", reqId, dataObj, kwcc_http_release_result)
+    │ ops->notify_js(ops, "http", "end", reqId, dataObj, kwcc_http_cleanup_by_req_id)
     ▼
 kwcc_js_ops.notify_js (core 实现)
     │ ① ack_cleanup(reqId) — 释放 C 侧 buffer（数据已在 GC 堆）
@@ -138,6 +138,9 @@ int kwcc_http_result_header_count(const char *req_id);
 int kwcc_http_result_get_header(const char *req_id, int index,
                                 const char **name, size_t *name_len,
                                 const char **value, size_t *value_len);
+
+/* 按 req_id 释放请求资源（供 ack_cleanup 调用） */
+void kwcc_http_cleanup_by_req_id(const char *req_id);
 ```
 
 子模块通过 `kwcc_http_result_header_count` + `kwcc_http_result_get_header` 访问 header，不需要知道 `phr_header`。
@@ -153,8 +156,10 @@ int kwcc_http_result_get_header(const char *req_id, int index,
 ### 改动
 
 1. 删除回调注册表（`g_kwcc_http_cbs` + `register/find/clear_callback`）— 回调注册不属于 HTTP 服务
-2. 实现 `kwcc_http_result_header_count` / `kwcc_http_result_get_header`
-3. 新增 `kwcc_http_progress_t` 结构体，`kwcc_http_check_progress` 传此结构体作为 bus data：
+2. 新增 `static kwcc_http_req_find(req_id)` 内部查找函数，复用 `req_id → req*` 查找逻辑（当前分散在 `kwcc_http_cancel`、`kwcc_http_get_result` 等多个函数中），不进 `.h`，不暴露 `req*` 给外部
+3. 实现 `kwcc_http_result_header_count` / `kwcc_http_result_get_header`
+4. 实现 `kwcc_http_cleanup_by_req_id`（供 ack_cleanup 调用，内部通过 `kwcc_http_req_find` 查找后调 `kwcc_http_cleanup`）
+5. 新增 `kwcc_http_progress_t` 结构体，`kwcc_http_check_progress` 传此结构体作为 bus data：
 ```c
 typedef struct {
     int loaded;   /* 已接收字节数 */
@@ -162,9 +167,9 @@ typedef struct {
 } kwcc_http_progress_t;
 ```
    progress 事件的数据来源是 bus data，end/error/cancel 事件的数据来源是 `kwcc_http_get_result`
-4. `kwcc_http_on_read` 增量解析 header 提取 `Content-Length` 存到 `req->total_size`
-5. **僵尸回收**：`kwcc_http_check_progress` 中加一轮对所有 `in_use` slot 的 `waitpid(pid, NULL, WNOHANG)` 扫描，回收已退出但未被 cleanup 捕获的子进程。如果 `waitpid` 返回 `> 0`（子进程已退出），发布 `http/end` 或 `http/error` 事件并调 cleanup
-6. **无 Content-Length 哨兵值**：`kwcc_http_progress_t.total` 在无 Content-Length（如 chunked 编码）时设为 `-1`，JS 端据此跳过百分比计算，避免除零。`$notify.on('http', ...)` handler 的 progress 分支检查 `data.total === -1` 时只传 `loaded`
+6. `kwcc_http_on_read` 增量解析 header 提取 `Content-Length` 存到 `req->total_size`
+7. **僵尸回收**：`kwcc_http_check_progress` 中加一轮对所有 `in_use` slot 的 `waitpid(pid, NULL, WNOHANG)` 扫描，回收已退出但未被 cleanup 捕获的子进程。如果 `waitpid` 返回 `> 0`（子进程已退出），发布 `http/end` 或 `http/error` 事件并调 cleanup
+8. **无 Content-Length 哨兵值**：`kwcc_http_progress_t.total` 在无 Content-Length（如 chunked 编码）时设为 `-1`，JS 端据此跳过百分比计算，避免除零。`$notify.on('http', ...)` handler 的 progress 分支检查 `data.total === -1` 时只传 `loaded`
 
 **验证**：`make` 编译通过
 
@@ -203,7 +208,7 @@ extern kwcc_js_module_t kwcc_js_http_module;
 
 ### `src/kwcc_js_http.c`
 
-**依赖**：`kwcc_js.h` + `kwcc_http.h`（不 include mquickjs.h / picohttpparser.h / llog.h）
+**依赖**：`kwcc_js.h` + `kwcc_http.h` + `llog.h`（隔离原则见架构文档：只隔离 mquickjs，可 include 其他所需库）
 
 **1. 模块级 ops 指针**：
 
@@ -241,15 +246,15 @@ static void http_load(kwcc_js_ops_t *ops) {
 
 **3. `http_register_cfun`** — 注册代理表 C handler：
 
-向 `g_kwcc_js_cfun_handlers` 代理表注册两项：
-- `"kwcc_js_http_request"` → `kwcc_js_http_request`（提取 argv[0]=method, argv[1]=url, argv[2]=headers 数组, argv[3]=body → 调 `kwcc_http_request` → 返回 req_id 字符串）
-- `"kwcc_js_http_cancel"` → `kwcc_js_http_cancel`（提取 argv[0]=req_id → 调 `kwcc_http_cancel`）
+向 `g_kwcc_js_cfun_handlers` 代理表注册两项（C handler 声明为 static，不需要在 .h 中暴露）：
+- `"kwcc_js_http_request"` → `static kwcc_js_http_request`（提取 argv[0]=method, argv[1]=url, argv[2]=headers 数组, argv[3]=body → 调 `kwcc_http_request` → 返回 req_id 字符串）
+- `"kwcc_js_http_cancel"` → `static kwcc_js_http_cancel`（提取 argv[0]=req_id → 调 `kwcc_http_cancel`）
 
 **4. `http_on_bus_event`** — 收 bus 事件后构建 JSValue 响应，调 `ops->notify_js`：
 
 - 判断 topic 前缀（`http/end`、`http/error`、`http/progress`、`http/cancel`）
 - 从 topic 提取 req_id
-- **end/error/cancel**：`kwcc_http_get_result` 读取解析结果 + `kwcc_http_result_get_header` 访问 header → 构建 JSValue 响应对象 — **数据通过 `JS_NewStringLen` 拷贝进 GC 堆，不再依赖 C buffer** → 调 `ops->notify_js(ops, "http", event, req_id, data_obj, kwcc_http_release_result)`
+- **end/error/cancel**：`kwcc_http_get_result` 读取解析结果 + `kwcc_http_result_get_header` 访问 header → 构建 JSValue 响应对象 — **数据通过 `JS_NewStringLen` 拷贝进 GC 堆，不再依赖 C buffer** → 调 `ops->notify_js(ops, "http", event, req_id, data_obj, kwcc_http_cleanup_by_req_id)`
 - **progress**：从 bus data（`kwcc_http_progress_t *`）直接读 `loaded`/`total` → 构建 JSValue `{ loaded, total }` → 调 `ops->notify_js(ops, "http", "progress", req_id, data_obj, NULL)`
 - **不存任何 JSValue 回调，不维护回调注册表，不持有 JS 函数引用，不手动调 cleanup**
 

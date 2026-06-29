@@ -26,10 +26,17 @@
 mquickjs.h           ← 第三方 JS 引擎
     ↑ (只有 kwcc_js.c 知道)
 kwcc_js.h            ← Facade：封装 mquickjs，定义类型/接口/注册规范
-    ↑ (扩展模块只依赖这一层)
+    ↑ (扩展模块通过这一层操作 JS，可 include 其他所需库)
 kwcc_js_http.c/h     ← Plugin：实现 kwcc_js_module_t 接口，依赖 kwcc_js.h + kwcc_http.h
 kwcc_js_ws.c/h       ← Plugin：未来，依赖 kwcc_js.h + kwcc_ws.h
 ```
+
+### 隔离原则
+
+子模块**只隔离 mquickjs**，不隔离其他第三方库或项目内部库。具体规则：
+
+- **禁止 include**：`mquickjs.h`、`mquickjs_priv.h` — JS 引擎是唯一需要隔离的依赖，子模块通过 `kwcc_js_ops_t` 操作 JS
+- **可 include**：项目内部库（`llog.h`、`kwcc_http.h` 等）和第三方库（`picohttpparser.h` 等）— 子模块可以 include 它需要的任何非 mquickjs 依赖
 
 ### 核心类型
 
@@ -314,6 +321,7 @@ void kwcc_js_register_module(kwcc_js_ops_t *ops, kwcc_js_module_t *mod) {
     log_info("js: loading module '%s'", mod->name);
     if (mod->load) mod->load(ops);
     if (mod->register_cfun) mod->register_cfun(ops);
+    g_modules[g_module_count++] = mod;   /* 维护模块列表，供 bus 事件分发 */
     log_info("js: module '%s' registered", mod->name);
 }
 ```
@@ -344,9 +352,8 @@ static void kwcc_js_on_bus_event(const char *topic, const void *data,
 |------|------|--------------|------|
 | 1 | kwcc_js.h 新增类型和接口定义 | `src/kwcc_js.h` | 无 |
 | 2 | kwcc_js.c 实现 ops 绑定 + 模块注册 | `src/kwcc_js.c` | Step 1 |
-| 3 | 重构现有 HTTP 代码为模块描述符 | `src/kwcc_js.c`（删除内联 HTTP 代码） | Step 2 |
-| 4 | 编译验证 | — | Step 3 |
-| 5 | ops 接口测试 | `tests/test_js_ops.c` | Step 2（可与 Step 3-4 并行） |
+| 3 | ops 接口测试 | `tests/test_js_ops.c` | Step 2 |
+| 4 | 重构现有 HTTP 代码为模块描述符 | `src/kwcc_js.c`（删除内联 HTTP 代码） | Step 3 |
 
 ### Step 1: kwcc_js.h 类型定义
 
@@ -370,32 +377,9 @@ static void kwcc_js_on_bus_event(const char *topic, const void *data,
 
 **验证**：`make` 编译通过
 
-### Step 3: 重构 HTTP 为模块
+### Step 3: ops 接口测试
 
-1. 将 `kwcc_js.c` 中的 HTTP 相关代码（`kwcc_js_http_request`、`kwcc_js_http_cancel`、`kwcc_register_http_js`、回调注册表、bus 事件路由）移出
-2. 在 `kwcc_js.c` 中只保留 `extern kwcc_js_module_t kwcc_js_http_module;` 和注册调用
-3. `match_whitelist` 改名 `kwcc_js_match_whitelist`
-
-**注意**：此步不创建 `kwcc_js_http.c/h`，那是 `js-http-implementation-plan.md` 的内容。此步只确保 `kwcc_js.c` 中的 HTTP 代码通过 ops 接口调用，不再直接用 mquickjs API。
-
-**验证**：`make` 编译通过，`make run` 正常
-
-### Step 4: 编译验证
-
-```bash
-make clean && make
-make run
-```
-
-验证项：
-- [ ] 无编译错误
-- [ ] 无链接错误
-- [ ] `make run` 原有功能不受影响
-- [ ] `kwcc_js_ops_t` 接口可用（ops 函数指针都能正确调用）
-
-### Step 5: ops 接口测试（可与 Step 3-4 并行）
-
-**目的**：把 `kwcc_js_ops_t` 的每个函数指针当成内部 ABI 契约做单元测试，而不是只靠 HTTP 模块迁移完之后 `make run` 间接验证。
+**目的**：把 `kwcc_js_ops_t` 的每个函数指针当成内部 ABI 契约做单元测试，在重构 HTTP 代码之前确保 core 本身正确。测试跑通后再做模块迁移，避免问题交叉。
 
 ### `tests/test_js_ops.c`
 
@@ -409,6 +393,20 @@ make run
 | 6 | `eval` + `JS_EVAL_REPL` | 执行 JS 代码，隐式全局变量生效 |
 | 7 | `notify_js` + `ack_cleanup` | C→JS `$notify.emit` 通道工作，`$notify.on` handler 被调用，`ack_cleanup` 在投递前被自动调用 |
 | 8 | `array_length` + `array_get` | 数组创建、长度、索引访问 |
+
+测试方法参考 `testing_methodology.md`：独立 mquickjs 环境，不依赖 Sokol/microui/NanoVG。
+
+---
+### Step 4: 重构 HTTP 为模块
+
+1. 删除 `kwcc_js.c` 中的 HTTP 相关代码（`kwcc_js_http_request`、`kwcc_js_http_cancel`、`kwcc_register_http_js`、回调注册表、bus 事件路由）——这些由 `kwcc_js_http.c` 模块提供
+2. 在 `kwcc_js.c` 中只保留 `extern kwcc_js_module_t kwcc_js_http_module;` 和注册调用
+3. `match_whitelist` 改名 `kwcc_js_match_whitelist`
+4. 删除 `kwcc_js.c` 中的 `#include "kwcc_http.h"` 和 `#include "picohttpparser/picohttpparser.h"` — core 不依赖具体模块的服务层，编译隔离
+
+**注意**：此步不创建 `kwcc_js_http.c/h`，那是 `js-http-implementation-plan.md` 的内容。此步只确保 `kwcc_js.c` 中的 HTTP 代码通过 ops 接口调用，不再直接用 mquickjs API。
+
+**验证**：`make` 编译通过，`make run` 正常，ops 测试仍通过
 
 测试方法参考 `testing_methodology.md`：独立 mquickjs 环境，不依赖 Sokol/microui/NanoVG。
 
