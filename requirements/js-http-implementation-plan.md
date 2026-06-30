@@ -99,10 +99,11 @@ MiniPromise resolved/rejected
 | 2 | kwcc_http.c 适配 header 访问 API + progress + 增量解析 | `src/kwcc_http.c` | Step 1 |
 | 3 | kwcc_js_http.h 模块声明 | `src/kwcc_js_http.h` | 架构调整完成 |
 | 4 | kwcc_js_http.c 模块实现 | `src/kwcc_js_http.c` | Step 2 + Step 3 |
-| 5 | kwcc_js.c 删除内联 HTTP 代码，注册 http 模块 | `src/kwcc_js.c` | Step 4 |
-| 6 | Makefile 更新 | `Makefile` | Step 4 |
-| 7 | promise.js + http.js | `app/runtime/promise.js`, `app/runtime/http.js`, `app/main.js` | Step 5 |
-| 8 | 编译验证 | — | Step 7 |
+| 5 | kwcc_js.c 删除内联 HTTP 代码 + kwcc_js.h 删除 HTTP 声明 + Makefile 更新 | `src/kwcc_js.c`, `src/kwcc_js.h`, `Makefile` | Step 4 |
+| 6 | promise.js + http.js | `app/runtime/promise.js`, `app/runtime/http.js`, `app/main.js` | Step 5 |
+| 7 | 编译验证 | — | Step 6 |
+
+**注意**：原方案 Step 4（创建模块）和 Step 5（删除内联代码）合并为 Step 4+5，因为删除内联代码必须先有替代文件，否则编译会断。Makefile 更新也合并进来，避免中间编译断档。
 
 ---
 
@@ -276,27 +277,29 @@ kwcc_js_module_t kwcc_js_http_module = {
 
 ---
 
-## Step 5: kwcc_js.c 删除内联 HTTP 代码
+## Step 5: kwcc_js.c 删除内联 HTTP 代码 + kwcc_js.h 删除 HTTP 声明 + Makefile 更新
 
-**目的**：`kwcc_js.c` 只保留 core 职责，HTTP 由模块提供。
+**目的**：`kwcc_js.c` 只保留 core 职责，HTTP 由模块提供。Makefile 同步更新，避免中间编译断档。
 
-### 改动
+### kwcc_js.c 改动
 
 1. 删除 `kwcc_js_http_request` / `kwcc_js_http_cancel` / `kwcc_register_http_js` 函数实现
 2. 删除代理表中 `kwcc_js_http_request` / `kwcc_js_http_cancel` 两项（模块的 `register_cfun` 负责添加）
 3. 删除 `kwcc_js_on_bus_event` 中 HTTP 事件路由（模块的 `on_bus_event` 负责）
-4. `match_whitelist` 改名 `kwcc_js_match_whitelist`
-5. `kwcc_js_on_bus_event` 改为遍历模块列表分发
-6. `kwcc_create_js` 中调用 `kwcc_js_register_modules(&g_kwcc_js_ops)` 替代 `kwcc_register_http_js(ctx)`
-7. 删除 `kwcc_js.h` 中的 `kwcc_register_http_js` / `kwcc_js_http_request` / `kwcc_js_http_cancel` 声明
+4. 删除 `#include "kwcc_http.h"` 和 `#include "picohttpparser/picohttpparser.h"` — core 不依赖具体模块的服务层
+5. `kwcc_create_js` 中删除 `kwcc_register_http_js(ctx)` 调用（模块通过 `kwcc_js_register_modules` 注册）
+6. 在 `kwcc_js_register_modules` 中取消注释 HTTP 模块注册：
+   ```c
+   extern kwcc_js_module_t kwcc_js_http_module;
+   kwcc_js_register_module(ops, &kwcc_js_http_module);
+   ```
 
-**验证**：`make` 编译通过
+### kwcc_js.h 改动
 
----
+1. 删除 `kwcc_register_http_js` / `kwcc_js_http_request` / `kwcc_js_http_cancel` 声明
+2. 删除 `void kwcc_register_http_js(JSContext *ctx);` 声明
 
-## Step 6: Makefile 更新
-
-### 改动
+### Makefile 改动
 
 1. `MQJS_SRCS` 加 `src/kwcc_js_http.c`
 2. 新增 `kwcc_js_http.o` 编译规则
@@ -306,7 +309,7 @@ kwcc_js_module_t kwcc_js_http_module = {
 
 ---
 
-## Step 7: promise.js + http.js
+## Step 6: promise.js + http.js
 
 **目的**：Layer 4 JS API，提供 Promise 风格的 HTTP 请求接口。MiniPromise 作为通用基础设施独立为单独文件。
 
@@ -408,7 +411,7 @@ $http.fetch("https://api.example.com/data").then(function(resp) {
 
 ---
 
-## Step 8: 编译验证
+## Step 7: 编译验证
 
 ```bash
 make clean && make
@@ -433,6 +436,6 @@ make run
 | Step 3: 纯 C 测试 | ✅ 已完成 | 不需要改动 |
 | Step 4: C binding + 代理表 | 🔄 本计划替代 | 原方案已拆分为架构调整 + 本计划 |
 | Step 5: Frame Hook + init | ✅ 已完成 | 不需要改动 |
-| Step 6: Makefile | 🔄 本计划 Step 6 | 加 kwcc_js_http.c |
-| Step 7: 编译验证 | 🔄 本计划 Step 8 | |
-| Step 8: JS $http.fetch | 🔄 本计划 Step 7 | promise.js 独立 + http.js 重写 |
+| Step 6: Makefile | 🔄 本计划 Step 5 | 加 kwcc_js_http.c（与删除内联代码合并） |
+| Step 7: 编译验证 | 🔄 本计划 Step 7 | |
+| Step 8: JS $http.fetch | 🔄 本计划 Step 6 | promise.js 独立 + http.js 重写 |

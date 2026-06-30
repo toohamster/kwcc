@@ -405,14 +405,9 @@ static void kwcc_js_on_bus_event(const char *topic, const void *data,
 
 ---
 
-### Step 4: 重构 HTTP 为模块
+### Step 4: 实施第一个 Plugin（HTTP 模块）
 
-1. 删除 `kwcc_js.c` 中的 HTTP 相关代码（`kwcc_js_http_request`、`kwcc_js_http_cancel`、`kwcc_register_http_js`、回调注册表、bus 事件路由）——这些由 `kwcc_js_http.c` 模块提供
-2. 在 `kwcc_js.c` 中只保留 `extern kwcc_js_module_t kwcc_js_http_module;` 和注册调用
-3. `match_whitelist` 改名 `kwcc_js_match_whitelist`
-4. 删除 `kwcc_js.c` 中的 `#include "kwcc_http.h"` 和 `#include "picohttpparser/picohttpparser.h"` — core 不依赖具体模块的服务层，编译隔离
-
-**注意**：此步不创建 `kwcc_js_http.c/h`，那是 `js-http-implementation-plan.md` 的内容。此步只确保 `kwcc_js.c` 中的 HTTP 代码通过 ops 接口调用，不再直接用 mquickjs API。
+详见 `requirements/js-http-implementation-plan.md`。
 
 **验证**：`make` 编译通过，`make run` 正常，ops 测试仍通过
 
