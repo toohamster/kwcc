@@ -246,11 +246,14 @@ static void http_load(kwcc_js_ops_t *ops) {
 - `$http.callbacks`/`$notify.on('http', ...)` 全部移到 `http.js`，C 端不注入
 - C 端通过 `ops->notify_js(ops, "http", event, id, data, ack_cleanup)` 通知 JS 端
 
-**3. `http_register_cfun`** — 注册代理表 C handler：
+**3. `http_apis`** — 模块 API 声明（core 读取后自动注册进分发表）：
 
-向 `g_kwcc_js_cfun_handlers` 代理表注册两项（C handler 声明为 static，不需要在 .h 中暴露）：
-- `"kwcc_js_http_request"` → `static kwcc_js_http_request`（提取 argv[0]=method, argv[1]=url, argv[2]=headers 数组, argv[3]=body → 调 `kwcc_http_request` → 返回 req_id 字符串）
-- `"kwcc_js_http_cancel"` → `static kwcc_js_http_cancel`（提取 argv[0]=req_id → 调 `kwcc_http_cancel`）
+模块在 `kwcc_js_module_t` 描述符中通过 `apis` 字段声明 C handler。handler 签名为 `kwcc_js_handler_t`（ops 风格），core 在 `kwcc_js_register_module` 时读取并注册进 `g_kwcc_js_dispatch` 分发表。JS 端通过 `kwcc_js_call("http", "request", ...)` 调用。
+
+- `"request"` → `static js_http_request`（提取 argv[0]=method, argv[1]=url, argv[2]=headers 数组, argv[3]=body → 调 `kwcc_http_request` → 返回 req_id 字符串）
+- `"cancel"` → `static js_http_cancel`（提取 argv[0]=req_id → 调 `kwcc_http_cancel`）
+
+模块不需要知道分发表的存在，不需要调任何注册 API，只需要在描述符里列出 API 数组。
 
 **4. `http_on_bus_event`** — 收 bus 事件后构建 JSValue 响应，调 `ops->notify_js`：
 
@@ -264,10 +267,16 @@ static void http_load(kwcc_js_ops_t *ops) {
 **5. 模块描述符**：
 
 ```c
+static const kwcc_js_api_t http_apis[] = {
+    { "request", js_http_request },
+    { "cancel",  js_http_cancel },
+    { NULL, NULL }  /* 终止哨兵 */
+};
+
 kwcc_js_module_t kwcc_js_http_module = {
     .name = "http",
     .load = http_load,
-    .register_cfun = http_register_cfun,
+    .apis = http_apis,
     .on_bus_event = http_on_bus_event,
     .unload = NULL,
 };
