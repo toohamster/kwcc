@@ -1,6 +1,15 @@
 # C 层完整架构状态
 
-> 基于多文件架构（`kwcc_mempool.c` + `kwcc_config.c` + `kwcc_ui.c` + `kwcc_js.c` + `kwcc_bus.c` + `kwcc_ui_bus.c` + `kwcc_base.c` + `kwcc_io.c`）
+> 基于多文件架构（`kwcc_mempool.c` + `kwcc_config.c` + `kwcc_ui.c` + `kwcc_js.c` + `kwcc_bus.c` + `kwcc_ui_bus.c` + `kwcc_base.c` + `kwcc_io.c` + `kwcc_http.c`）
+
+## 架构模式
+
+项目使用两种 C 模块模式（详见 [c_module_patterns.md](c_module_patterns.md)）：
+
+| 模式 | 适用场景 | 项目实例 |
+|------|----------|----------|
+| A: 模块前缀 + 静态全局 | 单例、无隔离需求 | `kwcc_bus`, `kwcc_http`, `kwcc_config`, `kwcc_mempool`, `kwcc_io` |
+| B: struct + 函数指针 | 隔离/多实例/可替换 | `kwcc_js_ops_t`, `kwcc_js_module_t` |
 
 ## 文件职责分布
 
@@ -16,10 +25,12 @@
 | `kwcc_ui_bus.h` | UI 桥接声明（4 个 API） |
 | `kwcc_bus.c` | 通用 C Pub/Sub 事件总线：subscribe/publish/unsubscribe，零 mquickjs 依赖 |
 | `kwcc_bus.h` | 事件总线声明 + `KWCC_BUS_WILDCARD` 常量 |
-| `kwcc_js.c` | `kwcc_create/destroy_js` + stdlib stubs + kwcc_ui 桥接 + bus consumer + JS 白名单 |
-| `kwcc_js.h` | JS lifecycle + stubs 声明 |
+| `kwcc_js.c` | **Facade**：封装 mquickjs，提供 `kwcc_js_ops_t` 操作接口 + 模块注册 + `$notify` 通道 + bus consumer |
+| `kwcc_js.h` | JS Facade 类型：`kwcc_js_ops_t` + `kwcc_js_module_t` + `kwcc_js_val_t` + `kwcc_js_cstr_buf_t` + 生命周期 API |
 | `kwcc_io.c` | I/O Reactor：select() 非阻塞 FD 管理器 |
 | `kwcc_io.h` | I/O 管理器声明 |
+| `kwcc_http.c` | HTTP 模块：fork+pipe+curl+picohttpparser，bus 事件分发 |
+| `kwcc_http.h` | HTTP 模块 API 声明 |
 | `kwcc.h` | 入口 umbrella header（include 各模块头文件） |
 
 ## 全局变量
@@ -83,6 +94,10 @@
 ### kwcc_js.c
 | 变量 | 类型 | 用途 |
 |------|------|------|
+| `g_kwcc_js_ops` | `kwcc_js_ops_t` | **Facade ops 实例**（非 static，测试可访问） |
+| `g_kwcc_js_modules[8]` | `kwcc_js_module_t*[]` (static) | 已注册模块列表 |
+| `g_kwcc_js_module_count` | `int` (static) | 模块计数 |
+| `s_notify_emit_fn` | `kwcc_js_val_t` (static) | `$notify.emit` 缓存引用（global 可达，GC 安全） |
 | `g_ui_callback` | `JSUICallback` | UI 桥接回调指针 |
 
 ## C 层函数清单
@@ -94,12 +109,44 @@
 | `kwcc_mempool_shutdown()` | kwcc_mempool.c | 释放所有池 + 清零 |
 | `kwcc_ui_init()` | kwcc_ui.c | `mu_init` + text 回调 + `on_window_close` |
 | `kwcc_ui_free()` | kwcc_ui.c | 清理 UI 资源（当前空，备用） |
-| `kwcc_create_js()` | kwcc_js.c | 创建 JSContext |
+| `kwcc_create_js()` | kwcc_js.c | 创建 JSContext + ops_init + register_modules + bus_subscribe |
 | `kwcc_destroy_js()` | kwcc_js.c | 释放 JSContext |
 | `kwcc_begin_frame()` | kwcc_ui.c | 每帧重置 + 调 kwcc_bus_begin_frame |
 | `kwcc_process_js()` | kwcc_ui.c | 帧入口：frame++ → begin_frame → mu_begin → JS_Eval → mu_end |
 | `kwcc_get_mu()` | kwcc_ui.c | 返回 &g_kwcc_mu |
 | `kwcc_get_font()` | kwcc_ui.c | 返回当前字体名称 |
+
+### Facade + Module（kwcc_js.c）
+| 函数 | 功能 |
+|------|------|
+| `kwcc_js_ops_init(ctx)` | 初始化 `g_kwcc_js_ops`：绑定 20 个函数指针 + 5 个属性 |
+| `kwcc_js_inject_notify(ops)` | 注入 `$notify` 对象 + 缓存 `s_notify_emit_fn` |
+| `kwcc_js_register_module(ops, mod)` | 调用 mod→load + mod→register_cfun，加入模块列表 |
+| `kwcc_js_register_modules(ops)` | 注入 `$notify` → 逐个注册模块（当前 HTTP 待迁移） |
+| `kwcc_js_on_bus_event(topic, data, len, user_data)` | 遍历模块 on_bus_event → 默认白名单 → `$bus.emit` |
+| `kwcc_js_match_whitelist(whitelist, topic)` | 白名单前缀匹配（逗号分隔） |
+
+### ops impl 函数指针（kwcc_js.c，全部 static）
+| 函数 | 对应 ops 指针 |
+|------|--------------|
+| `kwcc_js_new_object_impl` | `new_object` |
+| `kwcc_js_new_int32_impl` | `new_int32` |
+| `kwcc_js_new_string_impl` | `new_string` |
+| `kwcc_js_new_string_len_impl` | `new_string_len` |
+| `kwcc_js_set_str_prop_impl` | `set_str_prop` |
+| `kwcc_js_get_str_prop_impl` | `get_str_prop` |
+| `kwcc_js_is_function_impl` | `is_function` |
+| `kwcc_js_call_cb_impl` | `call_cb`（含 JS_StackCheck+PushArg+Call+异常捕获） |
+| `kwcc_js_to_cstring_impl` | `to_cstring`（含短字符串内联 buf 拷贝） |
+| `kwcc_js_is_undefined_impl` | `is_undefined` |
+| `kwcc_js_is_null_impl` | `is_null` |
+| `kwcc_js_is_exception_impl` | `is_exception` |
+| `kwcc_js_eval_impl` | `eval` |
+| `kwcc_js_get_class_id_impl` | `get_class_id` |
+| `kwcc_js_array_length_impl` | `array_length` |
+| `kwcc_js_array_get_impl` | `array_get` |
+| `kwcc_js_to_int32_impl` | `to_int32` |
+| `kwcc_js_notify_js_impl` | `notify_js`（ack_cleanup → call_cb $notify.emit） |
 
 ### MemPool 层（kwcc_mempool.c）
 | 函数 | 功能 |
@@ -286,6 +333,11 @@ ui.svg(path_or_svg, x, y, w, h)
 9. **bus 拆分为三层**：kwcc_bus（纯 C Pub/Sub）+ kwcc_ui_bus（UI→JS 桥接）+ kwcc_base（topic 工具）
 10. **bus → JS 白名单**：`bus/js_whitelist` config 控制，`*`=全部、`""`=不转发、逗号前缀=前缀匹配
 11. **bus → JS action 固定 `notify_c`**：标识事件来自 C bus，区别于 UI 的 `click`/`change`
+12. **Facade + Plugin 架构**：`kwcc_js` 作为 Facade 封装 mquickjs，子模块通过 `kwcc_js_ops_t` 操作 JS，不直接调 mquickjs API
+13. **`kwcc_js_val_t = JSValue`**：行为层面隔离（可替换性），非类型层面。ops impl 直接用 JSValue，不需要强转
+14. **`$notify` C→JS 通知通道**：C 端通过 `ops->notify_js` 通知，不直接调 resolve/reject；JS 端 `$notify.on(type, handler)` 做回调映射
+15. **`ack_cleanup` 在 `call_cb` 之前自动调用**：C 端传了就自动处理，不需要记着调 release
+16. **模块生命周期**：core 按 `load → register_cfun → on_bus_event（运行时）→ unload（退出时）` 顺序调用
 
 ## JS 框架 API（main.js）
 

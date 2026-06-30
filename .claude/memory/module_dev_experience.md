@@ -165,3 +165,52 @@
 - 只保留 `A-Z a-z 0-9 / _`
 - 末尾 `/*` 保留（通配符），其余 `*` 丢弃
 - 四个入口都加 sanitize + check：bus publish、bus subscribe、ui_bus dispatch、ui_bus bind_topic
+
+---
+
+## Facade + Plugin 架构（kwcc_js 拆分）— 2026-06-30
+
+### 背景
+将 `kwcc_js.c/h` 拆分为 Facade + Plugin 模式：core 封装 mquickjs，子模块通过 `kwcc_js_ops_t` 操作 JS，不直接调 mquickjs API。Steps 1-3 完成，75 个测试点全部通过。
+
+### 架构决策
+
+**`kwcc_js_val_t = JSValue`（不是 `uint64_t`）**：
+- ops impl 内部直接用 `JSValue`，不需要任何 C 强转或值转换函数
+- 隔离含义：行为层面（可替换性），非类型层面。子模块用 `kwcc_js_val_t` 名字、只通过 ops 操作，未来换引擎改定义和实现，子模块代码不动
+- `typedef uint64_t kwcc_js_val_t` + C 强转是错误方案——两者不是同一类型，强转语义错误
+
+**ops 层职责**：
+- ops 是隔离层，操作 `kwcc_js_val_t`
+- 需要和引擎通信时，直接调引擎 API（因为 `kwcc_js_val_t = JSValue`，不需要中间转换）
+- 子模块不碰 `JSValue`/`JSContext`/mquickjs 宏，只通过 ops 函数指针操作
+
+**`$notify` C→JS 通知通道**：
+- C 端通过 `ops->notify_js` 通知 JS 端，不直接调 resolve/reject
+- JS 端通过 `$notify.on(type, handler)` 注册处理器，自己做 callback 映射
+- `ack_cleanup` 在 `call_cb` 之前自动调用，C 端不需要记着调 release
+
+### 教训
+
+**1. `typedef uint64_t kwcc_js_val_t` + C 强转是错误设计**
+- 把 mquickjs 的 tagged integer 表示直接暴露给子模块，只是换了个类型名
+- ops impl 里 `(JSValue)val` 和 `(kwcc_js_val_t)result` 是 C 强转，不是值转换
+- 正确做法：`typedef JSValue kwcc_js_val_t`，ops impl 直接用，不需要强转
+
+**2. 隔离是行为层面的，不是类型层面的**
+- 曾反复纠结"子模块必须完全碰不到 mquickjs 类型才算隔离"——错误
+- 隔离含义：子模块代码用 `kwcc_js_val_t`，承诺只通过 ops 操作，未来换引擎时改定义和实现，子模块不动
+- `kwcc_js.h` include `mquickjs.h`，子模块间接能拿到 mquickjs 类型——这是当前状态，隔离靠规范约束
+
+**3. bug 误判导致大量时间浪费**
+- `get_class_id(array)` 返回 -1，实际原因是测试 bug（变量未创建就读取）
+- 却当成类型转换问题，反复讨论设计、强转、值转换、结构体包装，浪费大量时间
+- 正确做法：先验证最简单的原因（测试逻辑），而不是立刻怀疑架构设计
+
+**4. 不要在错误方向上越走越远**
+- 一旦开始怀疑设计，就不断加复杂度（转换函数、调度者、结构体包装），越走越偏
+- 应该先确认 bug 根因，再决定是否需要改设计
+
+**5. 方案外设计决策必须先讨论**
+- 实现时擅自沿用旧代理表 `kwcc_js_mquickjs_call`（mquickjs 类型签名），暴露 `JSContext*`/`JSValue` 给模块层，严重违反 Facade 隔离原则
+- 方案明确要求引擎隔离，模块通过 `kwcc_js_ops_t` 操作 JS，不碰 mquickjs

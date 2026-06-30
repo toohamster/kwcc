@@ -71,3 +71,36 @@
 - 2026-06-29 事故：Step 2 实现时，擅自沿用旧代理表 `kwcc_js_mquickjs_call`（mquickjs 类型签名），暴露 `JSContext*`/`JSValue` 给模块层，严重违反 Facade 隔离原则。方案明确要求引擎隔离，模块通过 `kwcc_js_ops_t` 操作 JS，不碰 mquickjs
 - 正确做法：实现前逐条对照方案，发现方案未明确的细节先问用户，不能自己发明机制
 - **任何方案外的设计决策，必须先讨论确认再实施**
+
+## 12. ⚠️ 代码回退必须用 revert commit，禁止 reset --hard + force push
+
+- **禁止** `git reset --hard <commit>` + `git push --force`，这种方式：
+  - 覆盖远程历史，其他人基于旧 commit 的工作会丢失
+  - 被回退的 commit 从历史中消失，无法追溯
+  - 恢复时需要凭记忆找回被覆盖的 commit hash
+
+- **正确做法**：用新 commit 记录回退，历史完整保留：
+  ```sh
+  # 目标：将 branchA 回退到 <target_commit>，生成新 commit
+  git checkout <target_commit>     # 1. 回到历史提交（detached HEAD）
+  git reset --mixed branchA        # 2. 把差异带到 index（不改动工作区文件）
+  git checkout branchA             # 3. 切回目标分支，此时文件状态 = target_commit
+  git add .                        # 4. 暂存修改
+  git commit -m 'revert to <target_commit>'  # 5. 新 commit 记录回退
+  git push origin branchA          # 6. 正常推送，无需 force
+  ```
+
+- **恢复之前被回退的代码**：用同样的流程回到回退前的 commit
+  ```sh
+  git checkout <old_commit>        # 回到回退前的提交
+  git reset --mixed branchA
+  git checkout branchA
+  git add .
+  git commit -m 'revert: restore code from <old_commit>'
+  git push origin branchA
+  ```
+
+- **优势**：
+  - 远程历史完整，不覆盖任何人的工作
+  - 回退和恢复都是普通 commit，可追溯、可 revert
+  - 不需要 force push

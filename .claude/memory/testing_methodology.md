@@ -22,6 +22,13 @@
 - **关键**：不需要链接 kwcc_ui.o（避免 nanosvg/NVG 依赖），只需 mquickjs core + mempool + config + kwcc_js
 - **示例**：`tests/test_config_js.c`
 
+### 第 2.5 层：ops 接口测试（tests/test_js_ops.c）
+- **测试对象**：`kwcc_js_ops_t` 的每个函数指针，作为 Facade 层的 ABI 契约测试
+- **方式**：创建独立 JSContext → 调用 `kwcc_js_ops_init` → 通过 ops 操作 JS → 验证结果
+- **关键**：在子模块迁移前验证 core 本身正确，避免问题交叉
+- **测试内容**：8 大类（值创建/属性操作/函数调用/类型判断/C字符串/eval/notify/数组），75 个测试点
+- **重要发现**：`get_class_id` 测试需在创建对象的同一作用域内验证，跨作用域读变量会得到 undefined（返回 -1）
+
 ### 第三层：集成测试（JS 脚本 + kwcc 运行）
 - **测试对象**：JS wrapper → C handler → C 层 → mempool 端到端
 - **方式**：在 app/main.js 中 load 测试脚本 + `make run`
@@ -117,6 +124,7 @@ tests/*.o
 mquickjs.o cutils.o dtoa.o libm.o    # mquickjs core
 kwcc_mempool.o kwcc_config.o          # C 层
 kwcc_js.o kwcc_bus.o kwcc.o           # JS handler
+kwcc_io.o kwcc_base.o kwcc_http.o     # I/O + HTTP + base
 log.o                                 # 日志
 ```
 
@@ -146,3 +154,42 @@ gcc -Wall -I. -Ideps -D_GNU_SOURCE -DCONFIG_KWCC \
 ```
 
 简单、一致、可读性好。不要用复杂的 ASSERT 宏（容易出宏展开问题）。
+
+## 测试编写规范
+
+### 测试点必须自包含
+
+**每个测试点应创建和使用自己的数据，不依赖其他测试点通过 eval 创建的全局变量。**
+
+错误示例：
+```c
+// test 8: 通过 eval 创建全局变量
+ops->eval(ops, "var kwcc_test_arr = [1,2,3];", ...);
+
+// test 5: 假设 kwcc_test_arr 已存在 → 读到 undefined → JS_GetClassID 返回 -1
+kwcc_js_val_t arr = ops->get_str_prop(ops, ops->global_obj, "kwcc_test_arr");
+int cid = ops->get_class_id(ops, arr);  // -1，不是 1
+```
+
+正确做法：
+```c
+// test 5: 在本测试点内创建自己的数组
+kwcc_js_val_t arr = ops->eval(ops, "[1,2,3]", ...);
+int cid = ops->get_class_id(ops, arr);  // 1 (JS_CLASS_ARRAY)
+```
+
+**原因**：
+- 测试点执行顺序可能调整，依赖顺序 = 隐式耦合
+- `JS_Eval` 创建的全局变量依赖于 JS_EVAL_REPL 标志和执行时机
+- 读取未创建的属性返回 undefined，`JS_GetClassID(undefined)` 返回 -1，不是 0 或 1
+
+### eval 测试值时用 JS_EVAL_RETVAL 获取返回值
+
+```c
+// ✅ 正确：eval 返回最后一个表达式的值
+kwcc_js_val_t arr = ops->eval(ops, "[1,2,3]", 7, "<test>", JS_EVAL_RETVAL);
+
+// ❌ 错误：JS_EVAL_REPL 不返回值，需要通过 get_str_prop 读取全局变量
+ops->eval(ops, "var arr = [1,2,3];", 16, "<test>", JS_EVAL_REPL);
+kwcc_js_val_t arr = ops->get_str_prop(ops, ops->global_obj, "arr");  // 多一步间接
+```

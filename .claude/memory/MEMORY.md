@@ -19,6 +19,7 @@
 6. **以方案为主**，不因问题打乱计划
 7. **⚠️ 遇到问题立刻问用户，绝对不能卡着假死** — 这是行为红线，违反即是严重事故
 8. **⚠️ 严格按方案实现，绝不随意发挥** — 方案外的设计决策必须先讨论确认
+9. **⚠️ 代码回退用 revert commit，禁止 reset --hard + force push** — 保留完整历史，不覆盖远程
 
 ## 记忆文件索引
 
@@ -109,14 +110,22 @@
 
 ### [测试方法论](testing_methodology.md)
 - **C 端优先测试**：C 端功能在 C 端验证，JS 端不方便
-- 三层测试策略：纯 C 测试 → C handler 测试 → JS 集成测试
-- 排查问题流程：先 C 层 → 再 C handler → 最后 JS wrapper
+- 四层测试策略：纯 C 测试 → C handler 测试 → ops 接口测试 → JS 集成测试
+- 排查问题流程：先 C 层 → 再 C handler → 再 ops → 最后 JS wrapper
 - 编译技巧：不链接 kwcc_ui.o，避免 nanosvg/NVG 依赖
 - Phase 4 TLV 调试教训：不要在 JS 层反复调试
+- ops 测试 75 点：值创建/属性操作/函数调用/类型判断/C字符串/eval/notify/数组
 
 ### [模块开发经验](module_dev_experience.md)
 - 内存池开发 8 条教训：方案确认、C 端测试、命名规范、不发挥、构建产物、分层、代理机制、测试记录
 - Bus 重构教训：static 函数命名规范、命名写时就遵守、sanitize bug、不引入"看似更优"的复杂方案
+- Facade+Plugin 教训：`kwcc_js_val_t=JSValue`（不是 uint64_t）、隔离是行为层面、bug 误判别怀疑设计、方案外决策必须先讨论
+
+### [C 语言模块开发模式](c_module_patterns.md)
+- **模式 A**：模块前缀 + 静态全局 — 单例、零开销、文件级内聚
+- **模式 B**：struct + 函数指针（laid 模式）— 隔离/多实例/可替换、类型级内聚
+- 选择决策：需要隔离/多实例/可替换 → B，否则 → A
+- 项目中的实际应用对照表
 
 ### [⚠️ 工作流规则（强制遵守）](workflow_rules.md)
 
