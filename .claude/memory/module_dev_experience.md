@@ -39,7 +39,7 @@
 
 **mquickjs API 陷阱**：
 - `JS_ToBool(ctx, val)` 不存在 → 用 `val == JS_TRUE` 比较
-- `JS_GetClassID` 返回 0 → mquickjs 精简版 Object 类 ClassID=0，不能用它判断对象类型
+- `JS_GetClassID` 返回 0 for Object（JS_CLASS_OBJECT=0，枚举从0开始），不能用 `> 0` 判断对象类型，要用 `== JS_CLASS_OBJECT`
 - `Object.keys(obj)` 在 JS_Eval 中不可用 → 直接调 C 侧 `js_object_keys(ctx, &obj, 1, &obj)` 内部 API
 - `JS_IsObject` 不存在 → 用 `JS_GetClassID(ctx, val) == JS_CLASS_OBJECT`
 - mquickjs 不支持 `...rest` 展开参数，JS 侧必须传固定参数

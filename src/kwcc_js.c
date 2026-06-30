@@ -16,10 +16,242 @@
 
 #define KWCC_MEM_SIZE (4 * 1024 * 1024)
 
+/* ═══════════════════════════════════════════════════════════════
+ * Facade ops — implementation of kwcc_js_ops_t function pointers
+ * ═══════════════════════════════════════════════════════════════ */
+
+kwcc_js_ops_t g_kwcc_js_ops;
+
+/* Module registry */
+#define KWCC_JS_MAX_MODULES 8
+static kwcc_js_module_t *g_kwcc_js_modules[KWCC_JS_MAX_MODULES];
+static int g_kwcc_js_module_count = 0;
+
+/* $notify.emit reference (global-reachable, GC-safe, no AddGCRef needed) */
+static kwcc_js_val_t s_notify_emit_fn;
+
+/* ── ops impl: value creation ── */
+
+static kwcc_js_val_t kwcc_js_new_object_impl(kwcc_js_ops_t *ops) {
+    return JS_NewObject((JSContext *)ops->ctx);
+}
+
+static kwcc_js_val_t kwcc_js_new_int32_impl(kwcc_js_ops_t *ops, int32_t val) {
+    return JS_NewInt32((JSContext *)ops->ctx, val);
+}
+
+static kwcc_js_val_t kwcc_js_new_string_impl(kwcc_js_ops_t *ops, const char *buf) {
+    return JS_NewString((JSContext *)ops->ctx, buf);
+}
+
+static kwcc_js_val_t kwcc_js_new_string_len_impl(kwcc_js_ops_t *ops, const char *buf, size_t len) {
+    return JS_NewStringLen((JSContext *)ops->ctx, buf, len);
+}
+
+/* ── ops impl: property access ── */
+
+static void kwcc_js_set_str_prop_impl(kwcc_js_ops_t *ops, kwcc_js_val_t obj,
+                                       const char *key, kwcc_js_val_t val) {
+    JSContext *ctx = (JSContext *)ops->ctx;
+    JS_SetPropertyStr(ctx, obj, key, val);
+}
+
+static kwcc_js_val_t kwcc_js_get_str_prop_impl(kwcc_js_ops_t *ops, kwcc_js_val_t obj,
+                                                 const char *key) {
+    JSContext *ctx = (JSContext *)ops->ctx;
+    return JS_GetPropertyStr(ctx, obj, key);
+}
+
+/* ── ops impl: function call ── */
+
+static int kwcc_js_is_function_impl(kwcc_js_ops_t *ops, kwcc_js_val_t val) {
+    return JS_IsFunction((JSContext *)ops->ctx, val);
+}
+
+static void kwcc_js_call_cb_impl(kwcc_js_ops_t *ops, kwcc_js_val_t cb,
+                                  int argc, kwcc_js_val_t *argv) {
+    JSContext *ctx = (JSContext *)ops->ctx;
+    JSValue global = JS_GetGlobalObject(ctx);
+
+    /* JS_StackCheck(total_push_count): argv[n-1]..argv[0], func, this_obj */
+    JS_StackCheck(ctx, (uint32_t)(argc + 2));
+    for (int i = argc - 1; i >= 0; i--) {
+        JS_PushArg(ctx, argv[i]);
+    }
+    JS_PushArg(ctx, cb);
+    JS_PushArg(ctx, global);
+    JSValue ret = JS_Call(ctx, argc);
+
+    /* Exception handling: log and clear, prevent accumulation */
+    if (JS_IsException(ret)) {
+        JSValue exc = JS_GetException(ctx);
+        JSCStringBuf ebuf;
+        const char *s = JS_ToCString(ctx, exc, &ebuf);
+        log_warn("js: call_cb exception: %s", s ? s : "(none)");
+    }
+}
+
+/* ── ops impl: C string conversion ── */
+
+static const char *kwcc_js_to_cstring_impl(kwcc_js_ops_t *ops, kwcc_js_val_t val,
+                                             kwcc_js_cstr_buf_t *buf) {
+    JSCStringBuf mbuf;
+    const char *s = JS_ToCString((JSContext *)ops->ctx, val, &mbuf);
+    /* Copy inline buf if short string (pointer points into mbuf) */
+    if (s && s >= (const char *)&mbuf && s < (const char *)&mbuf + sizeof(mbuf)) {
+        memcpy(buf->buf, s, 5);
+        return buf->buf;
+    }
+    return s;
+}
+
+/* ── ops impl: type checks ── */
+
+static int kwcc_js_is_undefined_impl(kwcc_js_val_t val) {
+    return JS_IsUndefined(val);
+}
+
+static int kwcc_js_is_null_impl(kwcc_js_val_t val) {
+    return JS_IsNull(val);
+}
+
+static int kwcc_js_is_exception_impl(kwcc_js_val_t val) {
+    return JS_IsException(val);
+}
+
+/* ── ops impl: code execution ── */
+
+static kwcc_js_val_t kwcc_js_eval_impl(kwcc_js_ops_t *ops, const char *code, size_t len,
+                                         const char *filename, int flags) {
+    return JS_Eval((JSContext *)ops->ctx, code, len, filename, flags);
+}
+
+/* ── ops impl: array operations ── */
+
+static int kwcc_js_get_class_id_impl(kwcc_js_ops_t *ops, kwcc_js_val_t val) {
+    return JS_GetClassID((JSContext *)ops->ctx, val);
+}
+
+static int kwcc_js_array_length_impl(kwcc_js_ops_t *ops, kwcc_js_val_t arr) {
+    JSContext *ctx = (JSContext *)ops->ctx;
+    JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+    int len = 0;
+    JS_ToInt32(ctx, &len, len_val);
+    return len;
+}
+
+static kwcc_js_val_t kwcc_js_array_get_impl(kwcc_js_ops_t *ops, kwcc_js_val_t arr, uint32_t idx) {
+    return JS_GetPropertyUint32((JSContext *)ops->ctx, arr, idx);
+}
+
+/* ── ops impl: number conversion ── */
+
+static int kwcc_js_to_int32_impl(kwcc_js_ops_t *ops, kwcc_js_val_t val) {
+    int result = 0;
+    JS_ToInt32((JSContext *)ops->ctx, &result, val);
+    return result;
+}
+
+/* ── ops impl: C→JS notification ($notify channel) ── */
+
+static void kwcc_js_notify_js_impl(kwcc_js_ops_t *ops,
+                                    const char *type, const char *event,
+                                    const char *id, kwcc_js_val_t data,
+                                    void (*ack_cleanup)(const char *id)) {
+    /* ① Release C-side resources first (data already copied into GC heap) */
+    if (ack_cleanup) ack_cleanup(id);
+
+    /* ② Deliver to JS via $notify.emit */
+    kwcc_js_val_t args[4];
+    args[0] = ops->new_string(ops, type);
+    args[1] = ops->new_string(ops, event);
+    args[2] = ops->new_string(ops, id);
+    args[3] = data;
+    ops->call_cb(ops, s_notify_emit_fn, 4, args);
+}
+
+/* ── ops initialization ── */
+
+void kwcc_js_ops_init(JSContext *ctx) {
+    g_kwcc_js_ops.ctx = ctx;
+    g_kwcc_js_ops.undefined  = JS_UNDEFINED;
+    g_kwcc_js_ops.null       = JS_NULL;
+    g_kwcc_js_ops.exception  = JS_EXCEPTION;
+    g_kwcc_js_ops.global_obj = JS_GetGlobalObject(ctx);
+
+    g_kwcc_js_ops.new_object     = kwcc_js_new_object_impl;
+    g_kwcc_js_ops.new_int32      = kwcc_js_new_int32_impl;
+    g_kwcc_js_ops.new_string     = kwcc_js_new_string_impl;
+    g_kwcc_js_ops.new_string_len = kwcc_js_new_string_len_impl;
+    g_kwcc_js_ops.set_str_prop   = kwcc_js_set_str_prop_impl;
+    g_kwcc_js_ops.get_str_prop   = kwcc_js_get_str_prop_impl;
+    g_kwcc_js_ops.is_function    = kwcc_js_is_function_impl;
+    g_kwcc_js_ops.call_cb        = kwcc_js_call_cb_impl;
+    g_kwcc_js_ops.to_cstring     = kwcc_js_to_cstring_impl;
+    g_kwcc_js_ops.is_undefined   = kwcc_js_is_undefined_impl;
+    g_kwcc_js_ops.is_null        = kwcc_js_is_null_impl;
+    g_kwcc_js_ops.is_exception   = kwcc_js_is_exception_impl;
+    g_kwcc_js_ops.eval           = kwcc_js_eval_impl;
+    g_kwcc_js_ops.get_class_id   = kwcc_js_get_class_id_impl;
+    g_kwcc_js_ops.array_length   = kwcc_js_array_length_impl;
+    g_kwcc_js_ops.array_get      = kwcc_js_array_get_impl;
+    g_kwcc_js_ops.to_int32       = kwcc_js_to_int32_impl;
+    g_kwcc_js_ops.notify_js      = kwcc_js_notify_js_impl;
+}
+
+/* ── $notify injection ── */
+
+static void kwcc_js_inject_notify(kwcc_js_ops_t *ops) {
+    /* Create $notify object via C API (consistent with $config style) */
+    kwcc_js_val_t notify_obj = ops->new_object(ops);
+    ops->set_str_prop(ops, ops->global_obj, "$notify", notify_obj);
+
+    const char *code =
+        "$notify.registry = {};\n"
+        "$notify.on = function(type, handler) {\n"
+        "    $notify.registry[type] = handler;\n"
+        "};\n"
+        "$notify.emit = function(type, event, id, data) {\n"
+        "    var handler = $notify.registry[type];\n"
+        "    if (handler) handler(event, id, data);\n"
+        "};\n";
+    ops->eval(ops, code, strlen(code), "<$notify>", JS_EVAL_REPL);
+
+    /* Cache $notify.emit reference (global-reachable, GC-safe) */
+    s_notify_emit_fn = ops->get_str_prop(ops, notify_obj, "emit");
+}
+
+/* ── Module registration ── */
+
+void kwcc_js_register_module(kwcc_js_ops_t *ops, kwcc_js_module_t *mod) {
+    log_info("js: loading module '%s'", mod->name);
+    if (mod->load) mod->load(ops);
+    if (mod->register_cfun) mod->register_cfun(ops);
+    if (g_kwcc_js_module_count < KWCC_JS_MAX_MODULES) {
+        g_kwcc_js_modules[g_kwcc_js_module_count++] = mod;
+    } else {
+        log_error("js: max modules (%d) reached, cannot register '%s'",
+                  KWCC_JS_MAX_MODULES, mod->name);
+    }
+    log_info("js: module '%s' registered", mod->name);
+}
+
+void kwcc_js_register_modules(kwcc_js_ops_t *ops) {
+    /* Inject $notify first — modules need $notify.on in their load */
+    log_info("js: injecting $notify channel");
+    kwcc_js_inject_notify(ops);
+
+    /* Register modules — currently only http; add more here */
+    /* extern kwcc_js_module_t kwcc_js_http_module; */
+    /* kwcc_js_register_module(ops, &kwcc_js_http_module); */
+
+    log_info("js: %d module(s) loaded", g_kwcc_js_module_count);
+}
+
 /* ── Bus consumer: forward C bus events to JS $bus ── */
 
 /* 白名单匹配（逗号分隔的前缀列表）*/
-static int match_whitelist(const char *whitelist, const char *topic) {
+static int kwcc_js_match_whitelist(const char *whitelist, const char *topic) {
     char buf[2048];
     strncpy(buf, whitelist, sizeof(buf) - 1);
     char *tok = strtok(buf, ",");
@@ -36,113 +268,13 @@ static int match_whitelist(const char *whitelist, const char *topic) {
 }
 
 static void kwcc_js_on_bus_event(const char *topic, const void *data, size_t len, void *user_data) {
-    JSContext *ctx = (JSContext *)user_data;
+    (void)user_data;
 
-    /* ── HTTP event routing: build JSValue response object (Fix 2: no string injection) ── */
-    if (strncmp(topic, "http/end/", 9) == 0 || strncmp(topic, "http/error/", 11) == 0) {
-        const char *req_id = NULL;
-        int is_error = 0;
-        if (strncmp(topic, "http/end/", 9) == 0) {
-            req_id = topic + 9;
-        } else {
-            req_id = topic + 11;
-            is_error = 1;
+    /* Dispatch to registered modules' on_bus_event */
+    for (int i = 0; i < g_kwcc_js_module_count; i++) {
+        if (g_kwcc_js_modules[i]->on_bus_event) {
+            g_kwcc_js_modules[i]->on_bus_event(topic, data, len, &g_kwcc_js_ops);
         }
-        if (req_id && req_id[0] != '\0') {
-            void *on_end_ptr = NULL, *on_error_ptr = NULL, *on_progress_ptr = NULL;
-            if (kwcc_http_find_callback(req_id, &on_end_ptr, &on_error_ptr, &on_progress_ptr) == 0) {
-                JSValue cb;
-                if (is_error) {
-                    cb = *(JSValue *)on_error_ptr;
-                } else {
-                    cb = *(JSValue *)on_end_ptr;
-                }
-                if (JS_IsFunction(ctx, cb)) {
-                    JSValue resp = JS_NewObject(ctx);
-                    if (!is_error) {
-                        kwcc_http_result_t result;
-                        if (kwcc_http_get_result(req_id, &result) == 0) {
-                            JS_SetPropertyStr(ctx, resp, "status", JS_NewInt32(ctx, result.status));
-                            if (result.body && result.body_len > 0) {
-                                JS_SetPropertyStr(ctx, resp, "body", JS_NewStringLen(ctx, result.body, result.body_len));
-                            } else {
-                                JS_SetPropertyStr(ctx, resp, "body", JS_NewString(ctx, ""));
-                            }
-                            JSValue headers_obj = JS_NewObject(ctx);
-                            if (result.headers && result.num_headers > 0) {
-                                for (size_t i = 0; i < result.num_headers; i++) {
-                                    const struct phr_header *h = &result.headers[i];
-                                    if (h->name && h->name_len > 0) {
-                                        char key_buf[256];
-                                        size_t klen = h->name_len < 255 ? h->name_len : 255;
-                                        memcpy(key_buf, h->name, klen);
-                                        key_buf[klen] = '\0';
-                                        JS_SetPropertyStr(ctx, headers_obj, key_buf,
-                                            JS_NewStringLen(ctx, h->value ? h->value : "", h->value ? h->value_len : 0));
-                                    }
-                                }
-                            }
-                            JS_SetPropertyStr(ctx, resp, "headers", headers_obj);
-                        }
-                    } else {
-                        JS_SetPropertyStr(ctx, resp, "error", JS_NewString(ctx, "request failed"));
-                    }
-                    JS_SetPropertyStr(ctx, resp, "reqId", JS_NewString(ctx, req_id));
-
-                    JS_StackCheck(ctx, 3);
-                    JS_PushArg(ctx, resp);
-                    JS_PushArg(ctx, cb);
-                    JSValue global = JS_GetGlobalObject(ctx);
-                    JS_PushArg(ctx, global);
-                    JS_Call(ctx, 1);
-                }
-            }
-        }
-        return;
-    }
-
-    /* ── HTTP progress event routing ── */
-    if (strncmp(topic, "http/progress/", 14) == 0) {
-        const char *req_id = topic + 14;
-        if (req_id && req_id[0] != '\0') {
-            void *on_end_ptr = NULL, *on_error_ptr = NULL, *on_progress_ptr = NULL;
-            /* Note: find_callback is one-shot (auto-clears), so for progress
-             * we need a non-destructive lookup. Use a different approach:
-             * store progress callback pointer separately via register_callback,
-             * and here we only peek at it. We'll use kwcc_http_find_callback
-             * which auto-clears — but progress fires multiple times.
-             * Actually, we should not auto-clear for progress. Let's fix this:
-             * for progress, we just peek without clearing. */
-            /* For progress: peek at callback without consuming it.
-             * We know the callback is stored as (on_end, on_error, on_progress),
-             * and on_progress is argv[6]. We can access it via a peek API. */
-            /* Simplified: for now, progress events don't need JS callback routing.
-             * The JS $http._fetchAsync can handle progress via polling. */
-        }
-        return;
-    }
-
-    /* ── HTTP cancel event routing ── */
-    if (strncmp(topic, "http/cancel/", 12) == 0) {
-        const char *req_id = topic + 12;
-        if (req_id && req_id[0] != '\0') {
-            void *on_end_ptr = NULL, *on_error_ptr = NULL, *on_progress_ptr = NULL;
-            if (kwcc_http_find_callback(req_id, &on_end_ptr, &on_error_ptr, &on_progress_ptr) == 0) {
-                JSValue cb = *(JSValue *)on_error_ptr;
-                if (JS_IsFunction(ctx, cb)) {
-                    JSValue resp = JS_NewObject(ctx);
-                    JS_SetPropertyStr(ctx, resp, "error", JS_NewString(ctx, "cancelled"));
-                    JS_SetPropertyStr(ctx, resp, "reqId", JS_NewString(ctx, req_id));
-                    JS_StackCheck(ctx, 3);
-                    JS_PushArg(ctx, resp);
-                    JS_PushArg(ctx, cb);
-                    JSValue global = JS_GetGlobalObject(ctx);
-                    JS_PushArg(ctx, global);
-                    JS_Call(ctx, 1);
-                }
-            }
-        }
-        return;
     }
 
     /* ── Default: forward to JS $bus ── */
@@ -151,7 +283,7 @@ static void kwcc_js_on_bus_event(const char *topic, const void *data, size_t len
         /* * = 全部转发 */
     } else if (whitelist[0] == '\0') {
         return;  /* 空 = 不转发 */
-    } else if (!match_whitelist(whitelist, topic)) {
+    } else if (!kwcc_js_match_whitelist(whitelist, topic)) {
         return;  /* 不在白名单内 */
     }
 
@@ -159,7 +291,7 @@ static void kwcc_js_on_bus_event(const char *topic, const void *data, size_t len
     char safe[256];
     kwcc_base_topic_sanitize(safe, sizeof(safe), topic);
     snprintf(buf, sizeof(buf), "$bus.emit('%s', 'notify_c', new Object());", safe);
-    JS_Eval(ctx, buf, strlen(buf), "<bus>", JS_EVAL_REPL);
+    JS_Eval((JSContext *)g_kwcc_js_ops.ctx, buf, strlen(buf), "<bus>", JS_EVAL_REPL);
 }
 
 /* ── JS lifecycle ───────────────────────────────────────────── */
@@ -173,6 +305,11 @@ JSContext *kwcc_create_js(void) {
     }
     kwcc_register_config_js(ctx);
     kwcc_register_http_js(ctx);
+
+    /* Initialize ops + inject $notify + register modules */
+    kwcc_js_ops_init(ctx);
+    kwcc_js_register_modules(&g_kwcc_js_ops);
+
     kwcc_bus_subscribe(KWCC_BUS_WILDCARD, kwcc_js_on_bus_event, ctx);
     return ctx;
 }

@@ -109,8 +109,9 @@ int JS_ToNumber(JSContext *ctx, double *pres, JSValue val);
 
 ```c
 int JS_GetClassID(JSContext *ctx, JSValue val);
-// JS_CLASS_ARRAY = 93（枚举值），用于判断是否为数组
+// JS_CLASS_OBJECT = 0, JS_CLASS_ARRAY = 1（枚举值，从0开始）
 // if (JS_GetClassID(ctx, val) == JS_CLASS_ARRAY) → 是数组
+// ⚠️ Object 类 class_id = 0，不能用 > 0 判断是否为对象
 
 void JS_SetOpaque(JSContext *ctx, JSValue val, void *opaque);
 void *JS_GetOpaque(JSContext *ctx, JSValue val);

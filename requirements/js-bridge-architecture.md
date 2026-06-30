@@ -43,10 +43,12 @@ kwcc_js_ws.c/h       ← Plugin：未来，依赖 kwcc_js.h + kwcc_ws.h
 #### 1. kwcc_js_val_t — 不透明 JS 值句柄
 
 ```c
-typedef uint64_t kwcc_js_val_t;
+typedef JSValue kwcc_js_val_t;
 ```
 
-子模块不直接操作 `JSValue`，只通过 `kwcc_js_ops_t` 的函数指针操作。
+子模块不直接操作 `JSValue`，只通过 `kwcc_js_ops_t` 的函数指针操作。`kwcc_js_val_t` 与 `JSValue` 是同一类型，ops impl 内部不需要强转或转换——和未做架构拆分时一样直接使用。
+
+**隔离含义**：行为层面隔离，非类型层面。子模块代码中使用 `kwcc_js_val_t` 而非 `JSValue`，承诺只通过 ops 操作，不直接调 mquickjs API。未来换引擎时，修改 `kwcc_js_val_t` 定义和 `kwcc_js.c` 内部实现，子模块代码不需要改动。
 
 常量由 ops 属性提供，子模块不碰 `JS_NULL`/`JS_UNDEFINED` 等宏。
 
@@ -421,6 +423,6 @@ static void kwcc_js_on_bus_event(const char *topic, const void *data,
 | 风险 | 影响 | 缓解 |
 |------|------|------|
 | `call_cb` argv 数组传递 | 子模块需要构造 kwcc_js_val_t 数组 | 栈上小数组即可，最多 7 个参数 |
-| `kwcc_js_val_t` 和 `JSValue` 实际相同 | 类型安全是编译期的 | `typedef` 提供文档性隔离 |
+| `kwcc_js_val_t` 即 `JSValue` | 类型安全是行为层面的，非类型层面 | 子模块承诺只用 ops，不直接调 mquickjs API |
 | bus 事件分发顺序 | 多模块可能对同一 topic 感兴趣 | 模块内部自行判断前缀，互不干扰 |
 | 代理表注册时机 | `register_cfun` 需在 `kwcc_create_js` 期间完成 | `kwcc_js_register_modules` 在 ctx 创建后立即调用 |
