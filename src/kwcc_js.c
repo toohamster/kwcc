@@ -183,7 +183,7 @@ static void kwcc_js_notify_js_impl(kwcc_js_ops_t *ops,
     kwcc_js_val_t args[4];
     args[0] = ops->new_string(ops, type);
     args[1] = ops->new_string(ops, event);
-    args[2] = ops->new_string(ops, id);
+    args[2] = id ? ops->new_string(ops, id) : ops->null;
     args[3] = data;
     ops->call_cb(ops, s_notify_emit_fn, 4, args);
 }

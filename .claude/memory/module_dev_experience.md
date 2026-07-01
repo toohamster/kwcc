@@ -102,6 +102,21 @@
 
 ---
 
+## Module dispatch（分发机制）— 2026-07-01
+
+### 背景
+实施 `js-module-dispatch-plan.md` Part 1，用 module-grouped 两级分发替代扁平代理表。74 个测试点全部通过。
+
+### 教训
+
+**1. 公共入口函数必须对指针参数做 NULL 防御**
+- `kwcc_js_notify_js_impl` 接收 `const char *id`，id 为 NULL 是合法业务场景（如 progress 事件无 req_id）
+- `ops->new_string(ops, NULL)` → `JS_NewString(ctx, NULL)` → 崩溃
+- 修复：`id ? ops->new_string(ops, id) : ops->null`
+- 原则：公共入口函数不能假设调用方一定传有效指针，指针参数必须 NULL 防御
+
+---
+
 ## Bus 重构（bus split）— 2026-06-24
 
 ### 背景
