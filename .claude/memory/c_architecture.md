@@ -15,6 +15,7 @@
 
 | 文件 | 职责 |
 |------|------|
+| `kwcc_core.h` | 核心生命周期声明：`g_frame_counter` + `kwcc_begin_frame`（kwcc_ui.c 直接 include） |
 | `kwcc_base.h` | 纯 C 基础设施：内存池编译常量 + topic 清洗/校验声明 |
 | `kwcc_base.c` | topic 清洗（`kwcc_base_topic_sanitize`）+ 校验（`kwcc_base_topic_check`） |
 | `kwcc_mempool.h/c` | L0-L7 Slab 内存池：alloc/set/get/release/GC/key_map/常量表/TLV 序列化 |
@@ -96,8 +97,8 @@
 |------|------|------|
 | `g_kwcc_js_ops` | `kwcc_js_ops_t` | **Facade ops 实例**（非 static，测试可访问） |
 | `g_kwcc_js_modules` | `kwcc_js_module_t**` (static) | 已注册模块列表（动态增长） |
-| `g_kwcc_js_dispatch` | `kwcc_js_dispatch_t*` (static) | API 分发表（动态增长） |
-| `g_kwcc_js_module_count` | `int` (static) | 模块计数 |
+| `g_kwcc_js_dispatch_modules` | `const char**` (static) | 分发表 module 名数组（动态增长） |
+| `g_kwcc_js_dispatch_groups` | `kwcc_js_dispatch_group_t*` (static) | 分发表 module 分组（每模块独立 handler 列表） |
 | `s_notify_emit_fn` | `kwcc_js_val_t` (static) | `$notify.emit` 缓存引用（global 可达，GC 安全） |
 | `g_ui_callback` | `JSUICallback` | UI 桥接回调指针 |
 
@@ -120,10 +121,13 @@
 ### Facade + Module（kwcc_js.c）
 | 函数 | 功能 |
 |------|------|
-| `kwcc_js_ops_init(ctx)` | 初始化 `g_kwcc_js_ops`：绑定 20 个函数指针 + 5 个属性 |
+| `kwcc_js_ops_init(ctx)` | 初始化 `g_kwcc_js_ops`：绑定 18 个函数指针 + 5 个属性 |
 | `kwcc_js_inject_notify(ops)` | 注入 `$notify` 对象 + 缓存 `s_notify_emit_fn` |
-| `kwcc_js_register_module(ops, mod)` | 调用 mod→load + mod→register_cfun，加入模块列表 |
-| `kwcc_js_register_modules(ops)` | 注入 `$notify` → 逐个注册模块（当前 HTTP 待迁移） |
+| `kwcc_js_register_module(ops, mod)` | 调用 mod→load + 读取 mod→apis 注册进分发表，加入模块列表 |
+| `kwcc_js_register_modules(ops)` | 注入 `$notify` → 注册 core APIs → 逐个注册模块 |
+| `kwcc_js_dispatch_add(module, func, handler)` | 添加 handler 到分发表（module 分组，重复 func 覆盖） |
+| `kwcc_js_dispatch_call(module, func, argc, argv)` | 从分发表查找 handler 并调用（ops 签名） |
+| `kwcc_js_call_c(ctx, this_val, argc, argv)` | JS 全局函数 `kwcc_js_call_c`，提取 module/func 后调 dispatch_call |
 | `kwcc_js_on_bus_event(topic, data, len, user_data)` | 遍历模块 on_bus_event → 默认白名单 → `$bus.emit` |
 | `kwcc_js_match_whitelist(whitelist, topic)` | 白名单前缀匹配（逗号分隔） |
 
@@ -147,7 +151,7 @@
 | `kwcc_js_array_length_impl` | `array_length` |
 | `kwcc_js_array_get_impl` | `array_get` |
 | `kwcc_js_to_int32_impl` | `to_int32` |
-| `kwcc_js_notify_js_impl` | `notify_js`（ack_cleanup → call_cb $notify.emit） |
+| `kwcc_js_notify_js_impl` | `notify_js`（ack_cleanup → call_cb $notify.emit，NULL id 防御） |
 
 ### MemPool 层（kwcc_mempool.c）
 | 函数 | 功能 |
@@ -338,7 +342,8 @@ ui.svg(path_or_svg, x, y, w, h)
 13. **`kwcc_js_val_t = JSValue`**：行为层面隔离（可替换性），非类型层面。ops impl 直接用 JSValue，不需要强转
 14. **`$notify` C→JS 通知通道**：C 端通过 `ops->notify_js` 通知，不直接调 resolve/reject；JS 端 `$notify.on(type, handler)` 做回调映射
 15. **`ack_cleanup` 在 `call_cb` 之前自动调用**：C 端传了就自动处理，不需要记着调 release
-16. **模块生命周期**：core 按 `load → register_cfun → on_bus_event（运行时）→ unload（退出时）` 顺序调用
+16. **模块生命周期**：core 按 `load → (apis 自动注册) → on_bus_event（运行时）→ unload（退出时）` 顺序调用
+17. **module-grouped 两级分发**：`kwcc_js_call_c(module, func, ...args)` 替代旧的 `kwcc_js_mquickjs_call`，分发表按 module 分组，同一 module 内按 func 查找 handler
 
 ## JS 框架 API（main.js）
 

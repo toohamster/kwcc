@@ -186,7 +186,7 @@
 ## Facade + Plugin 架构（kwcc_js 拆分）— 2026-06-30
 
 ### 背景
-将 `kwcc_js.c/h` 拆分为 Facade + Plugin 模式：core 封装 mquickjs，子模块通过 `kwcc_js_ops_t` 操作 JS，不直接调 mquickjs API。Steps 1-3 完成，75 个测试点全部通过。
+将 `kwcc_js.c/h` 拆分为 Facade + Plugin 模式：core 封装 mquickjs，子模块通过 `kwcc_js_ops_t` 操作 JS，不直接调 mquickjs API。Steps 1-3 完成，ops 测试全部通过。
 
 ### 架构决策
 

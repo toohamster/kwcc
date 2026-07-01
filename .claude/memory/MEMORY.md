@@ -114,12 +114,13 @@
 - 排查问题流程：先 C 层 → 再 C handler → 再 ops → 最后 JS wrapper
 - 编译技巧：不链接 kwcc_ui.o，避免 nanosvg/NVG 依赖
 - Phase 4 TLV 调试教训：不要在 JS 层反复调试
-- ops 测试 75 点：值创建/属性操作/函数调用/类型判断/C字符串/eval/notify/数组
+- ops 测试 74 点：值创建/属性操作/函数调用/类型判断/C字符串/eval/notify/数组/dispatch
 
 ### [模块开发经验](module_dev_experience.md)
 - 内存池开发 8 条教训：方案确认、C 端测试、命名规范、不发挥、构建产物、分层、代理机制、测试记录
 - Bus 重构教训：static 函数命名规范、命名写时就遵守、sanitize bug、不引入"看似更优"的复杂方案
 - Facade+Plugin 教训：`kwcc_js_val_t=JSValue`（不是 uint64_t）、隔离是行为层面、bug 误判别怀疑设计、方案外决策必须先讨论
+- Module dispatch 教训：公共入口函数 NULL 防御
 
 ### [C 语言模块开发模式](c_module_patterns.md)
 - **模式 A**：模块前缀 + 静态全局 — 单例、零开销、文件级内聚
