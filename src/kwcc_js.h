@@ -73,11 +73,27 @@ struct kwcc_js_ops {
                                 void (*ack_cleanup)(const char *id));
 };
 
+/* Module handler signature — ops style, sub-modules use this */
+typedef kwcc_js_val_t (*kwcc_js_handler_t)(kwcc_js_ops_t *ops, int argc, kwcc_js_val_t *argv);
+
+/* Module API declaration entry — describes a handler the module exposes */
+typedef struct {
+    const char *name;              /* handler name, e.g. "request", "cancel" */
+    kwcc_js_handler_t func;        /* ops-signature handler */
+} kwcc_js_api_t;
+
+/* Dispatch table entry — runtime mapping of module+func → handler */
+typedef struct {
+    const char *module;        /* module name, e.g. "http", "core" */
+    const char *func;          /* API name, e.g. "request", "cancel" */
+    kwcc_js_handler_t handler; /* ops-signature handler */
+} kwcc_js_dispatch_t;
+
 /* Module descriptor — sub-modules implement this and register with core */
 typedef struct kwcc_js_module {
     const char *name;
     void (*load)(kwcc_js_ops_t *ops);
-    void (*register_cfun)(kwcc_js_ops_t *ops);
+    const kwcc_js_api_t *apis;  /* module API list (static array, NULL-terminated) */
     void (*on_bus_event)(const char *topic, const void *data,
                          size_t len, kwcc_js_ops_t *ops);
     void (*unload)(kwcc_js_ops_t *ops);
@@ -126,16 +142,20 @@ JSValue kwcc_js_config_release_app_prefix(JSContext *ctx, JSValue *this_val, int
 JSValue kwcc_js_config_set_core_tlv(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue kwcc_js_config_set_max_pools(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 
-JSValue kwcc_js_mempool_dump_stats(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-JSValue kwcc_js_mempool_dump_all(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-
 /* $http JS API */
 void kwcc_register_http_js(JSContext *ctx);
 JSValue kwcc_js_http_request(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue kwcc_js_http_cancel(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 
-/* Proxy: dynamic handler dispatch (avoids modifying mqjs_stdlib.c) */
-JSValue kwcc_js_mquickjs_call(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+/* Dispatch: module+func two-level routing (kwcc_js_call_c) */
+JSValue kwcc_js_call_c(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+
+/* Direct dispatch for testing — find module→handler, call ops-signature handler */
+kwcc_js_val_t kwcc_js_dispatch_call(const char *module, const char *func,
+                                     int argc, kwcc_js_val_t *argv);
+
+/* Add handler to dispatch table — for testing duplicate registration */
+void kwcc_js_dispatch_add(const char *module, const char *func, kwcc_js_handler_t handler);
 
 /* TLV conversion helper */
 uint8_t *kwcc_js_value_to_tlv(JSContext *ctx, JSValue js_val, size_t *out_len);

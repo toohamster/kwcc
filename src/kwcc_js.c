@@ -22,10 +22,28 @@
 
 kwcc_js_ops_t g_kwcc_js_ops;
 
-/* Module registry */
-#define KWCC_JS_MAX_MODULES 8
-static kwcc_js_module_t *g_kwcc_js_modules[KWCC_JS_MAX_MODULES];
+/* Module registry — dynamic, no limit */
+static kwcc_js_module_t **g_kwcc_js_modules = NULL;
 static int g_kwcc_js_module_count = 0;
+static int g_kwcc_js_module_cap = 0;
+
+/* API dispatch table: module-grouped, two-level lookup */
+typedef struct {
+    kwcc_js_dispatch_t *handlers;   /* handler list for one module */
+    int handler_count;
+    int handler_cap;
+} kwcc_js_dispatch_group_t;
+
+static const char **g_kwcc_js_dispatch_modules = NULL;
+static kwcc_js_dispatch_group_t *g_kwcc_js_dispatch_groups = NULL;
+static int g_kwcc_js_dispatch_group_count = 0;
+static int g_kwcc_js_dispatch_group_cap = 0;
+
+/* Forward declarations for dispatch functions (defined later) */
+void kwcc_js_dispatch_add(const char *module, const char *func, kwcc_js_handler_t handler);
+
+/* Forward declaration for core API list (defined later) */
+static const kwcc_js_api_t g_kwcc_js_core_apis[];
 
 /* $notify.emit reference (global-reachable, GC-safe, no AddGCRef needed) */
 static kwcc_js_val_t s_notify_emit_fn;
@@ -226,13 +244,24 @@ static void kwcc_js_inject_notify(kwcc_js_ops_t *ops) {
 void kwcc_js_register_module(kwcc_js_ops_t *ops, kwcc_js_module_t *mod) {
     log_info("js: loading module '%s'", mod->name);
     if (mod->load) mod->load(ops);
-    if (mod->register_cfun) mod->register_cfun(ops);
-    if (g_kwcc_js_module_count < KWCC_JS_MAX_MODULES) {
-        g_kwcc_js_modules[g_kwcc_js_module_count++] = mod;
-    } else {
-        log_error("js: max modules (%d) reached, cannot register '%s'",
-                  KWCC_JS_MAX_MODULES, mod->name);
+
+    /* Read module's declared API list and register into dispatch table */
+    if (mod->apis) {
+        for (int i = 0; mod->apis[i].name; i++) {
+            kwcc_js_dispatch_add(mod->name, mod->apis[i].name, mod->apis[i].func);
+        }
     }
+
+    if (g_kwcc_js_module_count >= g_kwcc_js_module_cap) {
+        int new_cap = g_kwcc_js_module_cap ? g_kwcc_js_module_cap * 2 : 16;
+        g_kwcc_js_modules = realloc(g_kwcc_js_modules, new_cap * sizeof(kwcc_js_module_t *));
+        if (!g_kwcc_js_modules) {
+            log_error("js: module registry realloc failed");
+            return;
+        }
+        g_kwcc_js_module_cap = new_cap;
+    }
+    g_kwcc_js_modules[g_kwcc_js_module_count++] = mod;
     log_info("js: module '%s' registered", mod->name);
 }
 
@@ -241,7 +270,12 @@ void kwcc_js_register_modules(kwcc_js_ops_t *ops) {
     log_info("js: injecting $notify channel");
     kwcc_js_inject_notify(ops);
 
-    /* Register modules — currently only http; add more here */
+    /* Register core APIs (virtual module name "core") */
+    for (int i = 0; g_kwcc_js_core_apis[i].name; i++) {
+        kwcc_js_dispatch_add("core", g_kwcc_js_core_apis[i].name, g_kwcc_js_core_apis[i].func);
+    }
+
+    /* Register business modules — currently only http; add more here */
     /* extern kwcc_js_module_t kwcc_js_http_module; */
     /* kwcc_js_register_module(ops, &kwcc_js_http_module); */
 
@@ -421,65 +455,130 @@ JSValue js_kwcc_ui(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
  * C handler layer: JSValue → C value conversion → delegate to config layer
  * ═══════════════════════════════════════════════════════════════ */
 
-/* ── Proxy: dynamic handler dispatch (avoids modifying mqjs_stdlib.c) ── */
+/* ── Dispatch table functions ── */
 
-typedef JSValue (*kwcc_js_cfun_t)(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-
-typedef struct {
-    const char *name;
-    kwcc_js_cfun_t func;
-} kwcc_js_cfun_entry_t;
-
-static kwcc_js_cfun_entry_t g_kwcc_js_cfun_handlers[] = {
-    /* Future new handlers — just add here, no need to modify mqjs_stdlib.c */
-    { "kwcc_js_mempool_dump_stats", kwcc_js_mempool_dump_stats },
-    { "kwcc_js_mempool_dump_all",   kwcc_js_mempool_dump_all },
-    { "kwcc_js_http_request",       kwcc_js_http_request },
-    { "kwcc_js_http_cancel",        kwcc_js_http_cancel },
-    { NULL, NULL }
-};
-
-JSValue kwcc_js_mquickjs_call(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
-    (void)this_val;
-    if (argc < 1) return JS_UNDEFINED;
-    JSCStringBuf nbuf;
-    const char *name = JS_ToCString(ctx, argv[0], &nbuf);
-    if (!name) return JS_UNDEFINED;
-    for (int i = 0; g_kwcc_js_cfun_handlers[i].name; i++) {
-        if (strcmp(g_kwcc_js_cfun_handlers[i].name, name) == 0) {
-            return g_kwcc_js_cfun_handlers[i].func(ctx, this_val, argc - 1, argv + 1);
-        }
+/* Find module group index by name, returns -1 if not found */
+static int kwcc_js_dispatch_find_module(const char *module) {
+    for (int i = 0; i < g_kwcc_js_dispatch_group_count; i++) {
+        if (strcmp(g_kwcc_js_dispatch_modules[i], module) == 0)
+            return i;
     }
-    log_error("kwcc_js_mquickjs_call: unknown handler '%s'", name);
-    return JS_UNDEFINED;
+    return -1;
 }
 
-/* ── Dump functions (KWCC_DEBUG only, direct mempool access) ── */
+void kwcc_js_dispatch_add(const char *module, const char *func, kwcc_js_handler_t handler) {
+    int mi = kwcc_js_dispatch_find_module(module);
 
-JSValue kwcc_js_mempool_dump_stats(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
-    (void)this_val; (void)argc; (void)argv;
+    /* Module group not found — create new one */
+    if (mi < 0) {
+        if (g_kwcc_js_dispatch_group_count >= g_kwcc_js_dispatch_group_cap) {
+            int new_cap = g_kwcc_js_dispatch_group_cap ? g_kwcc_js_dispatch_group_cap * 2 : 16;
+            g_kwcc_js_dispatch_modules = realloc(g_kwcc_js_dispatch_modules, new_cap * sizeof(char *));
+            g_kwcc_js_dispatch_groups = realloc(g_kwcc_js_dispatch_groups, new_cap * sizeof(kwcc_js_dispatch_group_t));
+            if (!g_kwcc_js_dispatch_modules || !g_kwcc_js_dispatch_groups) {
+                log_error("js: dispatch group realloc failed");
+                return;
+            }
+            g_kwcc_js_dispatch_group_cap = new_cap;
+        }
+        mi = g_kwcc_js_dispatch_group_count++;
+        g_kwcc_js_dispatch_modules[mi] = module;
+        g_kwcc_js_dispatch_groups[mi].handlers = NULL;
+        g_kwcc_js_dispatch_groups[mi].handler_count = 0;
+        g_kwcc_js_dispatch_groups[mi].handler_cap = 0;
+    }
+
+    kwcc_js_dispatch_group_t *grp = &g_kwcc_js_dispatch_groups[mi];
+
+    /* Check for duplicate func name — overwrite if found */
+    for (int i = 0; i < grp->handler_count; i++) {
+        if (strcmp(grp->handlers[i].func, func) == 0) {
+            grp->handlers[i].handler = handler;
+            return;
+        }
+    }
+
+    /* New handler — append */
+    if (grp->handler_count >= grp->handler_cap) {
+        int new_cap = grp->handler_cap ? grp->handler_cap * 2 : 8;
+        grp->handlers = realloc(grp->handlers, new_cap * sizeof(kwcc_js_dispatch_t));
+        if (!grp->handlers) {
+            log_error("js: dispatch handlers realloc failed");
+            return;
+        }
+        grp->handler_cap = new_cap;
+    }
+    grp->handlers[grp->handler_count].module = module;
+    grp->handlers[grp->handler_count].func = func;
+    grp->handlers[grp->handler_count].handler = handler;
+    grp->handler_count++;
+}
+
+kwcc_js_val_t kwcc_js_dispatch_call(const char *module, const char *func,
+                                     int argc, kwcc_js_val_t *argv) {
+    int mi = kwcc_js_dispatch_find_module(module);
+    if (mi < 0) {
+        log_error("js: dispatch: unknown module '%s'", module);
+        return g_kwcc_js_ops.undefined;
+    }
+
+    kwcc_js_dispatch_group_t *grp = &g_kwcc_js_dispatch_groups[mi];
+    for (int i = 0; i < grp->handler_count; i++) {
+        if (strcmp(grp->handlers[i].func, func) == 0) {
+            return grp->handlers[i].handler(&g_kwcc_js_ops, argc, argv);
+        }
+    }
+    log_error("js: dispatch: unknown handler '%s/%s'", module, func);
+    return g_kwcc_js_ops.undefined;
+}
+
+/* ── Core handlers (ops-signature, direct C calls) ── */
+
+static kwcc_js_val_t js_core_mempool_dump_stats(kwcc_js_ops_t *ops, int argc, kwcc_js_val_t *argv) {
+    (void)ops; (void)argc; (void)argv;
 #ifdef KWCC_DEBUG
     kwcc_mempool_dump_stats();
 #else
     log_info("dump: not available (build without KWCC_DEBUG)");
 #endif
-    return JS_UNDEFINED;
+    return ops->undefined;
 }
 
-JSValue kwcc_js_mempool_dump_all(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
-    (void)this_val;
-    if (argc < 1) return JS_UNDEFINED;
+static kwcc_js_val_t js_core_mempool_dump_all(kwcc_js_ops_t *ops, int argc, kwcc_js_val_t *argv) {
+    if (argc < 1) return ops->undefined;
 #ifdef KWCC_DEBUG
-    JSCStringBuf pbuf;
-    const char *path = JS_ToCString(ctx, argv[0], &pbuf);
-    if (!path) return JS_UNDEFINED;
+    kwcc_js_cstr_buf_t pbuf;
+    const char *path = ops->to_cstring(ops, argv[0], &pbuf);
+    if (!path) return ops->undefined;
     int show_content = 0;
-    if (argc >= 2) JS_ToInt32(ctx, &show_content, argv[1]);
+    if (argc >= 2) show_content = ops->to_int32(ops, argv[1]);
     kwcc_mempool_dump_all(path, show_content);
 #else
     log_info("dumpAll: not available (build without KWCC_DEBUG)");
 #endif
-    return JS_UNDEFINED;
+    return ops->undefined;
+}
+
+static const kwcc_js_api_t g_kwcc_js_core_apis[] = {
+    { "mempool_dump_stats", js_core_mempool_dump_stats },
+    { "mempool_dump_all",   js_core_mempool_dump_all },
+    { NULL, NULL }
+};
+
+/* ── New global function: kwcc_js_call_c(module, func, ...args) ── */
+
+JSValue kwcc_js_call_c(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+
+    /* Extract module and func using ops-style (consistent with rest of code) */
+    kwcc_js_cstr_buf_t mbuf, fbuf;
+    const char *module = g_kwcc_js_ops.to_cstring(&g_kwcc_js_ops, argv[0], &mbuf);
+    const char *func   = g_kwcc_js_ops.to_cstring(&g_kwcc_js_ops, argv[1], &fbuf);
+    if (!module || !func) return JS_UNDEFINED;
+
+    /* Args start from argv[2] */
+    return kwcc_js_dispatch_call(module, func, argc - 2, argv + 2);
 }
 
 /* ── TLV conversion helper ──────────────────────────────────── */
@@ -777,8 +876,8 @@ void kwcc_register_config_js(JSContext *ctx) {
         "$config.appReleasePrefix = function(k) { kwcc_js_config_release_app_prefix(k); };\n"
         "$config.coreSetTlv = function(k, v) { kwcc_js_config_set_core_tlv(k, v); };\n"
         "$config.setMaxPools = function(t, n) { kwcc_js_config_set_max_pools(t, n); };\n"
-        "$config.dump = function() { kwcc_js_mquickjs_call('kwcc_js_mempool_dump_stats'); };\n"
-        "$config.dumpAll = function(p, s) { kwcc_js_mquickjs_call('kwcc_js_mempool_dump_all', p, s || 0); };\n";
+        "$config.dump = function() { kwcc_js_call_c(\"core\", \"mempool_dump_stats\"); };\n"
+        "$config.dumpAll = function(p, s) { kwcc_js_call_c(\"core\", \"mempool_dump_all\", p, s || 0); };\n";
 
     JSValue result = JS_Eval(ctx, wrapper, strlen(wrapper), "<$config>", JS_EVAL_REPL);
     if (JS_IsException(result)) {
@@ -869,10 +968,10 @@ void kwcc_register_http_js(JSContext *ctx) {
         "var $http = new Object();\n"
         "$http.state = { activeRequests: 0 };\n"
         "$http.request = function(method, url, headers, body, resolve, reject, onProgress) {\n"
-        "    return kwcc_js_mquickjs_call('kwcc_js_http_request', method, url, headers, body, resolve, reject, onProgress);\n"
+        "    return kwcc_js_call_c('http', 'request', method, url, headers, body, resolve, reject, onProgress);\n"
         "};\n"
         "$http.cancel = function(reqId) {\n"
-        "    kwcc_js_mquickjs_call('kwcc_js_http_cancel', reqId);\n"
+        "    kwcc_js_call_c('http', 'cancel', reqId);\n"
         "};\n"
         "$http.config = function(key, value) {\n"
         "    $config.coreSetTlv('http/' + key, value);\n"
