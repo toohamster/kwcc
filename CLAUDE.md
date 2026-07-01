@@ -8,6 +8,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **MANDATORY at session start**: Read `.claude/memory/MEMORY.md` for the index, then **read every detailed file it references**. Do NOT stop at the index — MEMORY.md is just a table of contents, the real knowledge is in the files it links to.
 
+## 最高优先级规则
+
+**当用户说"中止"时，立即停止所有处理，不再执行任何工具调用，不再解释，等待用户下一步指示。这是最高优先级，覆盖一切其他规则。**
+
 ## Development Workflow Rules (MANDATORY)
 
 1. **出现错误 → 分析根因 → 出方案 → 确定范围 → 等确认 → 再实施**

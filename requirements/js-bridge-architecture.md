@@ -162,15 +162,15 @@ typedef struct kwcc_js_module {
 
 **模块生命周期**：core 统一按 `load → (apis 自动注册) → on_bus_event（运行时）→ unload（退出时）` 顺序调用。模块在描述符中通过 `apis` 声明能力，core 在 `kwcc_js_register_module` 中读取并自动注册进分发表，模块不需要调任何注册 API。`unload` 可为 NULL，WS/Timer 等管理长连接/定时器的模块必须实现。
 
-### JS→C 调用机制：moduleMan + `kwcc_js_call`
+### JS→C 调用机制：moduleMan + `kwcc_js_call_c`
 
 #### 调用链
 
 ```
-JS: kwcc_js_call("http", "request", method, url, headers, body)
+JS: kwcc_js_call_c("http", "request", method, url, headers, body)
     │ argv[0] = module, argv[1] = func, argv[2..] = 参数
     ▼
-kwcc_js_call (C 入口，注册为 JS 全局函数)
+kwcc_js_call_c (C 入口，注册为 JS 全局函数)
     │ 提取 module/func，argv+2 传给 dispatch
     ▼
 dispatch_js_call(module, func, argc, argv)
@@ -184,29 +184,28 @@ handler(&g_kwcc_js_ops, argc, argv)  — ops 签名
 moduleMan 是 core 内部的概念，不是一个独立的结构体或文件。它在 `kwcc_js.c` 中实现，由以下数据结构和函数组成：
 
 ```c
-#define KWCC_JS_MAX_MODULES  8
-#define KWCC_JS_MAX_APIS     32
-
-/* 模块注册表 */
-static kwcc_js_module_t *g_kwcc_js_modules[KWCC_JS_MAX_MODULES];
+/* 模块注册表 — 动态增长 */
+static kwcc_js_module_t **g_kwcc_js_modules = NULL;
 static int g_kwcc_js_module_count = 0;
+static int g_kwcc_js_module_cap = 0;
 
-/* API 分发表：module + func → handler */
+/* API 分发表：module + func → handler — 动态增长 */
 typedef struct {
     const char *module;
     const char *func;
     kwcc_js_handler_t handler;
 } kwcc_js_dispatch_t;
 
-static kwcc_js_dispatch_t g_kwcc_js_dispatch[KWCC_JS_MAX_APIS];
+static kwcc_js_dispatch_t *g_kwcc_js_dispatch = NULL;
 static int g_kwcc_js_dispatch_count = 0;
+static int g_kwcc_js_dispatch_cap = 0;
 ```
 
 **注册流程**：`kwcc_js_register_module` 读取 `mod->apis`，遍历添加到分发表。core 自身的 handler 使用虚拟模块名 `"core"` 注册。
 
 **分发流程**：`kwcc_js_dispatch_call` 按 module+func 二级查找，找到后调 `handler(&g_kwcc_js_ops, argc, argv)`。
 
-#### `kwcc_js_call` — JS 全局函数
+#### `kwcc_js_call_c` — JS 全局函数
 
 替代旧的 `kwcc_js_mquickjs_call`。JS 端调用方式从全名匹配改为二级路由：
 
@@ -215,7 +214,7 @@ static int g_kwcc_js_dispatch_count = 0;
 kwcc_js_mquickjs_call('kwcc_js_http_request', method, url, headers, body)
 
 // 新：二级路由
-kwcc_js_call("http", "request", method, url, headers, body)
+kwcc_js_call_c("http", "request", method, url, headers, body)
 ```
 
 好处：模块边界明确、无隐式命名约定依赖、core handler 和模块 handler 走统一分发机制。
@@ -456,7 +455,7 @@ static void kwcc_js_on_bus_event(const char *topic, const void *data,
 | 1 | kwcc_js.h 新增类型和接口定义 | `src/kwcc_js.h` | 无 | ✅ 已完成 |
 | 2 | kwcc_js.c 实现 ops 绑定 + 模块注册 | `src/kwcc_js.c` | Step 1 | ✅ 已完成 |
 | 3 | ops 接口测试 | `tests/test_js_ops.c` | Step 2 | ✅ 已完成 |
-| 4 | moduleMan + `kwcc_js_call` 分发机制 | `src/kwcc_js.h`, `src/kwcc_js.c`, `deps/mquickjs/mqjs_stdlib.c` | Step 3 | 📋 详见 `js-module-dispatch-plan.md` |
+| 4 | moduleMan + `kwcc_js_call_c` 分发机制 | `src/kwcc_js.h`, `src/kwcc_js.c`, `deps/mquickjs/mqjs_stdlib.c` | Step 3 | 📋 详见 `js-module-dispatch-plan.md` |
 | 5 | core handler 签名迁移 | `src/kwcc_js.c`, `src/kwcc_js.h` | Step 4 | 📋 详见 `js-module-dispatch-plan.md` Part 2 |
 | 6 | 实施第一个 Plugin（HTTP 模块） | — | Step 5 | 📋 详见 `js-http-implementation-plan.md` |
 
@@ -499,14 +498,14 @@ static void kwcc_js_on_bus_event(const char *topic, const void *data,
 
 ---
 
-### Step 4: moduleMan + `kwcc_js_call` 分发机制 📋
+### Step 4: moduleMan + `kwcc_js_call_c` 分发机制 📋
 
 详见 `requirements/js-module-dispatch-plan.md` Part 1。
 
 核心变更：
 - `kwcc_js_module_t` 中 `register_cfun` → `apis`
 - 新增 `kwcc_js_handler_t`、`kwcc_js_api_t`、`kwcc_js_dispatch_t` 类型
-- 新增 `kwcc_js_call` 全局函数，替代 `kwcc_js_mquickjs_call`
+- 新增 `kwcc_js_call_c` 全局函数，替代 `kwcc_js_mquickjs_call`
 - 新增分发表 `g_kwcc_js_dispatch[]`，替代代理表 `g_kwcc_js_cfun_handlers[]`
 - 2 个 mempool handler 通过适配器包装注册（`$config` handler 不处理，保持 `JS_CFUNC_DEF` 直接注册）
 

@@ -95,7 +95,8 @@
 | 变量 | 类型 | 用途 |
 |------|------|------|
 | `g_kwcc_js_ops` | `kwcc_js_ops_t` | **Facade ops 实例**（非 static，测试可访问） |
-| `g_kwcc_js_modules[8]` | `kwcc_js_module_t*[]` (static) | 已注册模块列表 |
+| `g_kwcc_js_modules` | `kwcc_js_module_t**` (static) | 已注册模块列表（动态增长） |
+| `g_kwcc_js_dispatch` | `kwcc_js_dispatch_t*` (static) | API 分发表（动态增长） |
 | `g_kwcc_js_module_count` | `int` (static) | 模块计数 |
 | `s_notify_emit_fn` | `kwcc_js_val_t` (static) | `$notify.emit` 缓存引用（global 可达，GC 安全） |
 | `g_ui_callback` | `JSUICallback` | UI 桥接回调指针 |
