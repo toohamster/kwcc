@@ -3,6 +3,7 @@
 /* ── load runtime ── */
 load("app/runtime/store.js");
 load("app/runtime/bus.js");
+load("app/runtime/promise.js");
 load("app/runtime/http.js");
 
 /* ── framework global variables ($ prefix) ── */
