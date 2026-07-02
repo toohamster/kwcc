@@ -19,7 +19,7 @@ DEP_SRCS = deps/nanovg/nanovg.c \
            deps/log/log.c \
            deps/picohttpparser/picohttpparser.c
 
-MQJS_SRCS = $(MQJS_CORE) $(DEP_SRCS) src/main.m src/kwcc.c src/kwcc_js.c src/kwcc_ui.c src/kwcc_io.c src/kwcc_bus.c src/kwcc_mempool.c src/kwcc_config.c src/kwcc_ui_bus.c src/kwcc_base.c src/kwcc_http.c
+MQJS_SRCS = $(MQJS_CORE) $(DEP_SRCS) src/main.m src/kwcc.c src/kwcc_js.c src/kwcc_js_http.c src/kwcc_ui.c src/kwcc_io.c src/kwcc_bus.c src/kwcc_mempool.c src/kwcc_config.c src/kwcc_ui_bus.c src/kwcc_base.c src/kwcc_http.c
 
 # Build directories
 BUILD_DIR = build
@@ -79,7 +79,7 @@ $(OBJ_DIR)/src/main.o: src/main.m $(MQJS_HEADERS) | $(OBJ_DIR)/src
 $(OBJ_DIR)/src/kwcc.o: src/kwcc.c $(MQJS_HEADERS) src/kwcc_base.h | $(OBJ_DIR)/src
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/src/kwcc_js.o: src/kwcc_js.c src/kwcc_js.h src/kwcc_base.h src/kwcc_http.h $(MQJS_HEADERS) | $(OBJ_DIR)/src
+$(OBJ_DIR)/src/kwcc_js.o: src/kwcc_js.c src/kwcc_js.h src/kwcc_js_http.h src/kwcc_base.h $(MQJS_HEADERS) | $(OBJ_DIR)/src
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(OBJ_DIR)/src/kwcc_ui.o: src/kwcc_ui.c src/kwcc_ui.h src/kwcc_js.h src/kwcc_base.h src/kwcc_bus.h $(MQJS_HEADERS) | $(OBJ_DIR)/src
@@ -104,6 +104,9 @@ $(OBJ_DIR)/src/kwcc_base.o: src/kwcc_base.c src/kwcc_base.h $(MQJS_HEADERS) | $(
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(OBJ_DIR)/src/kwcc_http.o: src/kwcc_http.c src/kwcc_http.h src/kwcc_base.h src/kwcc_bus.h src/kwcc_io.h src/kwcc_config.h $(MQJS_HEADERS) | $(OBJ_DIR)/src
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJ_DIR)/src/kwcc_js_http.o: src/kwcc_js_http.c src/kwcc_js_http.h src/kwcc_js.h src/kwcc_http.h $(MQJS_HEADERS) | $(OBJ_DIR)/src
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # ── Create build directories ────────────────────────────────────

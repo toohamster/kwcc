@@ -142,11 +142,6 @@ JSValue kwcc_js_config_release_app_prefix(JSContext *ctx, JSValue *this_val, int
 JSValue kwcc_js_config_set_core_tlv(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 JSValue kwcc_js_config_set_max_pools(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 
-/* $http JS API */
-void kwcc_register_http_js(JSContext *ctx);
-JSValue kwcc_js_http_request(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-JSValue kwcc_js_http_cancel(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-
 /* Dispatch: module+func two-level routing (kwcc_js_call_c) */
 JSValue kwcc_js_call_c(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 

@@ -54,16 +54,6 @@ typedef struct {
 static kwcc_http_req_t g_kwcc_http_reqs[KWCC_HTTP_MAX_REQS];
 static int g_kwcc_http_next_seq = 0;
 
-/* ── Callback registry (opaque pointers for async response routing) ── */
-
-static struct {
-    char     req_id[64];
-    void    *on_end_cb;
-    void    *on_error_cb;
-    void    *on_progress_cb;
-    int      in_use;
-} g_kwcc_http_cbs[KWCC_HTTP_MAX_REQS];
-
 /* ── Forward declarations ───────────────────────────────────── */
 
 static void kwcc_http_on_read(int fd, void *user_data);
@@ -71,12 +61,12 @@ static void kwcc_http_dispatch_end(kwcc_http_req_t *req, int error,
                                    int status, const char *body, int body_len,
                                    struct phr_header *headers, size_t num_headers);
 static void kwcc_http_cleanup(kwcc_http_req_t *req);
+static kwcc_http_req_t *kwcc_http_req_find(const char *req_id);
 
 /* ── Public API ─────────────────────────────────────────────── */
 
 void kwcc_http_init(void) {
     memset(g_kwcc_http_reqs, 0, sizeof(g_kwcc_http_reqs));
-    memset(g_kwcc_http_cbs, 0, sizeof(g_kwcc_http_cbs));
 }
 
 const char *kwcc_http_request(const char *method,
@@ -255,32 +245,72 @@ const char *kwcc_http_request(const char *method,
 
 void kwcc_http_cancel(const char *req_id) {
     if (!req_id) return;
-    for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
-        if (g_kwcc_http_reqs[i].in_use && strcmp(g_kwcc_http_reqs[i].req_id, req_id) == 0) {
-            kill(g_kwcc_http_reqs[i].pid, SIGTERM);
-            /* publish cancel event so JS side can clean up */
-            char topic[128];
-            char safe[128];
-            snprintf(topic, sizeof(topic), "http/cancel/%s", req_id);
-            kwcc_base_topic_sanitize(safe, sizeof(safe), topic);
-            kwcc_bus_publish(safe, NULL, 0);
-            kwcc_http_cleanup(&g_kwcc_http_reqs[i]);
-            return;
-        }
-    }
+    kwcc_http_req_t *req = kwcc_http_req_find(req_id);
+    if (!req) return;
+    kill(req->pid, SIGTERM);
+    /* publish cancel event so JS side can clean up */
+    char topic[128];
+    char safe[128];
+    snprintf(topic, sizeof(topic), "http/cancel/%s", req_id);
+    kwcc_base_topic_sanitize(safe, sizeof(safe), topic);
+    kwcc_bus_publish(safe, NULL, 0);
+    kwcc_http_cleanup(req);
 }
 
 void kwcc_http_check_progress(void) {
     for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
         kwcc_http_req_t *req = &g_kwcc_http_reqs[i];
         if (!req->in_use) continue;
+
+        /* Zombie reclamation: check if child has exited without us noticing */
+        if (req->pid > 0) {
+            int status;
+            pid_t ret = waitpid(req->pid, &status, WNOHANG);
+            if (ret > 0) {
+                /* Child exited — if we haven't dispatched end yet, do it now */
+                if (req->response_len > 0 && req->result_status == 0) {
+                    /* Parse what we have and dispatch */
+                    const char *p = req->response_buf;
+                    size_t remaining = req->response_len;
+                    int final_status = 0;
+                    struct phr_header final_headers[64];
+                    size_t final_num_headers = 64;
+
+                    while (remaining >= 9 && memcmp(p, "HTTP/1.", 7) == 0) {
+                        size_t nh = 64;
+                        int mv, st;
+                        const char *msg;
+                        size_t msg_len;
+                        int r = phr_parse_response(p, remaining, &mv, &st, &msg, &msg_len,
+                                                   final_headers, &nh, 0);
+                        if (r == -2 || r <= 0) break;
+                        final_status = st;
+                        final_num_headers = nh;
+                        p += r;
+                        remaining -= r;
+                    }
+                    kwcc_http_dispatch_end(req, 0, final_status, p, (int)remaining,
+                                            final_headers, final_num_headers);
+                } else if (req->result_status == 0) {
+                    /* No data at all — dispatch error */
+                    kwcc_http_dispatch_end(req, 1, 0, NULL, 0, NULL, 0);
+                }
+                kwcc_http_cleanup(req);
+                continue;
+            }
+        }
+
+        /* Progress reporting */
         if (req->response_len != req->last_dispatched) {
             req->last_dispatched = req->response_len;
+            kwcc_http_progress_t prog;
+            prog.loaded = req->response_len;
+            prog.total = req->total_size;
             char topic[128];
             char safe[128];
             snprintf(topic, sizeof(topic), "http/progress/%s", req->req_id);
             kwcc_base_topic_sanitize(safe, sizeof(safe), topic);
-            kwcc_bus_publish(safe, NULL, 0);
+            kwcc_bus_publish(safe, &prog, sizeof(prog));
         }
     }
 }
@@ -309,6 +339,33 @@ static void kwcc_http_on_read(int fd, void *user_data) {
         memcpy(req->response_buf + req->response_len, buf, n);
         req->response_len += (int)n;
         req->response_buf[req->response_len] = '\0';
+
+        /* Incremental Content-Length extraction (only if not yet known) */
+        if (req->total_size == 0 && req->response_len > 0) {
+            /* Look for end of headers ("\r\n\r\n") to parse Content-Length */
+            const char *hdr_end = memmem(req->response_buf, req->response_len,
+                                         "\r\n\r\n", 4);
+            if (hdr_end) {
+                /* Parse status line + headers to find Content-Length */
+                size_t hdr_len = (hdr_end + 2) - req->response_buf;
+                int mv, st;
+                const char *msg;
+                size_t msg_len;
+                struct phr_header hdrs[64];
+                size_t nh = 64;
+                int r = phr_parse_response(req->response_buf, hdr_len,
+                                           &mv, &st, &msg, &msg_len, hdrs, &nh, 0);
+                if (r > 0) {
+                    for (size_t h = 0; h < nh; h++) {
+                        if (hdrs[h].name_len == 14 &&
+                            strncasecmp(hdrs[h].name, "Content-Length", 14) == 0) {
+                            req->total_size = atoi(hdrs[h].value);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if (n == 0) {
@@ -385,19 +442,53 @@ static void kwcc_http_dispatch_end(kwcc_http_req_t *req, int error,
 
 int kwcc_http_get_result(const char *req_id, kwcc_http_result_t *out) {
     if (!req_id || !out) return -1;
+    kwcc_http_req_t *req = kwcc_http_req_find(req_id);
+    if (!req) return -1;
+    out->error = req->result_error;
+    out->status = req->result_status;
+    out->body = req->result_body;
+    out->body_len = req->result_body_len;
+    return 0;
+}
+
+/* ── Internal: find request by req_id ──────────────────────── */
+
+static kwcc_http_req_t *kwcc_http_req_find(const char *req_id) {
+    if (!req_id) return NULL;
     for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
-        kwcc_http_req_t *req = &g_kwcc_http_reqs[i];
-        if (req->in_use && strcmp(req->req_id, req_id) == 0) {
-            out->error = req->result_error;
-            out->status = req->result_status;
-            out->body = req->result_body;
-            out->body_len = req->result_body_len;
-            out->headers = req->result_headers;
-            out->num_headers = req->result_num_headers;
-            return 0;
-        }
+        if (g_kwcc_http_reqs[i].in_use && strcmp(g_kwcc_http_reqs[i].req_id, req_id) == 0)
+            return &g_kwcc_http_reqs[i];
     }
-    return -1;
+    return NULL;
+}
+
+/* ── Public: header access API (hides phr_header) ─────────── */
+
+int kwcc_http_result_header_count(const char *req_id) {
+    kwcc_http_req_t *req = kwcc_http_req_find(req_id);
+    if (!req) return 0;
+    return (int)req->result_num_headers;
+}
+
+int kwcc_http_result_get_header(const char *req_id, int index,
+                                const char **name, size_t *name_len,
+                                const char **value, size_t *value_len) {
+    kwcc_http_req_t *req = kwcc_http_req_find(req_id);
+    if (!req || index < 0 || index >= (int)req->result_num_headers)
+        return -1;
+    const struct phr_header *h = &req->result_headers[index];
+    if (name)      *name      = h->name;
+    if (name_len)  *name_len  = h->name_len;
+    if (value)     *value     = h->value;
+    if (value_len) *value_len = h->value_len;
+    return 0;
+}
+
+/* ── Public: cleanup by req_id (for ack_cleanup) ──────────── */
+
+void kwcc_http_cleanup_by_req_id(const char *req_id) {
+    kwcc_http_req_t *req = kwcc_http_req_find(req_id);
+    if (req) kwcc_http_cleanup(req);
 }
 
 /* ── Internal: cleanup request ──────────────────────────────── */
@@ -425,46 +516,3 @@ static void kwcc_http_cleanup(kwcc_http_req_t *req) {
     memset(req, 0, sizeof(kwcc_http_req_t));
 }
 
-/* ── Callback registry API ──────────────────────────────────── */
-
-int kwcc_http_register_callback(const char *req_id,
-                                void *on_end, void *on_error, void *on_progress) {
-    if (!req_id) return -1;
-    for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
-        if (!g_kwcc_http_cbs[i].in_use) {
-            strncpy(g_kwcc_http_cbs[i].req_id, req_id, sizeof(g_kwcc_http_cbs[i].req_id) - 1);
-            g_kwcc_http_cbs[i].req_id[sizeof(g_kwcc_http_cbs[i].req_id) - 1] = '\0';
-            g_kwcc_http_cbs[i].on_end_cb = on_end;
-            g_kwcc_http_cbs[i].on_error_cb = on_error;
-            g_kwcc_http_cbs[i].on_progress_cb = on_progress;
-            g_kwcc_http_cbs[i].in_use = 1;
-            return 0;
-        }
-    }
-    return -1;
-}
-
-int kwcc_http_find_callback(const char *req_id,
-                            void **on_end, void **on_error, void **on_progress) {
-    if (!req_id) return -1;
-    for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
-        if (g_kwcc_http_cbs[i].in_use && strcmp(g_kwcc_http_cbs[i].req_id, req_id) == 0) {
-            if (on_end)     *on_end     = g_kwcc_http_cbs[i].on_end_cb;
-            if (on_error)   *on_error   = g_kwcc_http_cbs[i].on_error_cb;
-            if (on_progress)*on_progress= g_kwcc_http_cbs[i].on_progress_cb;
-            g_kwcc_http_cbs[i].in_use = 0;  /* one-shot: auto-cleanup */
-            return 0;
-        }
-    }
-    return -1;
-}
-
-void kwcc_http_clear_callback(const char *req_id) {
-    if (!req_id) return;
-    for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
-        if (g_kwcc_http_cbs[i].in_use && strcmp(g_kwcc_http_cbs[i].req_id, req_id) == 0) {
-            g_kwcc_http_cbs[i].in_use = 0;
-            return;
-        }
-    }
-}

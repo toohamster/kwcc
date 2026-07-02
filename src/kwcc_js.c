@@ -9,8 +9,6 @@
 #include "kwcc_config.h"
 #include "kwcc_base.h"
 #include "kwcc_bus.h"
-#include "kwcc_http.h"
-#include "picohttpparser/picohttpparser.h"
 #include "llog.h"
 #include "mquickjs/mqjs_stdlib.h"
 
@@ -275,9 +273,9 @@ void kwcc_js_register_modules(kwcc_js_ops_t *ops) {
         kwcc_js_dispatch_add("core", g_kwcc_js_core_apis[i].name, g_kwcc_js_core_apis[i].func);
     }
 
-    /* Register business modules — currently only http; add more here */
-    /* extern kwcc_js_module_t kwcc_js_http_module; */
-    /* kwcc_js_register_module(ops, &kwcc_js_http_module); */
+    /* Register business modules */
+    extern kwcc_js_module_t kwcc_js_http_module;
+    kwcc_js_register_module(ops, &kwcc_js_http_module);
 
     log_info("js: %d module(s) loaded", g_kwcc_js_module_count);
 }
@@ -338,7 +336,6 @@ JSContext *kwcc_create_js(void) {
         return NULL;
     }
     kwcc_register_config_js(ctx);
-    kwcc_register_http_js(ctx);
 
     /* Initialize ops + inject $notify + register modules */
     kwcc_js_ops_init(ctx);
@@ -888,100 +885,3 @@ void kwcc_register_config_js(JSContext *ctx) {
     }
 }
 
-/* ═══════════════════════════════════════════════════════════════
- * $http JS API — HTTP C handlers + req_id callback registry
- * ═══════════════════════════════════════════════════════════════ */
-
-/* ── C handler: kwcc_js_http_request ────────────────────────── */
-
-JSValue kwcc_js_http_request(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
-    (void)this_val;
-    if (argc < 2) return JS_UNDEFINED;
-
-    JSCStringBuf mbuf, ubuf;
-    const char *method = JS_ToCString(ctx, argv[0], &mbuf);
-    if (!method) method = "GET";
-    const char *url = JS_ToCString(ctx, argv[1], &ubuf);
-    if (!url) return JS_UNDEFINED;
-
-    /* headers: argv[2] is an array of "Key: Value" strings */
-    const char *headers[16];
-    int header_count = 0;
-    char *header_copies[16];  /* strdup'd copies to free later */
-    memset(header_copies, 0, sizeof(header_copies));
-    if (argc >= 3 && JS_GetClassID(ctx, argv[2]) == JS_CLASS_ARRAY) {
-        JSValue arr_len = JS_GetPropertyStr(ctx, argv[2], "length");
-        int len = 0;
-        JS_ToInt32(ctx, &len, arr_len);
-        for (int i = 0; i < len && i < 16; i++) {
-            JSValue item = JS_GetPropertyUint32(ctx, argv[2], (uint32_t)i);
-            JSCStringBuf ibuf;
-            const char *s = JS_ToCString(ctx, item, &ibuf);
-            if (s) {
-                header_copies[header_count] = strdup(s);
-                headers[header_count] = header_copies[header_count];
-                header_count++;
-            }
-        }
-    }
-
-    /* body: argv[3] is a string */
-    const char *body = NULL;
-    int body_len = 0;
-    JSCStringBuf bbuf;
-    if (argc >= 4) {
-        body = JS_ToCString(ctx, argv[3], &bbuf);
-        if (body) body_len = (int)strlen(body);
-    }
-
-    const char *req_id = kwcc_http_request(method, url, headers, header_count, body, body ? body_len : 0);
-
-    /* Free header copies */
-    for (int i = 0; i < 16; i++) free(header_copies[i]);
-
-    if (!req_id) return JS_UNDEFINED;
-
-    /* Store resolve/reject callbacks via HTTP module API */
-    if (argc >= 7) {
-        kwcc_http_register_callback(req_id, &argv[4], &argv[5], &argv[6]);
-    }
-
-    return JS_NewString(ctx, req_id);
-}
-
-/* ── C handler: kwcc_js_http_cancel ─────────────────────────── */
-
-JSValue kwcc_js_http_cancel(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
-    (void)ctx; (void)this_val;
-    if (argc < 1) return JS_UNDEFINED;
-    JSCStringBuf rbuf;
-    const char *req_id = JS_ToCString(ctx, argv[0], &rbuf);
-    if (!req_id) return JS_UNDEFINED;
-    kwcc_http_cancel(req_id);
-    return JS_UNDEFINED;
-}
-
-/* ── Register $http JS API ─────────────────────────────────── */
-
-void kwcc_register_http_js(JSContext *ctx) {
-    const char *code =
-        "var $http = new Object();\n"
-        "$http.state = { activeRequests: 0 };\n"
-        "$http.request = function(method, url, headers, body, resolve, reject, onProgress) {\n"
-        "    return kwcc_js_call_c('http', 'request', method, url, headers, body, resolve, reject, onProgress);\n"
-        "};\n"
-        "$http.cancel = function(reqId) {\n"
-        "    kwcc_js_call_c('http', 'cancel', reqId);\n"
-        "};\n"
-        "$http.config = function(key, value) {\n"
-        "    $config.coreSetTlv('http/' + key, value);\n"
-        "};\n";
-
-    JSValue result = JS_Eval(ctx, code, strlen(code), "<$http>", JS_EVAL_REPL);
-    if (JS_IsException(result)) {
-        JSValue exc = JS_GetException(ctx);
-        JSCStringBuf buf;
-        const char *s = JS_ToCString(ctx, exc, &buf);
-        log_error("$http JS_Eval: %s", s ? s : "(none)");
-    }
-}
