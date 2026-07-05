@@ -97,12 +97,15 @@ make && ./kwcc
 | 11 | [naming-fix.md](requirements/naming-fix.md) | ✅ 完成 | — |
 | 12 | [bus-split-design.md](requirements/bus-split-design.md) | ✅ 完成 | 从 extract-bus-module 演进，19/19 测试 |
 | 13 | [bus-split-implementation-plan.md](requirements/bus-split-implementation-plan.md) | ✅ 完成 | — |
-| 14 | [async-io-design.md](requirements/async-io-design.md) | 🔄 实施中 | 依赖 bus-split，已解除 |
-| 15 | [async-io-implementation-plan.md](requirements/async-io-implementation-plan.md) | 🔄 实施中 | Layer 1-2 已完成，Step 4 已拆分 |
+| 14 | [async-io-design.md](requirements/async-io-design.md) | ✅ 完成 | 依赖 bus-split，已解除 |
+| 15 | [async-io-implementation-plan.md](requirements/async-io-implementation-plan.md) | ✅ 完成 | Layer 1-4 完成 |
 | 16 | [microui-id-override.md](requirements/microui-id-override.md) | ⏳ 待论证 | — |
 | 17 | [mquickjs-cfunc-registration.md](requirements/mquickjs-cfunc-registration.md) | ⚠️ 参考 | C 函数注册技术参考 |
-| 18 | [js-bridge-architecture.md](requirements/js-bridge-architecture.md) | ⏳ 待实施 | Facade + Plugin 架构调整 |
-| 19 | [js-http-implementation-plan.md](requirements/js-http-implementation-plan.md) | ⏳ 待实施 | 依赖 #18 完成 |
+| 18 | [js-bridge-architecture.md](requirements/js-bridge-architecture.md) | ✅ 完成 | Facade + Plugin 架构，74/74 测试 |
+| 19 | [js-http-implementation-plan.md](requirements/js-http-implementation-plan.md) | ✅ 完成 | HTTP Plugin 模块 |
+| 20 | [js-module-dispatch-plan.md](requirements/js-module-dispatch-plan.md) | ✅ 完成 | module-grouped 两级分发 |
+| 21 | [js-bridge-dispatch-http-progress.md](requirements/js-bridge-dispatch-http-progress.md) | ✅ 完成 | #18/#19/#20 进度汇总 |
+| 22 | [kwcc-base-defer-cleanup.md](requirements/kwcc-base-defer-cleanup.md) | ✅ 完成 | 独立基础设施，14/14 测试 |
 | 17 | [spec.md](spec.md) | — | 完整项目规范 |
 
 ## 许可证

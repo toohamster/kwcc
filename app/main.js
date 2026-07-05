@@ -79,6 +79,9 @@ initEvents();
 /* ── Phase 6: $config integration tests ── */
 load("tests/test_config_js.js");
 
+/* ── Phase 7: HTTP + $notify + MiniPromise integration tests ── */
+load("tests/test_http_js.js");
+
 /* ── frame function (called every frame from C) ── */
 function onFrame() {
     var i, key, m;

@@ -6,6 +6,8 @@
 #define KWCC_CONFIG_H
 
 #include <stdint.h>
+#include <stddef.h>
+#include "kwcc_base.h"
 
 /* ═══ App 域（自动拼 "a." 前缀）═══ */
 
@@ -26,6 +28,25 @@ void    kwcc_config_set_core_tlv(const char *key, const uint8_t *tlv_data, uint3
 const char *kwcc_config_get_core(const char *key, const char *default_value);
 void  *kwcc_config_get_core_slot(const char *key);   /* returns kwcc_mempool_slot_t* */
 void    kwcc_config_release_core(const char *key);
+
+/* ── Core TLV view ── */
+
+typedef struct {
+    const uint8_t *data;   /* slot internal TLV data pointer (no free needed) */
+    size_t         size;   /* TLV data length */
+} kwcc_config_tlv_t;
+
+/* Get TLV object from core domain */
+kwcc_config_tlv_t kwcc_config_get_core_tlv(const char *key);
+
+/* Get sub-field value (returns kwcc_base_str_t, needs free) */
+kwcc_base_str_t kwcc_config_tlv_get_field(const kwcc_config_tlv_t *tlv, const char *path);
+
+/* Get sub-field TLV type (FIELD/OBJECT/ARRAY) */
+uint8_t kwcc_config_tlv_get_type(const kwcc_config_tlv_t *tlv, const char *path);
+
+/* Get nested object (returns sub-view) */
+kwcc_config_tlv_t kwcc_config_tlv_get_object(const kwcc_config_tlv_t *tlv, const char *path);
 
 /* ═══ 通用 ═══ */
 

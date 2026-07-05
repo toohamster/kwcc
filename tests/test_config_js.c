@@ -219,7 +219,7 @@ int main(void) {
     TEST("core slot type is TLV", slot_core && slot_core->type == KWCC_MEMPOOL_TYPE_TLV);
     if (slot_core && slot_core->data) {
         size_t vlen = 0;
-        const char *val = kwcc_mempool_tlv_get_path(slot_core->data, slot_core->size, "max_fds", &vlen);
+        const char *val = kwcc_mempool_tlv_get_path(slot_core->data, slot_core->size, "max_fds", &vlen, NULL);
         TEST("tlv_get_path('max_fds') returns '16'", val != NULL && vlen == 2 && memcmp(val, "16", 2) == 0);
     }
 

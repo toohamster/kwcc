@@ -72,6 +72,8 @@ void kwcc_http_init(void) {
 const char *kwcc_http_request(const char *method,
                               const char *url, const char **headers, int header_count,
                               const char *body, int body_len) {
+    kwcc_base_defer_cleanup_t *dc = kwcc_base_defer_cleanup_create();
+
     /* 1. Find free slot */
     kwcc_http_req_t *req = NULL;
     for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
@@ -82,6 +84,7 @@ const char *kwcc_http_request(const char *method,
     }
     if (!req) {
         log_error("http: max concurrent requests (%d) reached", KWCC_HTTP_MAX_REQS);
+        kwcc_base_defer_cleanup_run(dc);
         return NULL;
     }
 
@@ -99,6 +102,7 @@ const char *kwcc_http_request(const char *method,
         if (!req->body) {
             log_error("http: malloc body failed");
             memset(req, 0, sizeof(kwcc_http_req_t));
+            kwcc_base_defer_cleanup_run(dc);
             return NULL;
         }
         memcpy(req->body, body, body_len);
@@ -114,27 +118,36 @@ const char *kwcc_http_request(const char *method,
         }
     }
 
-    /* 4. Read config */
-    const char *bin_path = kwcc_config_get_core("http/bin_path", "curl");
-    const char *timeout_str = kwcc_config_get_core("http/timeout", "30");
+    /* 4. Read config from core TLV: $config.coreSetTlv("http", {bin_path: "...", timeout: "..."}) */
+    kwcc_config_tlv_t http_cfg = kwcc_config_get_core_tlv("http");
+    kwcc_base_str_t bin_val = kwcc_config_tlv_get_field(&http_cfg, "bin_path");
+    kwcc_base_str_t timeout_val = kwcc_config_tlv_get_field(&http_cfg, "timeout");
+    kwcc_base_defer_cleanup_push(dc, &bin_val, (kwcc_base_defer_cleanup_fn)kwcc_base_str_free);
+    kwcc_base_defer_cleanup_push(dc, &timeout_val, (kwcc_base_defer_cleanup_fn)kwcc_base_str_free);
+
+    const char *bin_path = kwcc_base_str_cstr(&bin_val, "curl");
+    int32_t timeout_num = kwcc_base_str_int(&timeout_val, 30);
+    log_info("http: bin_path='%s' timeout=%d", bin_path, timeout_num);
 
     /* Fix 6: bin_path executable check */
     if (access(bin_path, X_OK) == -1) {
         log_error("http: bin_path '%s' not found or not executable", bin_path);
-        /* free allocated memory before returning */
-        free(req->body);
         for (int i = 0; i < req->header_count; i++) free(req->headers[i]);
+        free(req->body);
         memset(req, 0, sizeof(kwcc_http_req_t));
+        kwcc_base_defer_cleanup_run(dc);
         return NULL;
     }
 
     /* 5. Build curl argv */
     int argc_max = 8 + header_count * 2 + (body ? 2 : 0);
     char **argv = malloc(sizeof(char *) * (argc_max + 1));
+    kwcc_base_defer_cleanup_push(dc, argv, free);
     if (!argv) {
-        free(req->body);
         for (int i = 0; i < req->header_count; i++) free(req->headers[i]);
+        free(req->body);
         memset(req, 0, sizeof(kwcc_http_req_t));
+        kwcc_base_defer_cleanup_run(dc);
         return NULL;
     }
 
@@ -148,7 +161,7 @@ const char *kwcc_http_request(const char *method,
 
     /* --max-time */
     char timeout_arg[32];
-    snprintf(timeout_arg, sizeof(timeout_arg), "--max-time %s", timeout_str);
+    snprintf(timeout_arg, sizeof(timeout_arg), "--max-time %d", timeout_num);
     argv[ai++] = timeout_arg;
 
     /* headers */
@@ -170,10 +183,10 @@ const char *kwcc_http_request(const char *method,
     int pipefd[2];
     if (pipe(pipefd) == -1) {
         log_error("http: pipe() failed: %s", strerror(errno));
-        free(argv);
-        free(req->body);
         for (int i = 0; i < req->header_count; i++) free(req->headers[i]);
+        free(req->body);
         memset(req, 0, sizeof(kwcc_http_req_t));
+        kwcc_base_defer_cleanup_run(dc);
         return NULL;
     }
 
@@ -185,10 +198,10 @@ const char *kwcc_http_request(const char *method,
         log_error("http: fork() failed: %s", strerror(errno));
         close(pipefd[0]);
         close(pipefd[1]);
-        free(argv);
-        free(req->body);
         for (int i = 0; i < req->header_count; i++) free(req->headers[i]);
+        free(req->body);
         memset(req, 0, sizeof(kwcc_http_req_t));
+        kwcc_base_defer_cleanup_run(dc);
         return NULL;
     }
 
@@ -211,7 +224,6 @@ const char *kwcc_http_request(const char *method,
 
     /* ── Parent process ── */
     close(pipefd[1]);
-    free(argv);
 
     /* Set read end non-blocking */
     int flags = fcntl(pipefd[0], F_GETFL, 0);
@@ -224,9 +236,10 @@ const char *kwcc_http_request(const char *method,
         close(pipefd[0]);
         kill(pid, SIGTERM);
         waitpid(pid, NULL, WNOHANG);
-        free(req->body);
         for (int i = 0; i < req->header_count; i++) free(req->headers[i]);
+        free(req->body);
         memset(req, 0, sizeof(kwcc_http_req_t));
+        kwcc_base_defer_cleanup_run(dc);
         return NULL;
     }
     req->response_cap = KWCC_HTTP_INIT_CAP;
@@ -240,6 +253,7 @@ const char *kwcc_http_request(const char *method,
     kwcc_io_register(req->pipe_read_fd, kwcc_http_on_read, req);
 
     log_info("http: started %s %s (req_id=%s, pid=%d)", req->method, req->url, req->req_id, (int)pid);
+    kwcc_base_defer_cleanup_run(dc);
     return req->req_id;
 }
 

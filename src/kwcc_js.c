@@ -797,7 +797,7 @@ JSValue kwcc_js_config_get_app_tlv_path(JSContext *ctx, JSValue *this_val, int a
         return JS_UNDEFINED;
     }
     size_t vlen = 0;
-    const char *val = kwcc_mempool_tlv_get_path(slot->data, slot->size, path, &vlen);
+    const char *val = kwcc_mempool_tlv_get_path(slot->data, slot->size, path, &vlen, NULL);
     if (!val) {
         if (argc >= 3) return argv[2];
         return JS_UNDEFINED;

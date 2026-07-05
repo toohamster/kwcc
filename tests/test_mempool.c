@@ -161,13 +161,13 @@ int main(void) {
         /* ── 10. TLV get_path ── */
         printf("\n[10] TLV get_path\n");
         size_t vlen = 0;
-        const char *v = kwcc_mempool_tlv_get_path(tlv, tlv_len, "name", &vlen);
+        const char *v = kwcc_mempool_tlv_get_path(tlv, tlv_len, "name", &vlen, NULL);
         TEST("get_path('name')", v != NULL && vlen == 5 && memcmp(v, "myapp", 5) == 0);
 
-        v = kwcc_mempool_tlv_get_path(tlv, tlv_len, "port", &vlen);
+        v = kwcc_mempool_tlv_get_path(tlv, tlv_len, "port", &vlen, NULL);
         TEST("get_path('port')", v != NULL && vlen == 4 && memcmp(v, "8080", 4) == 0);
 
-        v = kwcc_mempool_tlv_get_path(tlv, tlv_len, "nonexist", &vlen);
+        v = kwcc_mempool_tlv_get_path(tlv, tlv_len, "nonexist", &vlen, NULL);
         TEST("get_path('nonexist') returns NULL", v == NULL);
 
         /* ── 11. TLV to_json ── */
@@ -259,7 +259,7 @@ int main(void) {
     if (flat_tlv) {
         /* Path query on flat TLV for non-existent nested path */
         size_t vlen = 0;
-        const char *v = kwcc_mempool_tlv_get_path(flat_tlv, tlv_len, "nested/key", &vlen);
+        const char *v = kwcc_mempool_tlv_get_path(flat_tlv, tlv_len, "nested/key", &vlen, NULL);
         TEST("get_path returns NULL for non-existent nested path", v == NULL);
         kwcc_mempool_tlv_free_json((char *)flat_tlv);
     }

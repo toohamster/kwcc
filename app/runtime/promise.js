@@ -33,7 +33,7 @@ function MiniPromise(executor) {
 MiniPromise.prototype.then = function(onFulfilled, onRejected) {
     var self = this;
     return new MiniPromise(function(resolve, reject) {
-        function wrapped(val) {
+        function handleFulfilled(val) {
             try {
                 var result = onFulfilled ? onFulfilled(val) : val;
                 if (result && typeof result.then === "function") {
@@ -45,10 +45,26 @@ MiniPromise.prototype.then = function(onFulfilled, onRejected) {
                 reject(e);
             }
         }
+        function handleRejected(err) {
+            try {
+                var result = onRejected ? onRejected(err) : err;
+                if (result && typeof result.then === "function") {
+                    result.then(resolve, reject);
+                } else if (onRejected) {
+                    resolve(result);
+                } else {
+                    reject(result);
+                }
+            } catch (e) {
+                reject(e);
+            }
+        }
         if (self.status === "FULFILLED") {
-            wrapped(self.value);
+            handleFulfilled(self.value);
+        } else if (self.status === "REJECTED") {
+            handleRejected(self.value);
         } else {
-            self.callbacks.push({ fn: wrapped, reject: reject });
+            self.callbacks.push({ fn: handleFulfilled, reject: handleRejected });
         }
     });
 };

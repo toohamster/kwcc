@@ -194,7 +194,8 @@ uint8_t *kwcc_mempool_tlv_build(kwcc_mempool_tlv_pack_cb cb, void *user_data,
 int kwcc_mempool_tlv_iter(const uint8_t *tlv_data, size_t tlv_len,
                            kwcc_mempool_tlv_iter_cb cb, void *user_data);
 const char *kwcc_mempool_tlv_get_path(const uint8_t *tlv_data, size_t tlv_len,
-                                       const char *path, size_t *out_len);
+                                       const char *path, size_t *out_len,
+                                       uint8_t *out_type);
 char *kwcc_mempool_tlv_to_json(const uint8_t *tlv_data, size_t tlv_len, size_t *out_len);
 void kwcc_mempool_tlv_free_json(char *ptr);
 

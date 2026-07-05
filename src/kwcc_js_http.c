@@ -28,9 +28,6 @@ static void http_load(kwcc_js_ops_t *ops) {
         "$http.state = { activeRequests: 0 };\n"
         "$http.cancel = function(reqId) {\n"
         "    kwcc_js_call_c('http', 'cancel', reqId);\n"
-        "};\n"
-        "$http.config = function(key, value) {\n"
-        "    $config.coreSetTlv('http/' + key, value);\n"
         "};\n";
     ops->eval(ops, code, strlen(code), "<$http>", JS_EVAL_REPL);
 }

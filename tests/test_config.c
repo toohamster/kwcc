@@ -98,10 +98,10 @@ int main(void) {
             TEST("slot type is TLV", slot->type == KWCC_MEMPOOL_TYPE_TLV);
 
             size_t vlen = 0;
-            const char *pv = kwcc_mempool_tlv_get_path(slot->data, slot->size, "max_fds", &vlen);
+            const char *pv = kwcc_mempool_tlv_get_path(slot->data, slot->size, "max_fds", &vlen, NULL);
             TEST("TLV path 'max_fds' = '16'", pv != NULL && vlen == 2 && memcmp(pv, "16", 2) == 0);
 
-            pv = kwcc_mempool_tlv_get_path(slot->data, slot->size, "port", &vlen);
+            pv = kwcc_mempool_tlv_get_path(slot->data, slot->size, "port", &vlen, NULL);
             TEST("TLV path 'port' = '8080'", pv != NULL && vlen == 4 && memcmp(pv, "8080", 4) == 0);
         }
     }

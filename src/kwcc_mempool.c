@@ -795,8 +795,10 @@ int kwcc_mempool_tlv_iter(const uint8_t *tlv_data, size_t tlv_len,
 }
 
 const char *kwcc_mempool_tlv_get_path(const uint8_t *tlv_data, size_t tlv_len,
-                                       const char *path, size_t *out_len) {
-    if (!tlv_data || !path || !out_len) { if (out_len) *out_len = 0; return NULL; }
+                                       const char *path, size_t *out_len,
+                                       uint8_t *out_type) {
+    if (!tlv_data || !path || !out_len) { if (out_len) *out_len = 0; if (out_type) *out_type = 0; return NULL; }
+    if (out_type) *out_type = 0;
     const uint8_t *ptr = tlv_data;
     const uint8_t *end = tlv_data + tlv_len;
     const char *target = path;
@@ -828,6 +830,7 @@ const char *kwcc_mempool_tlv_get_path(const uint8_t *tlv_data, size_t tlv_len,
                 return NULL;
             }
             *out_len = value_len;
+            if (out_type) *out_type = type;
             return (const char *)value;
         }
         ptr += total_len;

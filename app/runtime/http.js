@@ -1,7 +1,7 @@
 /* app/runtime/http.js — $http.fetch + $notify.on('http') callback routing
  *
  * C bridge: $http object injected by http_load() in kwcc_js_http.c.
- * $http.cancel and $http.config are C→JS bridge methods.
+ * $http.cancel is a C→JS bridge method. Config via $config.coreSetTlv directly.
  * $http.fetch and callback routing are pure JS logic defined here.
  * C→JS notifications arrive via $notify.emit("http", event, id, data).
  */
@@ -9,6 +9,12 @@
 /* ── Callback routing ──────────────────────────────────────── */
 
 $http.callbacks = {};
+
+/* ── Default config: set HTTP module defaults via core TLV ── */
+if (typeof _httpConfigInit === "undefined") {
+    $config.coreSetTlv("http", { bin_path: "/usr/bin/curl", timeout: "30" });
+    var _httpConfigInit = 1;
+}
 
 $notify.on('http', function(event, id, data) {
     var cb = $http.callbacks[id];
