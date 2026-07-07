@@ -36,6 +36,14 @@
 - 实际二进制兼容，零运行时开销
 - 子模块不直接操作 `JSValue`，只通过 `kwcc_js_ops_t` 的函数指针操作
 
+> **演进（2026-07-01）**：改为 `typedef JSValue kwcc_js_val_t;`
+>
+> 原方案用 `uint64_t` 是想做到类型层面隔离，但 ops impl 内部必须和 mquickjs 通信，每次都要 `(JSValue)val` 和 `(kwcc_js_val_t)result` 做 C 强转——这不是值转换，是语义错误的类型双关。
+>
+> 隔离是**行为层面**的：子模块用 `kwcc_js_val_t` 名字、只通过 ops 操作，未来换引擎改定义和实现，子模块代码不动。`kwcc_js.h` include `mquickjs.h`，子模块间接能拿到 mquickjs 类型——这是当前状态，隔离靠规范约束。
+>
+> 详见 `module_dev_experience.md` Facade+Plugin 教训 #1。
+
 ---
 
 ### A3：`kwcc_js_cstr_buf_t` 为什么是 `buf[5]` 且不需要 free
@@ -110,6 +118,17 @@ typedef struct kwcc_js_module {
 - 和 Linux 内核的 `module_init`/`module_exit` 思路一致
 - `unload` 可为 NULL：简单模块（如 HTTP）不需要退出清理，WS/Timer 等管理长连接/定时器的模块必须实现
 - 模块描述符是唯一的对外接口，不暴露内部函数
+
+> **演进（2026-07-01）**：`register_cfun` 改为 `apis` 数组，支持 module-grouped 两级分发
+>
+> 原方案用 `register_cfun` 让模块自己注册 C 函数到 JS 全局，但这有两个问题：
+>
+> 1. **扁平注册**：所有模块的 C 函数都注册到同一命名空间，容易冲突
+> 2. **模块不知道自己的 C handler 被怎么调用**：注册进去的函数签名是 mquickjs 的 `JSCFunction`，暴露了引擎类型
+>
+> 改进：用 `apis` 数组声明模块提供的 ops 签名 handler，core 自动注册到分发表（按 module 分组）。JS 端通过 `kwcc_js_call_c("http", "request", ...)` 两级分发，module + func 唯一确定 handler。
+>
+> 这样模块不需要知道 JS 函数怎么注册，只需要告诉 core "我提供哪些操作"。
 
 ---
 
@@ -392,6 +411,18 @@ int kwcc_http_result_get_header(const char *req_id, int index,
 1. **显式时序契约**：数据通过 `JS_NewStringLen` 拷贝进 GC 堆后才调 `ack_cleanup`，不需要等 JS 端确认
 2. **超时兜底**：如果消息丢失导致 slot 泄漏，超时后自动 cleanup
 3. **支持同步和异步 bus**：即使未来 bus 变成异步，这个契约也成立
+
+> **演进（2026-07-06）**：`PENDING_ACK` 状态机简化为 `ack_cleanup` 函数指针
+>
+> 实施时发现 `PENDING_ACK` 状态 + `kwcc_http_release_result` + 超时兜底是一个三件套，过于复杂。实际场景：
+>
+> - 数据通过 `JS_NewStringLen` 拷贝进 GC 堆后，C 侧 buffer 就没用了
+> - `ack_cleanup` 在 `notify_js` 内部、`call_cb` 之前自动调用
+> - 不需要状态标记，不需要超时兜底，不需要额外的 `release_result` API
+>
+> 简化后：`notify_js` 接受 `ack_cleanup` 函数指针参数，传 NULL 表示无需清理（如 progress 事件）。C 端传了就自动处理，不需要记着调 release。
+>
+> 原则：**数据拷贝进 GC 堆后，C 侧 buffer 就没用了，可以直接释放**。这个契约比 PENDING_ACK 状态机更简单，且支持同步和异步 bus。
 
 ---
 

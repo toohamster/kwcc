@@ -110,6 +110,16 @@
 - 版本号自动递增规则（vX.Y.Z）
 - 保留远程分支、留在当前分支等注意事项
 
+### [design/ 设计决策目录](../../design/RULES.md)
+- **定位**：记录"为什么这么干"的思考过程，不是方案文档的副本
+- **和 requirements/ memory/ 的区别**：requirements 写"做什么"，design 写"为什么"，memory 记事实
+- **演进规则**：决策变化时追加不覆盖，用 `> **演进（日期）**` 格式
+- **模块开发完成后**：用户发"沉淀 design"指令时，回顾讨论→判断归属→检查过时→去重
+- 现有文件：`bus-split-rationale.md`、`facade-plugin-architecture-rationale.md`、`http-implementation-rationale.md`
+- 功能分支 → main 的完整发布流程（PR、合并、打标签、Release）
+- 版本号自动递增规则（vX.Y.Z）
+- 保留远程分支、留在当前分支等注意事项
+
 ### [测试方法论](testing_methodology.md)
 - **C 端优先测试**：C 端功能在 C 端验证，JS 端不方便
 - 四层测试策略：纯 C 测试 → C handler 测试 → ops 接口测试 → JS 集成测试
