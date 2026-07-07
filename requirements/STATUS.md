@@ -28,8 +28,8 @@
 | 19 | `kwcc-base-defer-cleanup.md` | ✅ 已完成 | 独立基础设施，无前置依赖 | 14/14 |
 | 20 | `js-module-dispatch-plan.md` | ✅ 已完成 | module-grouped 两级分发，ops 测试 74/74 | 74/74 |
 | 21 | `js-bridge-dispatch-http-progress.md` | ✅ 已完成 | #17/#18/#20 进度汇总 | — |
-| 22 | `module-shutdown-spec.md` | ⏳ 设计完成，待实施 | 模块 shutdown 链架构规范 | — |
-| 22b | `http-shutdown-implementation-plan.md` | ⏳ 设计完成，待实施 | HTTP 模块 shutdown 实施计划，依赖 #22 | — |
+| 22 | `lifecycle-shutdown-service-spec.md` | ⏳ 设计完成，待实施 | lifecycle_shutdown 服务规范，取代 module-shutdown-spec | — |
+| 22b | `http-shutdown-implementation-plan.md` | ⏳ 设计完成，待实施 | HTTP 接入 lifecycle_shutdown，取代旧 shutdown 方案 | — |
 
 ## 方案依赖关系
 
@@ -49,7 +49,7 @@ kwcc-base-defer-cleanup (#19) ✅ ──→ async-io (#14b) Step 5 (重构 kwcc_
 
 ── v0.0.4 ──
 
-module-shutdown-spec (#22) ⏳ ──→ http-shutdown-implementation-plan (#22b) ⏳
+lifecycle-shutdown-service (#22) ⏳ ──→ http-shutdown (#22b) ⏳
                                     │
                                     └─→ 本地存储 (#23) ⏳ ──→ 端到端示例 (#24) ⏳
                                           见 Backlog               见 Backlog

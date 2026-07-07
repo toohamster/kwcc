@@ -1,7 +1,7 @@
-# Shutdown 链 + HTTP cancel 僵尸进程修复 — 实施方案
+# HTTP 模块接入 lifecycle_shutdown 服务 — 实施计划
 
-> 架构规范见 [module-shutdown-spec.md](module-shutdown-spec.md)
-> 本文件只记录 HTTP 模块的实施细节
+> 服务规范见 [lifecycle-shutdown-service-spec.md](lifecycle-shutdown-service-spec.md)
+> 本文件只记录 HTTP 模块接入的施细节 + lifecycle_shutdown 服务实现
 
 ---
 
@@ -22,24 +22,111 @@ kwcc_http_cleanup(req)
 
 ---
 
-## 状态模型：二态 + 隐式信号
+## 解决方案：接入 lifecycle_shutdown 服务
+
+HTTP 模块注册进 lifecycle_shutdown 服务，由服务统一管理废弃资源的检测和回收。同时 HTTP 保留 on-demand 回收作为紧急路径。
+
+---
+
+## Part 1：lifecycle_shutdown 服务实现
+
+### 新增文件
+
+`src/kwcc_lifecycle_shutdown.h` + `src/kwcc_lifecycle_shutdown.c`
+
+### 数据结构
+
+```c
+typedef struct kwcc_lifecycle_shutdown_entry {
+    const char *name;
+    int  (*dirty_count)(void);
+    int  threshold;
+    void (*shutdown)(int force);       // 回收函数（force=1 全量释放，force=0 轻量释放）
+} kwcc_lifecycle_shutdown_entry_t;
+
+static kwcc_lifecycle_shutdown_entry_t *g_kwcc_lifecycle_shutdown_entries = NULL;
+static int g_kwcc_lifecycle_shutdown_count = 0;
+static int g_kwcc_lifecycle_shutdown_cap = 0;
+static int g_kwcc_lifecycle_shutdown_shutdown = 0;
+static uint64_t g_kwcc_lifecycle_shutdown_bus_sub_id = 0;
+```
+
+### API 实现
+
+**`kwcc_lifecycle_shutdown_init()`**：
+- memset entries
+- subscribe("frame/tick", lifecycle_shutdown_on_tick, NULL)
+
+**`kwcc_lifecycle_shutdown_register(entry)`**：
+- 检查 g_shutdown 标志
+- count == cap → realloc 扩容（初始 cap=4，倍增）
+- 复制 entry 到 entries[count]
+- count++
+
+**`kwcc_lifecycle_shutdown_on_tick(topic, data, len, user_data)`**（bus callback）：
+- 检查 g_shutdown 标志
+- 遍历 entries
+- 调 dirty_count()
+- >= threshold → 调 shutdown(force=0)
+
+**`kwcc_lifecycle_shutdown_force_all()`**：
+- 设 g_shutdown = 1
+- 逆序遍历 entries
+- 调 shutdown(force=1)
+- unsubscribe bus sub_id
+- log_info 记录完成
+
+### 涉及文件
+
+| 文件 | 改动 |
+|------|------|
+| `src/kwcc_lifecycle_shutdown.h` | 新增：服务声明 + entry 结构体 |
+| `src/kwcc_lifecycle_shutdown.c` | 新增：服务实现（依赖 `kwcc_bus.h`） |
+| `src/kwcc.h` | include 新头文件 |
+| `src/main.m` | init() 调 `kwcc_lifecycle_shutdown_init()`；frame() 发 `"frame/tick"`；cleanup() 调 `force_all()` |
+| `Makefile` | 新增编译规则 |
+
+---
+
+## Part 2：HTTP 模块接入
+
+### 状态模型：二态 + 隐式信号
 
 不需要 `cancelled` 字段。用 `pipe_read_fd == -1` 作为"已取消"的隐式信号：
 
-| in_use | pipe_read_fd | 含义 | check_progress | shutdown(false) | shutdown(true) |
-|--------|-------------|------|---------------|-----------------|----------------|
+| in_use | pipe_read_fd | 含义 | check_progress | shutdown(force=0) | shutdown(force=1) |
+|--------|-------------|------|---------------|-------------------|-------------------|
 | 0 | — | 空闲 | 跳过 | 跳过 | 跳过 |
 | 1 | >= 0 | 正常请求 | 汇报进度 | 跳过 | 终止 + 回收 |
 | 1 | -1 | 已取消，子进程可能还在跑 | 跳过 | waitpid(WNOHANG) 尝试回收 | 终止 + 回收 |
 
----
+### dirty_count 实现
 
-## `kwcc_http_shutdown` 实现
+```c
+static int kwcc_http_dirty_count(void) {
+    int count = 0;
+    for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
+        if (g_kwcc_http_reqs[i].in_use && g_kwcc_http_reqs[i].pipe_read_fd < 0)
+            count++;
+    }
+    return count;
+}
+```
+
+threshold = 1：有 1 个 cancelled slot 就尝试回收。
+
+### kwcc_http.h 新增声明
+
+```c
+void kwcc_http_shutdown(int force);
+```
+
+### shutdown(int force) 实现
 
 ```c
 static int g_kwcc_http_shutdown = 0;
 
-void kwcc_http_shutdown(bool force) {
+void kwcc_http_shutdown(int force) {
     if (force) {
         /* ── 全量释放 ── */
         g_kwcc_http_shutdown = 1;
@@ -48,18 +135,15 @@ void kwcc_http_shutdown(bool force) {
         for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
             kwcc_http_req_t *req = &g_kwcc_http_reqs[i];
             if (!req->in_use) continue;
-
             if (req->pipe_read_fd >= 0) {
                 kwcc_io_unregister(req->pipe_read_fd);
                 close(req->pipe_read_fd);
                 req->pipe_read_fd = -1;
             }
-            if (req->pid > 0) {
-                kill(req->pid, SIGTERM);
-            }
+            if (req->pid > 0) kill(req->pid, SIGTERM);
         }
 
-        /* Phase 2: grace period（同步阻塞，最多 100ms） */
+        /* Phase 2: grace period（最多 100ms） */
         for (int attempt = 0; attempt < 10; attempt++) {
             int all_reaped = 1;
             for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
@@ -67,14 +151,11 @@ void kwcc_http_shutdown(bool force) {
                 if (!req->in_use || req->pid <= 0) continue;
                 int status;
                 pid_t ret = waitpid(req->pid, &status, WNOHANG);
-                if (ret > 0) {
-                    kwcc_http_cleanup(req);
-                } else if (ret == 0) {
-                    all_reaped = 0;
-                }
+                if (ret > 0) kwcc_http_cleanup(req);
+                else if (ret == 0) all_reaped = 0;
             }
             if (all_reaped) break;
-            usleep(10000);  // 10ms
+            usleep(10000);
         }
 
         /* Phase 3: SIGKILL 强杀剩余 */
@@ -88,32 +169,91 @@ void kwcc_http_shutdown(bool force) {
 
         log_info("http: shutdown complete");
     } else {
-        /* ── 轻量释放 ── */
-        for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
-            kwcc_http_req_t *req = &g_kwcc_http_reqs[i];
-            if (!req->in_use) continue;
-            if (req->pipe_read_fd >= 0) continue;  // 正常请求，不管
-            if (req->pid <= 0) continue;
-
-            int status;
-            pid_t ret = waitpid(req->pid, &status, WNOHANG);
-            if (ret > 0) {
-                kwcc_http_cleanup(req);
-            }
-        }
+        /* ── 轻量释放：循环调 reap_cancelled 直到返回 NULL ── */
+        while (kwcc_http_reap_cancelled()) {}
     }
 }
 ```
 
----
+### on-demand 回收（HTTP 内部优化）
 
-## `kwcc_http_cancel` 简化
+**`kwcc_http_find_free_slot`**：从现有 `kwcc_http_request` 中提取的 static 函数。
+
+```c
+static kwcc_http_req_t *kwcc_http_find_free_slot(void) {
+    for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
+        if (!g_kwcc_http_reqs[i].in_use)
+            return &g_kwcc_http_reqs[i];
+    }
+    return NULL;
+}
+```
+
+**`kwcc_http_reap_cancelled`：尝试回收一个已退出的 cancelled slot，shutdown(force=0) 和 on-demand 共享。
+
+```c
+static kwcc_http_req_t *kwcc_http_reap_cancelled(void) {
+    for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
+        kwcc_http_req_t *req = &g_kwcc_http_reqs[i];
+        if (!req->in_use || req->pipe_read_fd >= 0) continue;
+        if (req->pid <= 0) {
+            kwcc_http_cleanup(req);
+            return req;
+        }
+        int status;
+        pid_t ret = waitpid(req->pid, &status, WNOHANG);
+        if (ret > 0) {
+            kwcc_http_cleanup(req);
+            return req;
+        }
+    }
+    return NULL;
+}
+```
+
+**`kwcc_http_request` 改造**：
+
+```c
+const char *kwcc_http_request(...) {
+    if (g_kwcc_http_shutdown) return NULL;
+
+    /* 1. 找空闲 slot */
+    kwcc_http_req_t *req = kwcc_http_find_free_slot();
+
+    /* 2. 没空闲 → on-demand 回收 cancelled slot */
+    if (!req) {
+        req = kwcc_http_reap_cancelled();
+    }
+
+    /* 3. 仍然没有 → 真的满了 */
+    if (!req) return NULL;
+
+    /* 4. 正常发起请求（原有逻辑不变） */
+}
+```
+
+### 注册进服务
+
+```c
+static kwcc_lifecycle_shutdown_entry_t g_kwcc_http_shutdown_entry = {
+    .name        = "http",
+    .dirty_count = kwcc_http_dirty_count,
+    .threshold   = 1,
+    .shutdown    = kwcc_http_shutdown,
+};
+
+/* kwcc_http_init() 中注册 */
+kwcc_lifecycle_shutdown_register(&g_kwcc_http_shutdown_entry);
+```
+
+### `kwcc_http_cancel` 简化
 
 ```c
 void kwcc_http_cancel(const char *req_id) {
     if (!req_id) return;
     kwcc_http_req_t *req = kwcc_http_req_find(req_id);
     if (!req) return;
+    if (req->pipe_read_fd < 0) return;  // 已取消，跳过（防连续 cancel）
 
     /* 关 pipe：curl SIGPIPE 自然退出 */
     kwcc_io_unregister(req->pipe_read_fd);
@@ -127,24 +267,16 @@ void kwcc_http_cancel(const char *req_id) {
     kwcc_bus_publish(safe, NULL, 0);
 
     /* 不调 cleanup，不发 SIGTERM，不等 waitpid */
-    /* in_use 保持 1，pid 保留，等 shutdown 回收 */
+    /* in_use 保持 1，pid 保留 */
+    /* 回收交给 lifecycle_shutdown poll + on-demand */
 }
 ```
 
----
+### 其他改动
 
-## `kwcc_http_request` 防御
+**`kwcc_http_check_progress` 简化**：
 
-```c
-const char *kwcc_http_request(...) {
-    if (g_kwcc_http_shutdown) return NULL;
-    // ... 原有逻辑
-}
-```
-
----
-
-## `kwcc_http_check_progress` 简化
+取消 cancelled slot 的僵尸回收（原 check_progress 对所有 `in_use=1` 的 slot 做 waitpid，现改为跳过 cancelled slot），回收路径转移到 lifecycle_shutdown poll + on-demand。
 
 ```c
 void kwcc_http_check_progress(void) {
@@ -152,15 +284,12 @@ void kwcc_http_check_progress(void) {
         kwcc_http_req_t *req = &g_kwcc_http_reqs[i];
         if (!req->in_use) continue;
         if (req->pipe_read_fd < 0) continue;  // 已取消，跳过
-
         /* 只做进度汇报 + 正常路径僵尸回收（原有逻辑不变） */
     }
 }
 ```
 
----
-
-## `kwcc_http_on_read` 防御
+**`kwcc_http_on_read` 防御**：
 
 ```c
 static void kwcc_http_on_read(int fd, void *user_data) {
@@ -170,85 +299,76 @@ static void kwcc_http_on_read(int fd, void *user_data) {
 }
 ```
 
----
+**`kwcc_js_http.c` — cancel 路径注释更新 + `http_unload` 保持 NULL**：
 
-## `kwcc_js_http.c` 改动
+cancel 路径注释更新：旧注释 "kwcc_http_cancel already called cleanup" 不再成立（新方案 cancel 不调 cleanup，C 侧资源延迟释放）。ack_cleanup=NULL 仍然正确——cancel 时 JS 侧无需标记"C 侧可释放"，C 侧资源由 lifecycle_shutdown 管理，等子进程退出后再回收。注释改为："cancel 不释放 C 侧资源，ack_cleanup 不负责触发回收，延迟回收由 lifecycle_shutdown 管理"。
 
-```c
-static void http_unload(kwcc_js_ops_t *ops) {
-    kwcc_http_shutdown(true);
-}
+`http_unload` 保持 NULL：当前 HTTP Plugin 没有 JS 侧资源需要清理，`kwcc_js_http_module.unload` 保持 NULL。`shutdown(force=1)` 由 lifecycle_shutdown_force_all() 统一调用，不再通过 unload 触发。
 
-kwcc_js_module_t kwcc_js_http_module = {
-    .name        = "http",
-    .load        = http_load,
-    .apis        = http_apis,
-    .on_bus_event = http_on_bus_event,
-    .unload      = http_unload,
-};
-```
+**`kwcc_http_cleanup` 防御 pipe_read_fd = -1**：
 
----
-
-## `kwcc_js.c` 改动
-
-`kwcc_destroy_js` 逆序遍历模块调 `unload`：
+现有 cleanup 代码：`kwcc_io_unregister(req->pipe_read_fd)` 在 `pipe_read_fd=-1` 时传 -1 给 io_unregister（bug）。close 有 `>= 0` 检查，但 unregister 没有。需要把 unregister 也放入 `>= 0` 检查内：
 
 ```c
-void kwcc_destroy_js(JSContext *ctx) {
-    for (int i = g_kwcc_js_module_count - 1; i >= 0; i--) {
-        if (g_kwcc_js_modules[i]->unload) {
-            log_info("js: unloading module '%s'", g_kwcc_js_modules[i]->name);
-            g_kwcc_js_modules[i]->unload(&g_kwcc_js_ops);
-        }
+static void kwcc_http_cleanup(kwcc_http_req_t *req) {
+    if (req->pipe_read_fd >= 0) {
+        kwcc_io_unregister(req->pipe_read_fd);
+        close(req->pipe_read_fd);
+        req->pipe_read_fd = -1;
     }
-    if (ctx) {
-        JS_FreeContext(ctx);
-    }
+    // ... 原有 waitpid + free + memset 逻辑不变
 }
 ```
 
+shutdown(force=1) Phase 2 对 cancelled slot（pipe_read_fd=-1）调 cleanup 时，不会对 -1 做 unregister/close。
+
+**cancelled slot 回收时不发布 bus 事件**：
+
+cancel 时 JS 侧已收到 cancel reject。之后 lifecycle_shutdown poll / on-demand 通过 `reap_cancelled` → `cleanup` 回收 slot 时，`cleanup` 不发布 bus 事件，JS 侧不会收到二次通知。这是正确的——cancel reject 是最终状态，slot 回收是 C 侧内部操作。
+
 ---
 
-## `main.m` 改动
+## Part 3：main.m 改动
+
+### init()
 
 ```c
-/* frame() */
-static void frame(void) {
-    kwcc_io_poll_once();
-    kwcc_http_check_progress();
-    kwcc_http_shutdown(false);       // 轻量释放
-    kwcc_process_js(g_js_ctx, "onFrame();");
-    // ...
-}
+kwcc_lifecycle_shutdown_init();
+```
 
-/* cleanup() */
-static void cleanup(void) {
-    kwcc_destroy_js(g_js_ctx);       // 内部：模块 unload → JS_FreeContext
-    kwcc_mempool_shutdown();
-}
+### frame()
+
+```c
+/* 在 io_poll_once + check_progress 之后、process_js 之前 */
+kwcc_bus_publish("frame/tick", NULL, 0);
+```
+
+### cleanup()
+
+```c
+kwcc_lifecycle_shutdown_force_all();  // 逆序调所有 shutdown(force=1)，包括 HTTP
+kwcc_destroy_js(g_js_ctx);           // 逆序调 unload（只清 JS 侧） + FreeContext
+kwcc_mempool_shutdown();
 ```
 
 ---
 
 ## 改动汇总
 
-| 文件 | 改动 |
-|------|------|
-| `src/kwcc_http.h` | 新增 `kwcc_http_shutdown(bool force)` 声明 |
-| `src/kwcc_http.c` | 新增 `g_kwcc_http_shutdown` 标志 |
-| `src/kwcc_http.c` | `kwcc_http_request` 加 shutdown 防御 |
-| `src/kwcc_http.c` | `kwcc_http_cancel`：只关 pipe + 发布事件 |
-| `src/kwcc_http.c` | `kwcc_http_check_progress`：跳过 `pipe_read_fd < 0` |
-| `src/kwcc_http.c` | `kwcc_http_on_read`：跳过 `pipe_read_fd < 0` |
-| `src/kwcc_http.c` | 新增 `kwcc_http_shutdown(bool force)` 实现 |
-| `src/kwcc_js_http.c` | 新增 `http_unload`，描述符加 `.unload` |
-| `src/kwcc_js.c` | `kwcc_destroy_js` 逆序调模块 `unload` |
-| `src/main.m` | `frame()` 加 `kwcc_http_shutdown(false)` |
+| 文件 | 改动 | 来源 |
+|------|------|------|
+| `src/kwcc_lifecycle_shutdown.h` | 新增：服务声明 + entry 结构体 | Part 1 |
+| `src/kwcc_lifecycle_shutdown.c` | 新增：服务实现 | Part 1 |
+| `src/kwcc.h` | include 新头文件 | Part 1 |
+| `src/main.m` | init/frame/cleanup 三处改动 | Part 1 + Part 3 |
+| `Makefile` | 新增编译规则 | Part 1 |
+| `src/kwcc_http.h` | 新增 `kwcc_http_shutdown(int force)` 声明 | Part 2 |
+| `src/kwcc_http.c` | 新增 `g_kwcc_http_shutdown` + `kwcc_http_reap_cancelled` + `kwcc_http_find_free_slot` + dirty_count + shutdown + on-demand + cancel 简化 + check_progress 简化 + on_read 防御 | Part 2 |
+| `src/kwcc_js_http.c` | cancel 路径注释更新（ack_cleanup 语义变化）+ `http_unload` 保持 NULL | Part 2 |
 
 不改动：
 - `kwcc_http_req_t`（不需要 `cancelled` 字段）
-- `kwcc_http_cleanup`（逻辑不变）
+- `kwcc_http_cleanup`（逻辑有调整：`kwcc_io_unregister` 移入 `>= 0` 检查内，避免对 -1 做 unregister）
 - JS 层（`http.js`、`promise.js` 不变）
 
 ---
@@ -257,17 +377,20 @@ static void cleanup(void) {
 
 | # | 测试 | 验证 |
 |---|------|------|
-| 1 | cancel 后 slot 状态 | `in_use=1, pipe_read_fd=-1` |
-| 2 | `shutdown(false)` 回收已退出的 cancelled 请求 | `in_use=0` |
-| 3 | `shutdown(true)` 终止所有活跃请求 | 所有 slot `in_use=0` |
-| 4 | cancel 后新请求可复用 slot | `shutdown(false)` 回收后 slot 可用 |
-| 5 | cancel 时 pipe 已关闭 | IO reactor 不再触发 `on_read` |
-| 6 | cancel 后 JS 收到 reject | Promise 不悬挂 |
-| 7 | 连续 cancel 安全 | 重复操作无害 |
-| 8 | 应用退出时无僵尸进程 | `ps` 验证无 zombie curl |
-| 9 | `kwcc_destroy_js` 调模块 unload | HTTP 请求被终止 + 回收 |
-| 10 | 模块无 unload 时不 crash | `if (unload)` NULL 检查 |
-| 11 | shutdown 后拒绝新请求 | `kwcc_http_request` 返回 NULL |
+| 1 | lifecycle_shutdown_init 后 subscribe "frame/tick" | bus 注册成功 |
+| 2 | HTTP 注册进服务后 dirty_count 返回正确值 | 0 / 1 / N |
+| 3 | cancel 后 slot 状态 | `in_use=1, pipe_read_fd=-1` |
+| 4 | bus "frame/tick" 触发后，dirty_count >= threshold → shutdown(force=0) | cancelled slot 回收 |
+| 5 | shutdown(force=0) 回收已退出的 cancelled 请求 | `in_use=0` |
+| 6 | shutdown(force=1) 终止所有活跃请求 | 所有 slot `in_use=0` |
+| 7 | on-demand 回收：slot 满时 request 仍能成功 | cancelled slot 被复用 |
+| 8 | cancel 时 pipe 已关闭 | IO reactor 不再触发 on_read |
+| 9 | cancel 后 JS 收到 reject | Promise 不悬挂 |
+| 10 | 连续 cancel 安全 | 重复操作无害 |
+| 11 | force_all 逆序调 shutdown(force=1) | HTTP 请求被终止 + 回收 |
+| 12 | 模块 unload 不调 shutdown(force=1) | unload 只清 JS 侧 |
+| 13 | shutdown 后拒绝新请求 | `kwcc_http_request` 返回 NULL |
+| 14 | 应用退出时无僵尸进程 | `ps` 验证无 zombie curl |
 
 ---
 
@@ -275,11 +398,13 @@ static void cleanup(void) {
 
 | 场景 | 行为 |
 |------|------|
-| cancel 后子进程立刻退出 | `shutdown(false)` 下一帧回收 |
-| cancel 后子进程延迟退出 | `shutdown(false)` 持续尝试 |
-| cancel 后子进程不响应 SIGPIPE | `--max-time` 超时退出，或 `shutdown(true)` 时 SIGTERM → SIGKILL |
-| 连续 cancel 同一请求 | `pipe_read_fd` 已为 -1，重复 close(-1) 无害 |
-| 所有 8 slot 都 cancelled | `shutdown(false)` 逐帧回收；极端等 `shutdown(true)` |
-| 应用退出时有活跃请求 | `kwcc_destroy_js` → `http_unload` → `shutdown(true)` |
-| `on_read` cancel 后仍触发 | `pipe_read_fd < 0` 防御 |
+| cancel 后子进程立刻退出 | lifecycle_shutdown poll 下一帧回收 |
+| cancel 后子进程延迟退出 | poll 每帧尝试；on-demand 在 request 时紧急回收 |
+| cancel 后子进程不响应 SIGPIPE | `--max-time` 超时退出，或 shutdown(force=1) 时 SIGTERM → SIGKILL |
+| 连续 cancel 同一请求 | `pipe_read_fd < 0` 防御，跳过重复 cancel |
+| 所有 8 slot 都 cancelled | poll 逐帧回收；request 时 on-demand 紧急回收；极端等 force_all |
+| 应用退出时有活跃请求 | force_all → shutdown(force=1) → 全量回收 |
+| on_read cancel 后仍触发 | `pipe_read_fd < 0` 防御 |
 | 正常请求完成（on_read EOF） | 原有逻辑不变 |
+| force_all 后再调 poll | g_shutdown=1 防御，安全跳过 |
+| force_all 后再调 register | g_shutdown=1 防御，安全跳过 |
