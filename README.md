@@ -162,6 +162,8 @@ $config.coreSetTlv("http", { bin_path: "/usr/local/bin/curl", timeout: "60" });
 | 20 | [js-module-dispatch-plan.md](requirements/js-module-dispatch-plan.md) | ✅ 完成 | module-grouped 两级分发 |
 | 21 | [js-bridge-dispatch-http-progress.md](requirements/js-bridge-dispatch-http-progress.md) | ✅ 完成 | #18/#19/#20 进度汇总 |
 | 22 | [kwcc-base-defer-cleanup.md](requirements/kwcc-base-defer-cleanup.md) | ✅ 完成 | 独立基础设施，14/14 测试 |
+| 22 | [module-shutdown-spec.md](requirements/module-shutdown-spec.md) | ⏳ 设计完成 | 模块 shutdown 链架构规范 |
+| 22b | [http-shutdown-implementation-plan.md](requirements/http-shutdown-implementation-plan.md) | ⏳ 设计完成 | HTTP shutdown 实施计划，依赖 #22 |
 | 17 | [spec.md](spec.md) | — | 完整项目规范 |
 
 ## 许可证
