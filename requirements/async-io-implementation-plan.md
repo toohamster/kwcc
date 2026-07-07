@@ -474,9 +474,11 @@ $http.config = function(key, value) {
 注意：不注入 `$http.request`，避免和 JS 高层 `$http.fetch` 同名冲突。JS 高层 API 在 `http.js` 中定义。
 
 **验证**：
-1. `make` 编译通过
-2. `make run` 窗口正常显示
-3. 在 JS 控制台测试：`$http.fetch("https://httpbin.org/get").then(function(r) { log(r.status); })`
+1. `make` 编译通过 ✅
+2. `make run` 窗口正常显示 ✅
+3. JS 集成测试 A 组 15/15 ✅，B 组 7/7 ✅
+4. C 端 e2e 测试 11/11 ✅
+5. 关键修复：`--http1.1` 强制 HTTP/1.1（picohttpparser 硬约束）
 
 ---
 

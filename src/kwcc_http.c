@@ -125,7 +125,7 @@ const char *kwcc_http_request(const char *method,
     kwcc_base_defer_cleanup_push(dc, &bin_val, (kwcc_base_defer_cleanup_fn)kwcc_base_str_free);
     kwcc_base_defer_cleanup_push(dc, &timeout_val, (kwcc_base_defer_cleanup_fn)kwcc_base_str_free);
 
-    const char *bin_path = kwcc_base_str_cstr(&bin_val, "curl");
+    const char *bin_path = kwcc_base_str_cstr(&bin_val, "/usr/bin/curl");
     int32_t timeout_num = kwcc_base_str_int(&timeout_val, 30);
     log_info("http: bin_path='%s' timeout=%d", bin_path, timeout_num);
 
@@ -140,7 +140,7 @@ const char *kwcc_http_request(const char *method,
     }
 
     /* 5. Build curl argv */
-    int argc_max = 8 + header_count * 2 + (body ? 2 : 0);
+    int argc_max = 10 + header_count * 2 + (body ? 2 : 0);
     char **argv = malloc(sizeof(char *) * (argc_max + 1));
     kwcc_base_defer_cleanup_push(dc, argv, free);
     if (!argv) {
@@ -156,12 +156,14 @@ const char *kwcc_http_request(const char *method,
     argv[ai++] = "-s";       /* silent */
     argv[ai++] = "-L";       /* follow redirects (Fix 3) */
     argv[ai++] = "-i";       /* include headers in output */
+    argv[ai++] = "--http1.1"; /* force HTTP/1.1 (picohttpparser only parses HTTP/1.x) */
     argv[ai++] = "-X";
     argv[ai++] = req->method;
 
     /* --max-time */
     char timeout_arg[32];
-    snprintf(timeout_arg, sizeof(timeout_arg), "--max-time %d", timeout_num);
+    snprintf(timeout_arg, sizeof(timeout_arg), "%d", timeout_num);
+    argv[ai++] = "--max-time";
     argv[ai++] = timeout_arg;
 
     /* headers */

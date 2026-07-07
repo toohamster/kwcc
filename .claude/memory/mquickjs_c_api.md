@@ -3,6 +3,24 @@
 > 基于 `deps/mquickjs/mquickjs.h` 源码（382 行），2026-06-02 验证
 > **每次涉及 mquickjs C API 调用时，先查阅此文件，不要重新读 mquickjs.h**
 
+## GC 机制
+
+mquickjs 用 mark-and-sweep GC，从 root set（全局对象）出发遍历，可达的标记存活，不可达的回收。
+
+**关键规则**：
+- C 侧 static 变量**不在 root set 中**，GC 不知道它的存在
+- 但如果 JSValue 从 global 属性链可达，不管 C 侧缓存不缓存，GC 都不会回收
+- `global` 上的属性只有在 ctx 销毁时才释放
+- 内置函数（`console.log`、`Math.abs`）和用户定义函数（`$notify.emit`）在 GC 眼里没有区别——不被回收都因为从 root set 可达
+
+**C 端持有 JSValue 的安全性判断**：
+| JS 侧是否一直持有 | C 侧缓存安全吗 | 是否需要 JS_AddGCRef |
+|---|---|---|
+| 一定（global 常驻，如 `$notify.emit`） | 绝对安全 | 不需要 |
+| 不一定（可能被 delete，如旧 `on_error_cb`） | 碰巧安全 | 需要（旧代码没做） |
+
+**`s_notify_emit_fn` 不需要 GC 保护**：它挂在 `global.$notify.emit` 上，从 root set 永远可达，GC 永远不会回收。缓存只是避免每次 2 次 `get_str_prop` 的开销。
+
 ## JSValue 类型系统
 
 ```c

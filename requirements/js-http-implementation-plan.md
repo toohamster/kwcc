@@ -443,8 +443,8 @@ make run
 | Step 1: kwcc_http.h | ✅ 已完成 | 本计划 Step 1 在此基础上隐藏 phr_header |
 | Step 2: kwcc_http.c | ✅ 已完成 | 本计划 Step 2 在此基础上删除回调 API + 加 progress + 增量解析 |
 | Step 3: 纯 C 测试 | ✅ 已完成 | 不需要改动 |
-| Step 4: C binding + 代理表 | 🔄 本计划替代 | 原方案已拆分为架构调整 + 本计划 |
+| Step 4: C binding + 代理表 | ✅ 本计划完成 | kwcc_js_http.c/h Plugin 模块实现 |
 | Step 5: Frame Hook + init | ✅ 已完成 | 不需要改动 |
-| Step 6: Makefile | 🔄 本计划 Step 5 | 加 kwcc_js_http.c（与删除内联代码合并） |
-| Step 7: 编译验证 | 🔄 本计划 Step 7 | |
-| Step 8: JS $http.fetch | 🔄 本计划 Step 6 | promise.js 独立 + http.js 重写 |
+| Step 6: Makefile | ✅ 已完成 | kwcc_js_http.c 已加入 |
+| Step 7: 编译验证 | ✅ 已完成 | kwcc_js_http.o 生成，make run 正常 |
+| Step 8: JS $http.fetch | ✅ 已完成 | JS 集成 22/22 (A15+B7)，C e2e 11/11 |

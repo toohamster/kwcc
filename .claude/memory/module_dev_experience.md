@@ -229,3 +229,48 @@
 **5. 方案外设计决策必须先讨论**
 - 实现时擅自沿用旧代理表 `kwcc_js_mquickjs_call`（mquickjs 类型签名），暴露 `JSContext*`/`JSValue` 给模块层，严重违反 Facade 隔离原则
 - 方案明确要求引擎隔离，模块通过 `kwcc_js_ops_t` 操作 JS，不碰 mquickjs
+
+---
+
+## HTTP 模块（kwcc_js_http + kwcc_http）— 2026-07-06
+
+### 背景
+实施 `js-http-implementation-plan.md` + `async-io-implementation-plan.md` Step 8，HTTP Plugin 作为第一个 Plugin 模块落地。JS 集成测试 A 组 15/15 + B 组 7/7 + C 端 e2e 11/11 全部通过。
+
+### 教训
+
+**1. picohttpparser 只能解析 HTTP/1.x — 这是硬约束不是偏好**
+- `parse_http_version()` 硬编码检查 `EXPECT_CHAR_NO_CHECK('1')`，遇到 `HTTP/2` 返回 -1
+- curl 默认使用 HTTP/2，`-i` 输出的状态行是 `HTTP/2 200`，picohttpparser 无法解析
+- 表现：headers 始终为 0，body 开头包含 `HTTP/2 200` 状态行
+- 修复：curl argv 加 `--http1.1` 强制 HTTP/1.1 协议
+- **原则**：第三方库的能力限制要先阅读源码确认，不能猜测
+
+**2. bus 订阅 pattern 不支持中间通配符**
+- `"http/*"` 不匹配任何 topic（不是合法 pattern）
+- bus `match_topic` 三种匹配：精确、`/*` 全局通配、`/` 前缀
+- 正确做法：`"http/"` 做前缀匹配，或 `"/*"` 匹配所有
+
+**3. kwcc_http_request 返回值是指向内部 buffer 的指针**
+- 返回 `req->req_id` 指针，cleanup 后 memset 清零
+- 调用方必须立即复制到本地 buffer，不能只保存指针
+
+**4. curl argv 格式：长选项和参数必须分开**
+- `--max-time 30` 必须拆成 `"--max-time"`, `"30"` 两个 argv
+- 作为单个 `"--max-time 30"` 传递，curl 无法解析
+
+**5. bus 回调中不能调 cleanup**
+- `on_read` EOF 后调 `dispatch_end` + `cleanup`
+- bus callback 中再调 `cleanup_by_req_id` 导致 double cleanup
+- 原则：资源释放由持有方负责，回调只读数据
+
+**6. 默认 bin_path 不能是裸名**
+- `access("curl", X_OK)` 不使用 PATH 查找，总是失败
+- 必须用完整路径 `/usr/bin/curl`
+
+### 架构决策
+
+**`--http1.1` 不做成配置项**：
+- picohttpparser 只能解析 HTTP/1.x，允许 HTTP/2 配置会导致功能不可用
+- 配置项应该对应真实可用的选项，放一个打开就坏掉的开关没有意义
+- 如果未来换解析器支持 HTTP/2，届时再提取为配置

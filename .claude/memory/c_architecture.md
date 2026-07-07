@@ -1,6 +1,6 @@
 # C 层完整架构状态
 
-> 基于多文件架构（`kwcc_mempool.c` + `kwcc_config.c` + `kwcc_ui.c` + `kwcc_js.c` + `kwcc_bus.c` + `kwcc_ui_bus.c` + `kwcc_base.c` + `kwcc_io.c` + `kwcc_http.c`）
+> 基于多文件架构（`kwcc_mempool.c` + `kwcc_config.c` + `kwcc_ui.c` + `kwcc_js.c` + `kwcc_js_http.c` + `kwcc_bus.c` + `kwcc_ui_bus.c` + `kwcc_base.c` + `kwcc_io.c` + `kwcc_http.c`）
 
 ## 架构模式
 
@@ -16,8 +16,8 @@
 | 文件 | 职责 |
 |------|------|
 | `kwcc_core.h` | 核心生命周期声明：`g_frame_counter` + `kwcc_begin_frame`（kwcc_ui.c 直接 include） |
-| `kwcc_base.h` | 纯 C 基础设施：内存池编译常量 + topic 清洗/校验声明 |
-| `kwcc_base.c` | topic 清洗（`kwcc_base_topic_sanitize`）+ 校验（`kwcc_base_topic_check`） |
+| `kwcc_base.h` | 纯 C 基础设施：内存池编译常量 + topic 清洗/校验声明 + defer_cleanup API |
+| `kwcc_base.c` | topic 清洗（`kwcc_base_topic_sanitize`）+ 校验（`kwcc_base_topic_check`）+ defer_cleanup 实现 |
 | `kwcc_mempool.h/c` | L0-L7 Slab 内存池：alloc/set/get/release/GC/key_map/常量表/TLV 序列化 |
 | `kwcc_config.h/c` | Config 层：get_core/get_app 前缀封装，C 业务模块读取接口 |
 | `kwcc_ui.c` | `g_kwcc_mu` + UI 桥接 + input + SVG + 字体 + js_ui_dispatch + register_ui |
@@ -30,8 +30,10 @@
 | `kwcc_js.h` | JS Facade 类型：`kwcc_js_ops_t` + `kwcc_js_module_t` + `kwcc_js_val_t` + `kwcc_js_cstr_buf_t` + 生命周期 API |
 | `kwcc_io.c` | I/O Reactor：select() 非阻塞 FD 管理器 |
 | `kwcc_io.h` | I/O 管理器声明 |
-| `kwcc_http.c` | HTTP 模块：fork+pipe+curl+picohttpparser，bus 事件分发 |
-| `kwcc_http.h` | HTTP 模块 API 声明 |
+| `kwcc_http.c` | HTTP 模块：fork+pipe+curl+picohttpparser，bus 事件分发，`--http1.1` 强制协议 |
+| `kwcc_http.h` | HTTP 模块 API 声明 + `kwcc_http_result_t` + header 访问 API + `kwcc_http_progress_t` |
+| `kwcc_js_http.c` | HTTP Plugin 模块：`kwcc_js_module_t` 描述符 + ops 签名 handler + `$notify` 路由 |
+| `kwcc_js_http.h` | HTTP Plugin 模块声明（`extern kwcc_js_http_module`） |
 | `kwcc.h` | 入口 umbrella header（include 各模块头文件） |
 
 ## 全局变量
@@ -193,11 +195,14 @@
 | `kwcc_config_release_core(key)` | 自动拼 "c." 前缀 → mempool release |
 | `kwcc_config_set_max_pools(type, max)` | 转发到 mempool |
 
-### Topic 工具（kwcc_base.c）
+### Topic 工具 + defer_cleanup（kwcc_base.c）
 | 函数 | 功能 |
 |------|------|
 | `kwcc_base_topic_sanitize(out, out_size, in)` | 清洗 topic：只保留 A-Z a-z 0-9 / _，末尾 /* 保留 |
 | `kwcc_base_topic_check(topic)` | 校验 topic：拒绝空字符串、全是 / 的 topic |
+| `kwcc_base_defer_cleanup_create()` | 创建 defer_cleanup 链表头 |
+| `kwcc_base_defer_cleanup_push(dc, ptr, fn)` | 头插入 (ptr, fn) 节点 |
+| `kwcc_base_defer_cleanup_run(dc)` | 逆序执行 fn(ptr)，释放节点 + dc 本身 |
 
 ### UI→JS 桥接（kwcc_ui_bus.c）
 | 函数 | 功能 |
@@ -223,6 +228,26 @@
 | `kwcc_io_register(fd, cb, user_data)` | 注册 FD + 回调 |
 | `kwcc_io_unregister(fd)` | 注销 FD |
 | `kwcc_io_poll_once()` | select() 零超时轮询，回调 dispatch |
+
+### HTTP 模块（kwcc_http.c）
+| 函数 | 功能 |
+|------|------|
+| `kwcc_http_init()` | 初始化请求数组 |
+| `kwcc_http_request(method, url, headers, hcount, body, body_len)` | fork+pipe+curl 发起请求，返回 req_id |
+| `kwcc_http_cancel(req_id)` | kill(pid, SIGTERM) + cleanup + publish cancel 事件 |
+| `kwcc_http_check_progress()` | 每帧调用：僵尸回收 + progress bus data |
+| `kwcc_http_get_result(req_id, out)` | 读取解析结果（status/body/error） |
+| `kwcc_http_result_header_count(req_id)` | 返回 header 数量 |
+| `kwcc_http_result_get_header(req_id, index, ...)` | 按索引读取 header name/value |
+| `kwcc_http_cleanup_by_req_id(req_id)` | ack_cleanup 回调，释放 C 侧资源 |
+
+### HTTP Plugin（kwcc_js_http.c）
+| 函数 | 功能 |
+|------|------|
+| `http_load(ops)` | 创建 `$http` 对象 + 注入 cancel/state |
+| `js_http_request(ops, argc, argv)` | ops 签名 handler，调 kwcc_http_request，返回 req_id |
+| `js_http_cancel(ops, argc, argv)` | ops 签名 handler，调 kwcc_http_cancel |
+| `http_on_bus_event(topic, data, len, ops)` | bus 事件路由：构建 JSValue 响应 + ops->notify_js |
 
 ### 窗口挡板（kwcc_ui.c）
 | 函数 | 功能 |
@@ -344,6 +369,9 @@ ui.svg(path_or_svg, x, y, w, h)
 15. **`ack_cleanup` 在 `call_cb` 之前自动调用**：C 端传了就自动处理，不需要记着调 release
 16. **模块生命周期**：core 按 `load → (apis 自动注册) → on_bus_event（运行时）→ unload（退出时）` 顺序调用
 17. **module-grouped 两级分发**：`kwcc_js_call_c(module, func, ...args)` 替代旧的 `kwcc_js_mquickjs_call`，分发表按 module 分组，同一 module 内按 func 查找 handler
+18. **curl `--http1.1` 硬编码**：picohttpparser 只能解析 HTTP/1.x（`parse_http_version` 硬编码检查 `'1'`），curl 默认 HTTP/2 会导致解析失败，所以强制 HTTP/1.1
+19. **defer_cleanup 逆序执行**：`kwcc_base_defer_cleanup_run` 逆序执行（头插链表 → 自然逆序），类似 Go defer/C23 defer 语义
+20. **HTTP `ack_cleanup` 时序契约**：`dispatch_end` 后数据通过 `JS_NewStringLen` 拷贝进 GC 堆，`ack_cleanup`（`kwcc_http_cleanup_by_req_id`）在 `notify_js` 投递前自动释放 C 侧资源
 
 ## JS 框架 API（main.js）
 

@@ -97,6 +97,8 @@
 
 ### [picohttpparser 分析](picohttpparser_analysis.md)
 - HTTP 响应解析 API：`phr_parse_response()` 返回值语义（>0 成功/-2 不完整/-1 错误）
+- **⚠️ 只能解析 HTTP/1.x**：`parse_http_version()` 硬编码 `EXPECT_CHAR_NO_CHECK('1')`，HTTP/2 返回 -1
+- curl 必须加 `--http1.1`，否则 headers=0（这是硬约束，不是配置选项）
 - `phr_header` 零拷贝指针结构，需 `JS_NewStringLen` 提取
 - 增量解析机制：`last_len` 参数用于 incomplete 检测
 - 与 mquickjs 集成：`JS_NewStringLen` 创建 JS 字符串，`JS_NewInt32` 创建状态码
@@ -115,12 +117,15 @@
 - 编译技巧：不链接 kwcc_ui.o，避免 nanosvg/NVG 依赖
 - Phase 4 TLV 调试教训：不要在 JS 层反复调试
 - ops 测试 74 点：值创建/属性操作/函数调用/类型判断/C字符串/eval/notify/数组/dispatch
+- **HTTP e2e 测试**：C 端 11/11 + JS 端 A15+B7，用 bus subscribe + io_poll 验证完整链路
+- **HTTP 踩坑**：HTTP/2 解析失败、bus pattern 不支持中间通配、req_id 生命周期、curl argv 格式
 
 ### [模块开发经验](module_dev_experience.md)
 - 内存池开发 8 条教训：方案确认、C 端测试、命名规范、不发挥、构建产物、分层、代理机制、测试记录
 - Bus 重构教训：static 函数命名规范、命名写时就遵守、sanitize bug、不引入"看似更优"的复杂方案
 - Facade+Plugin 教训：`kwcc_js_val_t=JSValue`（不是 uint64_t）、隔离是行为层面、bug 误判别怀疑设计、方案外决策必须先讨论
 - Module dispatch 教训：公共入口函数 NULL 防御
+- HTTP 教训：picohttpparser HTTP/1.x 硬约束、bus 订阅 pattern、req_id 生命周期、curl argv 格式、cleanup 时序
 
 ### [C 语言模块开发模式](c_module_patterns.md)
 - **模式 A**：模块前缀 + 静态全局 — 单例、零开销、文件级内聚

@@ -111,6 +111,27 @@ if (ret == -2) {
 - 可选 SSE4.2 优化（自动检测 `__SSE4_2__` 宏，macOS 默认启用）
 - 无任何外部库依赖
 
+## 关键限制：只支持 HTTP/1.x
+
+`parse_http_version()` 函数（picohttpparser.c:280-296）**硬编码检查 `HTTP/1.`**：
+
+```c
+EXPECT_CHAR_NO_CHECK('H');
+EXPECT_CHAR_NO_CHECK('T');
+EXPECT_CHAR_NO_CHECK('T');
+EXPECT_CHAR_NO_CHECK('P');
+EXPECT_CHAR_NO_CHECK('/');
+EXPECT_CHAR_NO_CHECK('1');    // ← 硬编码 '1'，遇到 HTTP/2 时 '2' != '1' 返回 -1
+EXPECT_CHAR_NO_CHECK('.');
+PARSE_INT(minor_version, 1);
+```
+
+**后果**：如果 curl 使用 HTTP/2 协议，`-i` 输出的状态行是 `HTTP/2 200`，picohttpparser 解析失败返回 -1，headers 全部丢失。
+
+**解决方案**：curl argv 必须加 `--http1.1` 强制 HTTP/1.1 协议。这不是用户偏好，是解析能力的硬约束。
+
+**实测**：不加 `--http1.1` 时 headers=0（解析失败），加上后 headers=7（正常解析）。
+
 ## 返回值速查
 
 | 返回值 | 含义 | 处理方式 |

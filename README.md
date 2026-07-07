@@ -36,6 +36,7 @@ make && ./kwcc
 - **多窗口**：microui 原生多窗口同时渲染
 - **中文支持**：自动识别 CJK 字体，PingFang SC 默认字体
 - **ES5 脚本层**：mquickjs 引擎，轻量快速
+- **异步 HTTP**：`$http.fetch` + MiniPromise，fork+pipe+curl 非阻塞请求
 
 ## 示例模块
 
@@ -46,6 +47,61 @@ make && ./kwcc
 | `test/` | 最小计数器，验证 store + event bus 闭环 |
 | `calc/` | 完整计算器，四则运算 + 状态驱动 UI |
 | `svg/` | SVG 渲染，内联字符串 + 文件路径两种方式 |
+
+## HTTP 请求
+
+通过 `$http.fetch` 发起异步 HTTP 请求，返回 MiniPromise。底层使用 fork+pipe+curl，不阻塞主线程。
+
+**前置条件**：系统需安装 curl（macOS 默认包含）。
+
+### GET 请求
+
+```javascript
+$http.fetch("https://httpbin.org/get").then(function(resp) {
+    print(resp.status);   // 200
+    print(resp.body);     // JSON 字符串
+    print(resp.headers["Content-Type"]);  // application/json
+}).catch(function(err) {
+    print(err.error);
+});
+```
+
+### POST 请求
+
+```javascript
+$http.fetch("https://httpbin.org/post", {
+    method: "POST",
+    body: "hello=world",
+    headers: ["Content-Type: application/x-www-form-urlencoded"]
+}).then(function(resp) {
+    print(resp.status);
+});
+```
+
+### 取消请求
+
+```javascript
+var reqId = kwcc_js_call_c("http", "request", "GET", "https://httpbin.org/delay/5");
+$http.cancel(reqId);  // 触发 reject
+```
+
+### 响应对象
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `status` | number | HTTP 状态码（200/404 等） |
+| `body` | string | 响应体 |
+| `headers` | object | 响应头（键值对） |
+| `reqId` | string | 请求 ID |
+| `error` | string | 错误信息（仅 error/cancel 时存在） |
+
+### 配置
+
+默认 curl 路径 `/usr/bin/curl`，超时 30 秒。可通过 `$config` 修改：
+
+```javascript
+$config.coreSetTlv("http", { bin_path: "/usr/local/bin/curl", timeout: "60" });
+```
 
 ## 项目结构
 
@@ -58,7 +114,7 @@ make && ./kwcc
 │   ├── kwcc_config.h/c  # Config 层：App/Core 域存取接口
 │   ├── kwcc_ui.c/h      # UI 模块（g_mu、microui 桥接、input、SVG、字体）
 │   ├── kwcc_js.c/h      # JS lifecycle + ops/module 类型定义 + bus consumer + 代理表
-│   ├── kwcc_js_http.c/h # HTTP JS bridge plugin（回调注册表 + bus 事件路由）[待实施]
+│   ├── kwcc_js_http.c/h # HTTP JS bridge plugin（$notify 路由 + ops 签名 handler）
 │   ├── kwcc_ui_bus.c/h  # UI→JS 事件桥接（topic map + dispatch_event）
 │   ├── kwcc_bus.c/h     # 通用 C Pub/Sub 事件总线（subscribe/publish/unsubscribe）
 │   ├── kwcc_io.c/h      # I/O Reactor（select() 非阻塞 FD 管理器）
@@ -98,11 +154,11 @@ make && ./kwcc
 | 12 | [bus-split-design.md](requirements/bus-split-design.md) | ✅ 完成 | 从 extract-bus-module 演进，19/19 测试 |
 | 13 | [bus-split-implementation-plan.md](requirements/bus-split-implementation-plan.md) | ✅ 完成 | — |
 | 14 | [async-io-design.md](requirements/async-io-design.md) | ✅ 完成 | 依赖 bus-split，已解除 |
-| 15 | [async-io-implementation-plan.md](requirements/async-io-implementation-plan.md) | ✅ 完成 | Layer 1-4 完成 |
+| 15 | [async-io-implementation-plan.md](requirements/async-io-implementation-plan.md) | ✅ 完成 | Layer 1-4 完成，JS 集成 22/22 |
 | 16 | [microui-id-override.md](requirements/microui-id-override.md) | ⏳ 待论证 | — |
 | 17 | [mquickjs-cfunc-registration.md](requirements/mquickjs-cfunc-registration.md) | ⚠️ 参考 | C 函数注册技术参考 |
 | 18 | [js-bridge-architecture.md](requirements/js-bridge-architecture.md) | ✅ 完成 | Facade + Plugin 架构，74/74 测试 |
-| 19 | [js-http-implementation-plan.md](requirements/js-http-implementation-plan.md) | ✅ 完成 | HTTP Plugin 模块 |
+| 19 | [js-http-implementation-plan.md](requirements/js-http-implementation-plan.md) | ✅ 完成 | HTTP Plugin 模块，C11+JS22 测试 |
 | 20 | [js-module-dispatch-plan.md](requirements/js-module-dispatch-plan.md) | ✅ 完成 | module-grouped 两级分发 |
 | 21 | [js-bridge-dispatch-http-progress.md](requirements/js-bridge-dispatch-http-progress.md) | ✅ 完成 | #18/#19/#20 进度汇总 |
 | 22 | [kwcc-base-defer-cleanup.md](requirements/kwcc-base-defer-cleanup.md) | ✅ 完成 | 独立基础设施，14/14 测试 |

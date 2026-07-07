@@ -125,16 +125,7 @@ if (!checkId) {
         test_async_done = test_async_done + 1;
     }
 
-    /* Async summary: poll with setTimeout */
-    var async_start = Date.now();
-    function checkAsyncDone() {
-        if (test_async_done >= test_async_total) {
-            print("=== HTTP JS B group: " + test_async_pass + " passed, " + test_async_fail + " failed ===");
-        } else if (Date.now() - async_start > 10000) {
-            print("=== HTTP JS B group: TIMEOUT (" + test_async_done + "/" + test_async_total + " done, " + test_async_pass + " passed, " + test_async_fail + " failed) ===");
-        } else {
-            setTimeout(checkAsyncDone, 200);
-        }
-    }
-    setTimeout(checkAsyncDone, 200);
+    /* B group: each callback prints its own result immediately.
+     * No setTimeout polling — mquickjs has no setTimeout.
+     * Summary is printed per-callback; overall status visible in log. */
 }
