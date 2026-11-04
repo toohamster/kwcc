@@ -154,17 +154,18 @@ $config.coreSetTlv("http", { bin_path: "/usr/local/bin/curl", timeout: "60" });
 | 12 | [bus-split-design.md](requirements/bus-split-design.md) | ✅ 完成 | 从 extract-bus-module 演进，19/19 测试 |
 | 13 | [bus-split-implementation-plan.md](requirements/bus-split-implementation-plan.md) | ✅ 完成 | — |
 | 14 | [async-io-design.md](requirements/async-io-design.md) | ✅ 完成 | 依赖 bus-split，已解除 |
-| 15 | [async-io-implementation-plan.md](requirements/async-io-implementation-plan.md) | ✅ 完成 | Layer 1-4 完成，JS 集成 22/22 |
-| 16 | [microui-id-override.md](requirements/microui-id-override.md) | ⏳ 待论证 | — |
-| 17 | [mquickjs-cfunc-registration.md](requirements/mquickjs-cfunc-registration.md) | ⚠️ 参考 | C 函数注册技术参考 |
-| 18 | [js-bridge-architecture.md](requirements/js-bridge-architecture.md) | ✅ 完成 | Facade + Plugin 架构，74/74 测试 |
-| 19 | [js-http-implementation-plan.md](requirements/js-http-implementation-plan.md) | ✅ 完成 | HTTP Plugin 模块，C11+JS22 测试 |
+| 14b | [async-io-implementation-plan.md](requirements/async-io-implementation-plan.md) | ✅ 完成 | Layer 1-4 完成，JS 集成 22/22 |
+| 15 | [microui-id-override.md](requirements/microui-id-override.md) | ⏳ 待论证 | — |
+| 16 | [mquickjs-cfunc-registration.md](requirements/mquickjs-cfunc-registration.md) | ⚠️ 参考 | C 函数注册技术参考 |
+| 17 | [js-bridge-architecture.md](requirements/js-bridge-architecture.md) | ✅ 完成 | Facade + Plugin 架构，74/74 测试 |
+| 18 | [js-http-implementation-plan.md](requirements/js-http-implementation-plan.md) | ✅ 完成 | HTTP Plugin 模块，C11+JS22 测试 |
+| 19 | [kwcc-base-defer-cleanup.md](requirements/kwcc-base-defer-cleanup.md) | ✅ 完成 | 独立基础设施，14/14 测试 |
 | 20 | [js-module-dispatch-plan.md](requirements/js-module-dispatch-plan.md) | ✅ 完成 | module-grouped 两级分发 |
-| 21 | [js-bridge-dispatch-http-progress.md](requirements/js-bridge-dispatch-http-progress.md) | ✅ 完成 | #18/#19/#20 进度汇总 |
-| 22 | [kwcc-base-defer-cleanup.md](requirements/kwcc-base-defer-cleanup.md) | ✅ 完成 | 独立基础设施，14/14 测试 |
-| 22 | [lifecycle-shutdown-service-spec.md](requirements/lifecycle-shutdown-service-spec.md) | ⏳ 设计完成 | lifecycle_shutdown 服务规范，取代 module-shutdown-spec |
-| 22b | [http-shutdown-implementation-plan.md](requirements/http-shutdown-implementation-plan.md) | ⏳ 设计完成 | HTTP 接入 lifecycle_shutdown |
-| 17 | [spec.md](spec.md) | — | 完整项目规范 |
+| 21 | [js-bridge-dispatch-http-progress.md](requirements/js-bridge-dispatch-http-progress.md) | ✅ 完成 | #17/#18/#20 进度汇总 |
+| 22 | [lifecycle-shutdown-service-spec.md](requirements/lifecycle-shutdown-service-spec.md) | ⏳ 设计完成（v2 窄边界），待实施 | v2：仅 force_all，runtime 回收模块自治 |
+| 22b | [http-shutdown-implementation-plan.md](requirements/http-shutdown-implementation-plan.md) | ⏳ 设计完成（v2），待实施 | HTTP 接入 v2：cancel 逻辑放弃 + check_progress 自治回收 |
+| 22c | [lifecycle-shutdown-v2-discussion.md](requirements/lifecycle-shutdown-v2-discussion.md) | ✅ 讨论闭环 | v1→v2 演进讨论（7 项），决策沉淀到 #22/#22b |
+| — | [spec.md](spec.md) | — | 完整项目规范 |
 
 ## 许可证
 
