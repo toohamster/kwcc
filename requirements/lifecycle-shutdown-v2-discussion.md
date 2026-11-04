@@ -25,31 +25,45 @@ typedef struct {
 - `exiting` 是服务自身的生命周期状态（kill 信号 → 1）
 - 监控只需关注 `get_state()` 就够了
 
----
-
-## 讨论 2：entry 的通用访问函数
-
-v1 里 entry 的字段（name、dirty_count、threshold）对服务是可见的（服务定义了它）。
-
-**问题**：外部（监控、调试）如何访问单个模块的数据？
-
-**待确认**：
-- 服务是否需要提供 `get_module_name(index)` / `get_module_dirty_count(index)` 这样的接口？
-- 还是通过轮询（遍历 entries）由服务自身完成，外部只读 `state_t`？
-- index vs name 作为查询键：都不合适，服务通过轮询即可，不需要外部按名查找
-- 模块别名/标记是否有必要？
+> **演进（讨论 3 决策后）**：`poll_count` 随 runtime 路径移除而删除（服务不再 poll，不订阅 bus）。state 收敛为 `{ exiting, module_count }`。`get_state()` 暂不提供——没有真实监控需求，`is_exiting()` 覆盖运行期防御（讨论 4），出现真实监控需求时再加是向后兼容扩展。
 
 ---
 
-## 讨论 3：dirty_count 的维护方式
+## 讨论 2：entry 的通用访问函数 ✅ 已决策
 
-v1 里 dirty_count 是模块实现的函数指针，服务调 `entry->dirty_count()` 得到数字，和 `entry->threshold` 比较。
+**决策：服务不提供任何 entry 访问接口，外部只读 `is_exiting()`。**
 
-**待确认**：
-- dirty_count 和 threshold 的关系，是模块自己定义还是服务统一管理？
-- 服务的职责是"触发"——"你的脏资源数超过阈值了，该回收了"
-- 阈值是模块级还是全局级？
-- dirty_count 的维护机制：实时计算（当前 HTTP 方案）vs 其他方式？
+理由：
+
+1. entry 简化为 `name + shutdown` 后（讨论 3），没有 dirty_count 等运行数据可查，"按 name/index 访问单个模块数据"已经没有对象
+2. 监控需求是假设性的：kwcc 模块数编译期个位数，出现真实监控需求时再加 `get_state()` 是向后兼容扩展
+3. 运行期防御需要的状态（exiting）通过 `is_exiting()` 暴露（讨论 4），这是唯一有真实调用方的查询接口
+
+---
+
+## 讨论 3：dirty_count 的维护方式 ✅ 已决策
+
+**决策：窄边界（C）** — lifecycle_shutdown 服务的职责收敛为**仅 force_all（退出清理调度器）**，runtime 回收交给模块自治。
+
+### 决策理由
+
+1. **唯一真实客户反推**：runtime 路径的全部需求来自 HTTP cancel 僵尸场景。而 HTTP 的 `check_progress()` 每帧已经在扫 slot 数组，reap 是它的附属动作，成本为 0。让服务轮询 dirty_count 再回调 `shutdown(0)`，是把信息源和决策点人为分离，没买到任何东西。
+
+2. **服务不可替代的价值在退出期**：force_all 的硬约束（注册逆序、kill 信号时 bus 可用、全局 `exiting` 守卫）才是"服务"该存在的原因。runtime 回收模块自己就能做。
+
+3. **不设计假设性需求**：跨模块统一 runtime 策略（如"全局脏资源超标强制 GC"）在 kwcc 模块数（编译期个位数）下是假设性的。真出现时 entry 加字段是扩展，不是推翻。
+
+### 决策带来的变化
+
+- entry 结构简化：删掉 `dirty_count` 和 `threshold`，只留 `name` + `shutdown`
+- 服务不再订阅 bus `frame/tick`（runtime 路径整体移除）
+- HTTP 的 `reap_cancelled()` 逻辑并入 `check_progress()`，由 HTTP 自治调用
+- 服务不再依赖 bus（force_all 不走 bus，runtime 也不再走 bus）
+- 讨论 2（entry 访问函数）大幅简化：entry 只有 name + shutdown，没有 dirty_count 可查
+
+### 兜底
+
+未来若出现模块无法在 per-frame 循环中自治回收的场景（状态感知点不在帧内），再加拉模型是向后兼容扩展，不是推翻。
 
 ---
 
@@ -83,7 +97,9 @@ Sokol 的 cleanup_cb 只在窗口关闭时触发。需要注册 SIGINT/SIGTERM �
 
 ---
 
-## 待继续讨论
+## 讨论闭环
 
-- 讨论 2：entry 的访问方式
-- 讨论 3：dirty_count 的维护机制
+全部 7 项讨论已闭环，决策已沉淀为正式方案：
+
+- 服务规范 v2：[lifecycle-shutdown-service-spec.md](lifecycle-shutdown-service-spec.md)
+- HTTP 接入 v2：[http-shutdown-implementation-plan.md](http-shutdown-implementation-plan.md)
