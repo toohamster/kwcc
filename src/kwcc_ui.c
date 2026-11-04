@@ -10,6 +10,7 @@
 #include "kwcc_ui.h"
 #include "kwcc_base.h"
 #include "kwcc_js.h"
+#include "kwcc_ui_bus.h"
 
 #include "nanosvg/nanosvg.h"
 
@@ -38,8 +39,17 @@ static mod_state_t g_kwcc_ui_sync_table[KWCC_UI_MAX_MODULES];
 static int         g_kwcc_ui_sync_count = 0;
 static const char *g_kwcc_ui_current_mod_key = NULL;
 static int         g_kwcc_ui_win_intercepted[KWCC_UI_MAX_WIN_DEPTH];
-static char        g_kwcc_ui_win_topics[KWCC_UI_MAX_WIN_DEPTH][128];
 static int         g_kwcc_ui_win_top = 0;
+
+/* Window close topic map: title → topic（每帧重建，kwcc_begin_frame 重置）。
+ * beginWindow 每帧 upsert 绑定；on_window_close 按 title 反查 topic 再 dispatch。 */
+#define KWCC_UI_MAX_WINDOWS 16   /* microui 容器池 48，真实应用 <10 窗口；溢出 log_warn */
+typedef struct {
+    char title[64];
+    char topic[128];
+} kwcc_ui_win_topic_t;
+static kwcc_ui_win_topic_t g_kwcc_ui_win_topic_map[KWCC_UI_MAX_WINDOWS];
+static int                 g_kwcc_ui_win_topic_count = 0;
 
 /* JS context — for close callback */
 static JSContext *g_kwcc_ui_js_ctx = NULL;
@@ -76,17 +86,34 @@ static int kwcc_get_current_visibility(void) {
     return 1;
 }
 
+/* 挡板补全（方案 A）：最内层窗口被拦截时，其 body 的所有 widget 调用必须吞掉。
+ * 等价于原生 microui 范式中调用方检查 begin_window_ex 返回值后跳过 body——
+ * kwcc 契约是 "view 不需要判断"，此检查由 C 层挡板代做。
+ * 不吞的后果：widget 落到空 container/clip/layout 栈 → microui expect → abort。 */
+static int kwcc_ui_in_intercepted_window(void) {
+    return g_kwcc_ui_win_top > 0 && g_kwcc_ui_win_intercepted[g_kwcc_ui_win_top - 1];
+}
+
 /* ── Per-frame begin (UI state only; bus reset handled by kwcc_bus) ── */
 
 void kwcc_begin_frame(void) {
     kwcc_ui_bus_begin_frame();
     g_kwcc_ui_sync_count = 0;
     g_kwcc_ui_win_top = 0;
+    g_kwcc_ui_win_topic_count = 0;
 }
 
 static void kwcc_on_window_close(mu_Context *ctx, const char *title) {
     (void)ctx;
-    log_info("on_window_close: %s", title);
+    for (int i = 0; i < g_kwcc_ui_win_topic_count; i++) {
+        if (strcmp(g_kwcc_ui_win_topic_map[i].title, title) == 0) {
+            log_info("on_window_close: '%s' -> topic '%s'", title,
+                     g_kwcc_ui_win_topic_map[i].topic);
+            kwcc_ui_bus_dispatch_event(g_kwcc_ui_win_topic_map[i].topic, "close");
+            return;
+        }
+    }
+    log_warn("on_window_close: no topic bound for window '%s', dispatching title", title);
     kwcc_ui_bus_dispatch_event(title, "close");
 }
 
@@ -282,26 +309,39 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
             topic = JS_ToCString(ctx, argv[6], &tbuf);
         }
 
-        int visible = kwcc_get_current_visibility();
+        /* 绑定 title → topic（必须在 mu_begin_window_ex 之前：X 关闭回调在其内部触发）。
+         * 按 title upsert，同一帧重复 begin 同一窗口时更新 topic。 */
+        if (topic && topic[0] && title) {
+            int found = 0;
+            for (int i = 0; i < g_kwcc_ui_win_topic_count; i++) {
+                if (strcmp(g_kwcc_ui_win_topic_map[i].title, title) == 0) {
+                    strncpy(g_kwcc_ui_win_topic_map[i].topic, topic, 127);
+                    g_kwcc_ui_win_topic_map[i].topic[127] = '\0';
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found && g_kwcc_ui_win_topic_count < KWCC_UI_MAX_WINDOWS) {
+                kwcc_ui_win_topic_t *e = &g_kwcc_ui_win_topic_map[g_kwcc_ui_win_topic_count++];
+                strncpy(e->title, title, 63);
+                e->title[63] = '\0';
+                strncpy(e->topic, topic, 127);
+                e->topic[127] = '\0';
+            } else if (!found) {
+                log_warn("beginWindow: topic map full (%d), close event for '%s' unbound",
+                         KWCC_UI_MAX_WINDOWS, title);
+            }
+        }
+
+        /* 嵌套窗口：外层被拦截时内层同步拦截（内层 body 与外层一起被挡板吞掉） */
+        int visible = kwcc_get_current_visibility() && !kwcc_ui_in_intercepted_window();
         if (g_kwcc_ui_win_top < KWCC_UI_MAX_WIN_DEPTH) {
             if (!visible) {
                 g_kwcc_ui_win_intercepted[g_kwcc_ui_win_top] = 1;
-                if (topic) {
-                    strncpy(g_kwcc_ui_win_topics[g_kwcc_ui_win_top], topic, 127);
-                    g_kwcc_ui_win_topics[g_kwcc_ui_win_top][127] = '\0';
-                } else {
-                    g_kwcc_ui_win_topics[g_kwcc_ui_win_top][0] = '\0';
-                }
                 g_kwcc_ui_win_top++;
                 return JS_NewBool(0);
             }
             g_kwcc_ui_win_intercepted[g_kwcc_ui_win_top] = 0;
-            if (topic) {
-                strncpy(g_kwcc_ui_win_topics[g_kwcc_ui_win_top], topic, 127);
-                g_kwcc_ui_win_topics[g_kwcc_ui_win_top][127] = '\0';
-            } else {
-                g_kwcc_ui_win_topics[g_kwcc_ui_win_top][0] = '\0';
-            }
             g_kwcc_ui_win_top++;
         }
 
@@ -326,6 +366,7 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         return JS_UNDEFINED;
     }
     if (strcmp(method, "beginPanel") == 0) {
+        if (kwcc_ui_in_intercepted_window()) { return JS_UNDEFINED; }
         JSCStringBuf buf;
         const char *name = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &buf);
         int opt = 0;
@@ -334,10 +375,12 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         return JS_UNDEFINED;
     }
     if (strcmp(method, "endPanel") == 0) {
+        if (kwcc_ui_in_intercepted_window()) { return JS_UNDEFINED; }
         mu_end_panel(&g_kwcc_mu);
         return JS_UNDEFINED;
     }
     if (strcmp(method, "button") == 0) {
+        if (kwcc_ui_in_intercepted_window()) { return JS_NewBool(0); }
         JSCStringBuf buf, tbuf;
         const char *text = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &buf);
         const char *topic = NULL;
@@ -351,12 +394,19 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         return JS_NewBool(res & MU_RES_SUBMIT);
     }
     if (strcmp(method, "label") == 0) {
+        if (kwcc_ui_in_intercepted_window()) { return JS_UNDEFINED; }
         JSCStringBuf buf;
         const char *text = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &buf);
         mu_label(&g_kwcc_mu, text ? text : "");
         return JS_UNDEFINED;
     }
     if (strcmp(method, "slider") == 0) {
+        if (kwcc_ui_in_intercepted_window()) {
+            /* 拦截时不画滑块，值无变化，返回传入值保持返回值契约 */
+            double val = g_kwcc_ui_slider_val;
+            if (argc > 1) JS_ToNumber(ctx, &val, argv[1]);
+            return JS_NewFloat64(ctx, val);
+        }
         JSCStringBuf tbuf;
         const char *text = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &tbuf);
         double val = g_kwcc_ui_slider_val, low = 0, high = 1;
@@ -378,6 +428,7 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         return JS_NewFloat64(ctx, g_kwcc_ui_slider_val);
     }
     if (strcmp(method, "layoutRow") == 0) {
+        if (kwcc_ui_in_intercepted_window()) { return JS_UNDEFINED; }
         int height = 20;
         int widths[MU_MAX_WIDTHS];
         int items = 0;
@@ -390,6 +441,7 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         return JS_UNDEFINED;
     }
     if (strcmp(method, "setNext") == 0) {
+        if (kwcc_ui_in_intercepted_window()) { return JS_UNDEFINED; }
         int x = 0, y = 0, w = 0, h = 0;
         if (argc > 0) JS_ToInt32(ctx, &x, argv[0]);
         if (argc > 1) JS_ToInt32(ctx, &y, argv[1]);
@@ -399,6 +451,7 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         return JS_UNDEFINED;
     }
     if (strcmp(method, "rect") == 0) {
+        if (kwcc_ui_in_intercepted_window()) { return JS_UNDEFINED; }
         int x = 0, y = 0, w = 0, h = 0;
         int r = 50, g = 50, b = 50;
         if (argc > 0) JS_ToInt32(ctx, &x, argv[0]);
@@ -412,6 +465,7 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         return JS_UNDEFINED;
     }
     if (strcmp(method, "display") == 0) {
+        if (kwcc_ui_in_intercepted_window()) { return JS_UNDEFINED; }
         JSCStringBuf buf;
         const char *text = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &buf);
         mu_Rect r = mu_layout_next(&g_kwcc_mu);
@@ -427,6 +481,7 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         return JS_UNDEFINED;
     }
     if (strcmp(method, "textCentered") == 0) {
+        if (kwcc_ui_in_intercepted_window()) { return JS_UNDEFINED; }
         JSCStringBuf buf;
         const char *text = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &buf);
         mu_Rect r = mu_layout_next(&g_kwcc_mu);
@@ -468,6 +523,7 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         return JS_UNDEFINED;
     }
     if (strcmp(method, "svg") == 0) {
+        if (kwcc_ui_in_intercepted_window()) { return JS_UNDEFINED; }
         JSCStringBuf buf;
         JSValue arg = argc > 0 ? argv[0] : JS_UNDEFINED;
         if (JS_IsUndefined(arg)) return JS_UNDEFINED;
