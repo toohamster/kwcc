@@ -27,6 +27,10 @@ const char *kwcc_http_request(const char *method,
 void        kwcc_http_cancel(const char *req_id);
 void        kwcc_http_check_progress(void);
 
+/* Full shutdown: SIGTERM all active children, blocking waitpid, reclaim all
+ * slots. Idempotent. Called from main.m exit (cleanup) and signal paths. */
+void        kwcc_http_shutdown(void);
+
 /* Look up parsed result by req_id. Returns 0 if found, -1 if not.
  * Result is valid only during the bus event callback (before cleanup). */
 int         kwcc_http_get_result(const char *req_id, kwcc_http_result_t *out);

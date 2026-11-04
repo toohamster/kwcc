@@ -53,6 +53,7 @@ typedef struct {
 
 static kwcc_http_req_t g_kwcc_http_reqs[KWCC_HTTP_MAX_REQS];
 static int g_kwcc_http_next_seq = 0;
+static int g_kwcc_http_shutdown = 0;
 
 /* ── Forward declarations ───────────────────────────────────── */
 
@@ -62,6 +63,7 @@ static void kwcc_http_dispatch_end(kwcc_http_req_t *req, int error,
                                    struct phr_header *headers, size_t num_headers);
 static void kwcc_http_cleanup(kwcc_http_req_t *req);
 static kwcc_http_req_t *kwcc_http_req_find(const char *req_id);
+static int kwcc_http_reap_cancelled_slot(kwcc_http_req_t *req);
 
 /* ── Public API ─────────────────────────────────────────────── */
 
@@ -72,6 +74,11 @@ void kwcc_http_init(void) {
 const char *kwcc_http_request(const char *method,
                               const char *url, const char **headers, int header_count,
                               const char *body, int body_len) {
+    if (g_kwcc_http_shutdown) {
+        log_warn("http: rejecting request, module is shutting down");
+        return NULL;
+    }
+
     kwcc_base_defer_cleanup_t *dc = kwcc_base_defer_cleanup_create();
 
     /* 1. Find free slot */
@@ -263,20 +270,34 @@ void kwcc_http_cancel(const char *req_id) {
     if (!req_id) return;
     kwcc_http_req_t *req = kwcc_http_req_find(req_id);
     if (!req) return;
-    kill(req->pid, SIGTERM);
-    /* publish cancel event so JS side can clean up */
+    if (req->pipe_read_fd < 0) return;   /* 已取消，跳过（防连续 cancel） */
+
+    /* 逻辑放弃（Level 1）：只关 pipe → curl 写 pipe 失败 SIGPIPE 自然退出。
+     * 不发 SIGTERM，不立即 cleanup（消除 kill 后 WNOHANG 竞态清 pid 的写法缺陷）。
+     * in_use 保持 1，pid 保留 → 回收交给 check_progress 自治 / kwcc_http_shutdown。 */
+    kwcc_io_unregister(req->pipe_read_fd);
+    close(req->pipe_read_fd);
+    req->pipe_read_fd = -1;
+
+    /* publish cancel event so JS side can reject the promise */
     char topic[128];
     char safe[128];
     snprintf(topic, sizeof(topic), "http/cancel/%s", req_id);
     kwcc_base_topic_sanitize(safe, sizeof(safe), topic);
     kwcc_bus_publish(safe, NULL, 0);
-    kwcc_http_cleanup(req);
 }
 
 void kwcc_http_check_progress(void) {
     for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
         kwcc_http_req_t *req = &g_kwcc_http_reqs[i];
         if (!req->in_use) continue;
+
+        /* cancelled slot：自治 reap（不 dispatch——JS 已收到 cancel reject，
+         * slot 回收是 C 侧内部操作，不发任何 bus 事件） */
+        if (req->pipe_read_fd < 0) {
+            kwcc_http_reap_cancelled_slot(req);
+            continue;
+        }
 
         /* Zombie reclamation: check if child has exited without us noticing */
         if (req->pid > 0) {
@@ -335,6 +356,7 @@ void kwcc_http_check_progress(void) {
 
 static void kwcc_http_on_read(int fd, void *user_data) {
     kwcc_http_req_t *req = (kwcc_http_req_t *)user_data;
+    if (req->pipe_read_fd < 0) return;   /* 已取消，pipe 已关，防御残余事件 */
     char buf[4096];
     ssize_t n;
 
@@ -510,9 +532,10 @@ void kwcc_http_cleanup_by_req_id(const char *req_id) {
 /* ── Internal: cleanup request ──────────────────────────────── */
 
 static void kwcc_http_cleanup(kwcc_http_req_t *req) {
-    /* Unregister from I/O reactor first, then close fd */
-    kwcc_io_unregister(req->pipe_read_fd);
+    /* Unregister from I/O reactor first, then close fd.
+     * unregister 必须在 >= 0 检查内：cancelled slot（fd=-1）cleanup 时不能对 -1 操作 */
     if (req->pipe_read_fd >= 0) {
+        kwcc_io_unregister(req->pipe_read_fd);
         close(req->pipe_read_fd);
         req->pipe_read_fd = -1;
     }
@@ -530,5 +553,46 @@ static void kwcc_http_cleanup(kwcc_http_req_t *req) {
         req->headers[i] = NULL;
     }
     memset(req, 0, sizeof(kwcc_http_req_t));
+}
+
+/* ── Internal: reap one cancelled slot (pipe closed, child may still run) ──
+ * 单一实现两处使用：check_progress 自治回收（每帧 WNOHANG 尝试）+ shutdown Phase 2 前置。
+ * 子进程还在跑返回 0；已退出（或 pid 已无效）回收并返回 1。不发 bus 事件。 */
+static int kwcc_http_reap_cancelled_slot(kwcc_http_req_t *req) {
+    if (req->pid > 0) {
+        int status;
+        if (waitpid(req->pid, &status, WNOHANG) <= 0) return 0;
+    }
+    kwcc_http_cleanup(req);
+    return 1;
+}
+
+/* ── Public: full shutdown（main.m cleanup / 信号路径直接调用，无服务层）──
+ * SIGTERM + waitpid(阻塞) 足够：curl 可靠响应 SIGTERM，无需 grace period / SIGKILL。 */
+void kwcc_http_shutdown(void) {
+    if (g_kwcc_http_shutdown) return;   /* 幂等（cleanup + 信号双重触发安全） */
+    g_kwcc_http_shutdown = 1;
+
+    /* Phase 1: 关闭所有 pipe + 发 SIGTERM（cancelled slot 的 pipe 已关，仅补 SIGTERM） */
+    for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
+        kwcc_http_req_t *req = &g_kwcc_http_reqs[i];
+        if (!req->in_use) continue;
+        if (req->pipe_read_fd >= 0) {
+            kwcc_io_unregister(req->pipe_read_fd);
+            close(req->pipe_read_fd);
+            req->pipe_read_fd = -1;
+        }
+        if (req->pid > 0) kill(req->pid, SIGTERM);
+    }
+
+    /* Phase 2: waitpid 阻塞回收所有子进程 */
+    for (int i = 0; i < KWCC_HTTP_MAX_REQS; i++) {
+        kwcc_http_req_t *req = &g_kwcc_http_reqs[i];
+        if (!req->in_use || req->pid <= 0) continue;
+        waitpid(req->pid, NULL, 0);
+        kwcc_http_cleanup(req);
+    }
+
+    log_info("http: shutdown complete");
 }
 

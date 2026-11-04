@@ -1,5 +1,6 @@
 #define SOKOL_GLCORE
 #define SOKOL_IMPL
+#include <signal.h>
 #include "sokol/sokol_app.h"
 #include "sokol/sokol_gfx.h"
 #include "sokol/sokol_glue.h"
@@ -148,6 +149,14 @@ static void kwcc_render_mu_commands(void) {
     if (first) { log_info("render: %d commands", count); first = 0; }
 }
 
+/* kill 信号（SIGINT/SIGTERM）不走 Sokol cleanup_cb，需要直接回收 C 侧资源。
+ * 已知权衡：handler 内 log/fprintf 非 async-signal-safe，单线程桌面应用窗口极小，接受。 */
+static void kwcc_on_signal(int sig) {
+    log_info("received signal %d, forcing http shutdown", sig);
+    kwcc_http_shutdown();
+    _exit(sig);   /* _exit 而非 exit：跳过 atexit/stdio flush，防止重入 cleanup */
+}
+
 static void init(void) {
     g_log_fp = fopen("kwcc.log", "w");
     if (g_log_fp) {
@@ -176,6 +185,8 @@ static void init(void) {
     kwcc_mempool_init();       /* 0. memory pool */
     kwcc_io_init();            /* 1. I/O reactor */
     kwcc_http_init();          /* 2. HTTP process engine */
+    signal(SIGINT, kwcc_on_signal);
+    signal(SIGTERM, kwcc_on_signal);
     g_js_ctx = kwcc_create_js();    /* 3. JSContext + config init */
     kwcc_ui_bus_set_js_ctx(g_js_ctx);  /* set JSContext for UI bus */
     kwcc_ui_init();               /* 2. microui text callbacks */
@@ -217,12 +228,13 @@ static void frame(void) {
 
 static void cleanup(void) {
     log_info("=== kwcc exiting ===");
-    if (g_log_fp) { fflush(g_log_fp); fclose(g_log_fp); g_log_fp = NULL; }
+    kwcc_http_shutdown();   /* C 侧子进程/pipe 全量回收（此时日志仍打开） */
     if (g_kwcc_vg) { nvgDeleteGL3(g_kwcc_vg); g_kwcc_vg = NULL; }
     kwcc_destroy_js(g_js_ctx);
     kwcc_ui_free();
     kwcc_mempool_shutdown();
     sg_shutdown();
+    if (g_log_fp) { fflush(g_log_fp); fclose(g_log_fp); g_log_fp = NULL; }  /* 移到末尾：清理过程日志可落盘 */
 }
 
 static void input(const sapp_event *ev) {

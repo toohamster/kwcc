@@ -5,6 +5,14 @@
 > v2 核心变化：职责收敛为仅 force_all，runtime 回收交给模块自治，服务零依赖（不再依赖 bus）。
 > HTTP 接入细节见 [http-shutdown-implementation-plan.md](http-shutdown-implementation-plan.md)
 
+> **演进（2026-11-04）：服务整体暂缓（方案一降级）**
+>
+> 立项校验规则应用于服务自身：当前真实持有 C 侧资源的模块只有 HTTP 一个，服务（注册表/逆序调度/
+> is_exiting）是为假设性客户预付的架构税；实测孤儿 curl 由 launchd 兜底，原始"僵尸进程"严重度被高估。
+> 决策：**不实施本规范**，main.m 直接调用 `kwcc_http_shutdown()`（见 implementation plan 演进记录）。
+> 本规范保留为**泛化蓝图**：出现第二个真实 C 侧资源模块时按此实施（entry 契约、is_exiting 防御、
+> 退出时序、Cancel 语义章节均继续有效）。
+
 ---
 
 ## 背景

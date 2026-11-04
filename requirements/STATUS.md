@@ -28,8 +28,8 @@
 | 19 | `kwcc-base-defer-cleanup.md` | ✅ 已完成 | 独立基础设施，无前置依赖 | 14/14 |
 | 20 | `js-module-dispatch-plan.md` | ✅ 已完成 | module-grouped 两级分发，ops 测试 74/74 | 74/74 |
 | 21 | `js-bridge-dispatch-http-progress.md` | ✅ 已完成 | #17/#18/#20 进度汇总 | — |
-| 22 | `lifecycle-shutdown-service-spec.md` | ⏳ 设计完成（v2 窄边界），待实施 | v2：仅 force_all，runtime 回收模块自治，取代 v1 runtime 路径 | — |
-| 22b | `http-shutdown-implementation-plan.md` | ⏳ 设计完成（v2），待实施 | HTTP 接入 v2：cancel 逻辑放弃 + check_progress 自治回收 | — |
+| 22 | `lifecycle-shutdown-service-spec.md` | ⏸ 服务暂缓（泛化蓝图） | 方案一降级：单客户世界不建服务，校验规则应用于服务自身 | — |
+| 22b | `http-shutdown-implementation-plan.md` | ✅ 方案一完成 | cancel 逻辑放弃 + 自治 reap + shutdown 直调（服务壳移除），L1 11/11 + 实机 kill 冒烟 | 11/11 |
 | 22c | `lifecycle-shutdown-v2-discussion.md` | ✅ 讨论闭环 | v1→v2 演进讨论（7 项），决策沉淀到 #22/#22b | — |
 
 ## 方案依赖关系

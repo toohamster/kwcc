@@ -9,10 +9,20 @@
 
 | Part | 内容 | 状态 |
 |------|------|------|
-| Part 1 | lifecycle_shutdown 服务实现 | ⏳ 待实施 |
-| Part 2 | HTTP 模块接入 | ⏳ 待实施 |
-| Part 3 | main.m 衔接（init/cleanup/signal） | ⏳ 待实施 |
-| 测试 | 服务 S1-S6 + HTTP H1-H11 + 集成 E1-E3 | ⏳ 待实施 |
+| Part 1 | lifecycle_shutdown 服务实现 | ⏸ **暂缓**（演进记录 1：服务降级为直接调用，本 Part 保留为泛化蓝图） |
+| Part 2 | HTTP 模块接入 | 🔄 按方案一实施（HTTP 侧改动全部保留） |
+| Part 3 | main.m 衔接 | 🔄 简化版（直接调 kwcc_http_shutdown，无服务 init/register） |
+| 测试 | 服务 S1-S6 作废；HTTP H 系列调整（H8 is_exiting 防御随服务取消作废） | ⏳ |
+
+## 演进记录
+
+> **演进（2026-11-04）：服务降级为直接调用（方案一）**
+>
+> 触发：立项校验规则（"系统能力只有在阻塞真实 UI 应用时才做"）被应用于 shutdown v2 自身，发现服务的真实客户只有 HTTP 一个（io 的 fd 随进程退出由 OS 关闭，bus/mempool 纯内存），注册表/逆序调度/is_exiting 是为假设性未来客户预付的架构税。且实测表明原始"僵尸进程"严重度被高估：macOS launchd 收养并回收孤儿进程，本会话多次冒烟测试从未观察到残留 curl——真实残余危害仅"退出后瞬时孤儿 curl（≤ --max-time）"。
+>
+> 变更：**不建 kwcc_lifecycle_shutdown 服务**。main.m 的 cleanup() 与信号处理函数直接调用 `kwcc_http_shutdown()`。HTTP 侧改动（cancel 逻辑放弃、check_progress 自治 reap、reap_cancelled_slot、unregister(-1) 修复、on_read 防御、g_shutdown 拒新请求）全部保留实施。
+>
+> 泛化触发条件：出现第二个真实持有 C 侧资源的模块时，按本方案 Part 1 + 服务规范 v2 把直接调用泛化为服务（蓝图现成，届时抽象有真实依据）。
 
 ---
 
