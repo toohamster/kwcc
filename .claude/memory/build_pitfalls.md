@@ -134,11 +134,13 @@ const char *s = JS_ToCString(ctx, argv[i], &cbuf);
 
 ## 当前未解决的问题
 
-1. **窗口 X 关闭事件不工作**（store-data-flow-v2 阶段四）
-   - **现象**：点击 X 按钮不崩溃，但窗口不关闭（visible 未更新）
-   - **根因**：`on_window_close` 收到的是 title 字符串，JS handler 订阅的是 topic（如 "test/window"）。dispatch 的 topic 不对，没有到达订阅者
-   - **已分析的方案**：在 `beginWindow` handler 中计算 `mu_Id wid = mu_get_id(&g_mu, title, strlen(title))` 存入 `g_topic_map`（id → topic 映射），`on_window_close` 中用 title 算出 wid 查找 topic 再 dispatch
-   - **暂不处理**：v2 方案完成后统一处理
+（无 —— 2026-11-04）
+
+**已解决（2026-11-04）：窗口 X 关闭事件**
+- 原 bug：`on_window_close` 收到 title 而 JS 订阅 topic，dispatch 不达
+- 修复后暴露第二层潜伏缺陷：可见性挡板只拦 begin/endWindow，body widget 落 microui 空栈 → expect abort（用户实机 microui.c:261 实锤）
+- 修复：title→topic map + widget 级挡板补全（`kwcc_ui_in_intercepted_window`，11 个 handler 入口吞调用）
+- 详细案例：`module_dev_experience.md`「UI 窗口挡板 / X 关闭事故」；测试：`tests/TESTING_WINDOW_CLOSE.md`（L1 7/7 + L2 用户验收通过）
 
 （之前记录的 JS_Eval 崩溃已修复，kwcc 二进制可以正常运行）
 
@@ -176,6 +178,19 @@ lldb --batch \
 - `rsi`, `rdx`, `rcx` = 后续整型参数
 - `xmm0`-`xmm3` = float 参数
 - `thread step-inst` 跳过 prologue 后可检查栈帧
+
+### 程序异常终止的排查要点（2026-11-04 X 关闭事故沉淀）
+
+1. **abort/断言输出走 stderr，不进 kwcc.log**——microui 的 `expect` = fprintf(stderr)+abort()。
+   日志文件的终止点不是死亡点。排查"程序莫名退出"时，**第一件事问用户要终端完整输出**，
+   `Fatal error: <file>:<line>: assertion '...' failed` 那行就是死亡点坐标
+2. **"死代码激活"模式**：修复 A 后出现"新故障"，先怀疑 B 是被激活的既有潜伏缺陷，
+   不要先怀疑修复本身或急着回退。判断依据：新故障的执行路径在修复前是否从未被走到过
+3. **因果链分析法（事实已在手时，优先于构造复现）**：从已确立的事实点（如"dispatch 已成功"）
+   沿代码路径逐环走查到崩溃点，每一环要代码行号实锤；无实锤的环节标注为推断，
+   等实证（终端输出/lldb bt）修正。完整案例见 module_dev_experience.md「UI 窗口挡板」节
+4. **无断言保护的栈访问静默越界**：实际 abort 点 ≠ 最早出错的调用点
+   （本案 layoutRow 的 get_layout 先静默越界，label 才引爆 261 行断言）
 
 ### C 函数调用 ABI 陷阱
 

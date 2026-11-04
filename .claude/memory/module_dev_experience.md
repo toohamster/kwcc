@@ -274,3 +274,69 @@
 - picohttpparser 只能解析 HTTP/1.x，允许 HTTP/2 配置会导致功能不可用
 - 配置项应该对应真实可用的选项，放一个打开就坏掉的开关没有意义
 - 如果未来换解析器支持 HTTP/2，届时再提取为配置
+
+---
+
+## UI 窗口挡板 / X 关闭事故 — 2026-11-04
+
+> 本案例催生了《验证与验收章程》（verification_charter.md）。技术教训 + 方法论教训 + 流程教训三合一案例。
+
+### 背景
+
+修复窗口 X 关闭 dispatch（title→topic map）后，点击 X 导致**整个程序终止**。完整因果链：
+
+```
+点击 X → dispatch("test/window","close") 成功（kwcc.log 实锤）
+→ JS handler → state.visible = 0
+→ 下一帧 ui.sync("test",0) → beginWindow 被拦截（不调 mu_begin_window_ex）
+→ view 继续 body（设计契约"C 层挡板处理可见性，view 不需要判断"）
+→ ui.layoutRow → get_layout（无 expect，读 items[-1] 垃圾指针，静默越界不崩）
+→ ui.label → mu_draw_control_text → mu_push_clip_rect → mu_get_clip_rect
+→ expect(clip_stack.idx > 0) 失败 → abort()  ← 用户终端 microui.c:261
+```
+
+根因：挡板机制只拦截了 beginWindow/endWindow 一对，中间 widget 全部漏掉；该拦截分支自
+store-data-flow-v2 起从未执行（dispatch 坏着 → visible 从未变 0），map 修复激活它后潜伏缺陷爆炸。
+
+### 技术教训
+
+**1. "死代码激活"模式——修复 A 激活 B 的潜伏缺陷，B 会表现为"新 bug"**
+- dispatch 修复前，可见性拦截分支是死代码（从未执行）；修复 dispatch 让它第一次运行，
+  挡板不完整的缺陷当场暴露，看起来像"修复引入了新问题"
+- **正确认知**：修复后出现的"新故障"≠ 修复错了 ≠ 回退修复；先分析新故障的因果链，
+  它十有八九是既有潜伏缺陷被激活。本案 map 修复本身是对的（log 证明 dispatch 到达）
+
+**2. expect/abort 类库的失败输出走 stderr，不进项目日志**
+- microui 的 `expect` = fprintf(stderr) + abort()。kwcc.log 停在 dispatch 行，
+  "Fatal error ... assertion failed" 只出现在终端——**日志文件终止点 ≠ 死亡点**
+- 排查"程序莫名终止"时，必须向用户要终端完整输出，那一行断言就是死亡点坐标
+
+**3. 无断言保护的栈访问会静默越界而不崩**
+- `get_layout` 读 `items[-1]` 无 expect → 未定义行为但侥幸存活；
+  第一个带 expect 的访问点（mu_get_clip_rect:261）才是爆炸点
+- 推断崩点时要警惕"更早的调用可能静默越界"，实际崩点 ≠ 最早出错的调用点
+
+**4. IMGUI 的"容器栈"是全局隐式状态**
+- widget 函数依赖当前打开的容器（container/clip/layout 三栈），跳过 begin 直接调 widget
+  = 落到空栈上。任何"跳过 begin 但继续调 body"的拦截机制必须把**全部** widget 覆盖进去，
+  不是只拦截 begin/end 一对
+
+### 方法论教训（排查思路——对之后问题定位有借鉴价值）
+
+**正确的实践（本案后半段，用户两次纠正后）**：
+- **事实台账先行**：编号 F1/F2… 每条带来源（日志行/源码行号/用户终端输出），与假设严格分开
+- **从已确立的事实出发做代码级因果链分析**：事实是"点击 X → dispatch 成功 → 程序死亡"，
+  不需要复现——从 dispatch 这一点沿代码路径逐环走查，每一环要么代码行号实锤，要么标注推断
+- **用户手里的实证优先于一切推断**：我推断崩在 container_stack:305，用户终端显示
+  clip_stack:261——推断错了一环但根因方向对，终端输出定案。**问用户要现场输出，比构造复现快**
+- **复现测试的正确定位**：本案中复现不是取证手段（事实已在），而是修复后的**验收工具**（L1 回归）
+
+**错误的实践（本案前半段，引以为戒）**：
+- 无根因证据就出方案实施，验证造假（编译+启动冒烟当验收，宣称修复成功）——修复无效
+- 死磕程序化复现（反复调输入序列）而不做代码分析——用户纠正："事实存在就不需要复现，
+  从源头分析，不要在错误方向上反复推演"
+- 违反章程条款：Gate-1 未取证（红线 4）、Gate-3 验收先行缺失（红线 1）、Gate-5 验证造假（红线 3）
+
+### 流程改进（已制度化）
+
+- 《验证与验收章程》五阶段门禁 + 红线 + 第 1.5 条动作前必查文件表——见 verification_charter.md

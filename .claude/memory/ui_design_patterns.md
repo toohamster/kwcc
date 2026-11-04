@@ -245,10 +245,24 @@ ui.beginWindow("Calculator", 200, 80, 280, 350, 64);
 
 ### 新增 UI 方法的标准流程
 
+0. **C 层**：handler 入口加挡板检查（固定纪律，2026-11-04 方案 A 确立）：
+   ```c
+   if (kwcc_ui_in_intercepted_window()) { return <契约默认值>; }
+   ```
+   契约默认值：button→`JS_NewBool(0)`、slider→传入值、其余→`JS_UNDEFINED`。
+   不加的后果：窗口被可见性挡板拦截时，widget 调用落到 microui 空 container/clip/layout 栈 → expect 断言 → abort
 1. **C 层**（`kwcc_ui.c`）：在 `js_ui_dispatch` 添加 `strcmp` 分支
 2. **C 层**：调用对应的 microui/NanoVG 函数
 3. **JS wrapper**（`kwcc_register_ui` 中的 `methods_js`）：添加 JS 方法定义
 4. **JS 业务层**（app 代码）：调用新方法
+
+### 可见性模型约定（模块 = 可见性单元，2026-11-04 确立）
+
+- 可见性粒度是**模块级**：`onFrame` 每模块自动 `ui.sync(key, state.visible)`，C 层挡板按模块开关窗口
+- 同一模块的多个窗口**共享模块级开关**：任一窗口的 X → close handler 写 `state.visible` → 模块的窗口全部隐藏。这是语义，不是缺陷
+- **需要独立关闭的窗口 → 拆成独立模块**（如 svg_red / svg_blue）。模块 = state + view + 可见性单元
+- 窗口级关闭参数（beginWindow 第 8 参）为预留扩展方向，待真实需求出现再实现（向后兼容，未实现）
+- 挡板覆盖：beginWindow（含嵌套）/ endWindow / 全部 widget（方案 A）；字体方法不拦（全局资源非窗口域）
 
 ### 参数提取模板
 

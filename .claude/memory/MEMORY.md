@@ -20,6 +20,11 @@
 7. **⚠️ 遇到问题立刻问用户，绝对不能卡着假死** — 这是行为红线，违反即是严重事故
 8. **⚠️ 严格按方案实现，绝不随意发挥** — 方案外的设计决策必须先讨论确认
 9. **⚠️ 代码回退用 revert commit，禁止 reset --hard + force push** — 保留完整历史，不覆盖远程
+10. **⚠️ 验证与验收章程（每个任务强制执行）** — 详见 [verification_charter.md](verification_charter.md)
+    - 结论必须带证据标注：[事实-来源] / [假设-待验证]，假设验证前禁止进方案和代码
+    - 五阶段门禁：Gate-0 复现 → Gate-1 根因取证 → Gate-2 方案审定 → Gate-3 验收标准先行 → Gate-4 实施即验 → Gate-5 双级验收后销账
+    - 验收分级：L1 自动验收贴实际输出；L2 用户验收（GUI 点击/视觉）必须用户执行
+    - 红线：无验收标准宣告完成、编译/启动冒充行为验收、验证造假、假设驱动方案
 
 ## 记忆文件索引
 
@@ -136,6 +141,7 @@
 - Facade+Plugin 教训：`kwcc_js_val_t=JSValue`（不是 uint64_t）、隔离是行为层面、bug 误判别怀疑设计、方案外决策必须先讨论
 - Module dispatch 教训：公共入口函数 NULL 防御
 - HTTP 教训：picohttpparser HTTP/1.x 硬约束、bus 订阅 pattern、req_id 生命周期、curl argv 格式、cleanup 时序
+- UI 挡板事故（2026-11-04）：**死代码激活模式**（修复 A 激活 B 的潜伏缺陷）、abort 输出走 stderr 不进日志、因果链分析法（事实在手优先于复现）、事实台账实践——催生验证章程
 
 ### [C 语言模块开发模式](c_module_patterns.md)
 - **模式 A**：模块前缀 + 静态全局 — 单例、零开销、文件级内聚
@@ -144,6 +150,7 @@
 - 项目中的实际应用对照表
 
 ### [⚠️ 工作流规则（强制遵守）](workflow_rules.md)
+### [⚠️ 验证与验收章程（五阶段门禁 + 红线，每任务强制）](verification_charter.md)
 
 ## 开发规则（来自 CLAUDE.md）
 

@@ -29,6 +29,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    - 开发计划必须围绕已确认的方案进行。
    - 方案外的阻塞性问题需先讨论新方案，确认后再调整计划。
 
+3. **验证与验收章程（每个任务全生命周期强制，详见 `.claude/memory/verification_charter.md`）**
+   - **证据原则**：结论必须带证据标注（[事实-来源] / [假设-待验证]）；假设验证前禁止进方案和代码；崩溃类问题必须 lldb 拿 bt
+   - **五阶段门禁**：Gate-0 问题可复现 → Gate-1 根因取证 → Gate-2 方案审定（改动↔验收映射）→ Gate-3 验收标准先行（先定义"怎么算通过"再动手）→ Gate-4 实施即验 → Gate-5 双级验收后才能销账
+   - **验收分级**：L1 自动验收必须贴实际输出；L2 用户验收（GUI 点击/视觉/交互）必须由用户执行
+   - **红线（违反 = 严重事故）**：无验收标准宣告完成；以编译/启动/冒烟冒充行为验收；验证失败仍宣称成功；假设未验证进方案或代码
+   - **失败协议**：修复无效如实报告"未解决"并回 Gate-1；连续 2 次修复无效强制停止汇报
+
 ## Project Overview
 
 **kwcc** is a lightweight, self-contained desktop UI engine for macOS 10.14+. Architecture: **mquickjs** (scripting) -> **microui** (IMGUI layout) -> **NanoVG** (vector rendering) -> **Sokol** (windowing/GFX). Zero external library dependencies — all third-party source is downloaded via `setup.sh` into `./deps/`.
@@ -158,7 +165,7 @@ mquickjs is a stripped-down QuickJS with mostly ES5 support. Key findings from s
 
 ## Known Issues
 
-1. **Window X close event** — `on_window_close` receives title string but JS handlers subscribe to topic (e.g. "test/window"). Dispatch mismatch means close doesn't reach subscribers. Fix deferred until store-data-flow-v2 complete.
+（无 — 窗口 X 关闭已于 2026-11-04 修复：title→topic map + 可见性挡板 widget 级补全（方案 A），L1 7/7 + L2 用户验收通过。完整案例与教训见 `.claude/memory/module_dev_experience.md`「UI 窗口挡板 / X 关闭事故」。）
 
 ## SVG Caching
 
