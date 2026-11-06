@@ -41,4 +41,14 @@ enum {
 #define log_error(...) log_log(_L_ERROR, __FILE__, __LINE__, __VA_ARGS__)
 #define log_fatal(...) log_log(_L_FATAL, __FILE__, __LINE__, __VA_ARGS__)
 
+/* 诊断输出（与正式输出两种构建形态）：
+ *   - KWCC_DEBUG 构建（make DEBUG=1）：kwcc_diag = log_debug，诊断插桩编译生效
+ *   - Release 构建（默认 make）：kwcc_diag 编译剔除，零成本零噪音
+ * 诊断插桩一律用 kwcc_diag，正式运行日志（INFO 级）用 log_info */
+#ifdef KWCC_DEBUG
+#define kwcc_diag(...) log_debug(__VA_ARGS__)
+#else
+#define kwcc_diag(...) ((void)0)
+#endif
+
 #endif

@@ -12,6 +12,7 @@
 
 #include "kwcc.h"
 #include "microui/microui.h"
+#include "kwcc_edit_appkit.h"
 #include "llog.h"
 
 #define NANOSVG_IMPLEMENTATION
@@ -191,6 +192,7 @@ static void init(void) {
     kwcc_ui_bus_set_js_ctx(g_js_ctx);  /* set JSContext for UI bus */
     kwcc_ui_init();               /* 2. microui text callbacks */
     kwcc_register_ui(g_js_ctx);     /* 3. UI methods */
+    kwcc_edit_init(&kwcc_edit_appkit_ops, sapp_macos_get_window());  /* 4. edit control host */
 
     /* Load and eval main.js once during init (register modules, init store/events) */
     g_js_text = kwcc_load_file("app/main.js");
@@ -232,6 +234,7 @@ static void cleanup(void) {
     if (g_kwcc_vg) { nvgDeleteGL3(g_kwcc_vg); g_kwcc_vg = NULL; }
     kwcc_destroy_js(g_js_ctx);
     kwcc_ui_free();
+    kwcc_edit_shutdown();
     kwcc_mempool_shutdown();
     sg_shutdown();
     if (g_log_fp) { fflush(g_log_fp); fclose(g_log_fp); g_log_fp = NULL; }  /* 移到末尾：清理过程日志可落盘 */

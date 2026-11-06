@@ -11,5 +11,6 @@
 #include "kwcc_js.h"
 #include "kwcc_io.h"
 #include "kwcc_http.h"
+#include "kwcc_edit.h"
 
 #endif

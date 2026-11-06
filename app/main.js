@@ -71,6 +71,8 @@ loadJs("app/modules/examples/calc/calc.js");
 loadJs("app/modules/examples/calc/calc_view.js");
 loadJs("app/modules/examples/svg/svg.js");
 loadJs("app/modules/examples/svg/svg_view.js");
+loadJs("app/modules/examples/form/form.js");
+loadJs("app/modules/examples/form/form_view.js");
 
 /* ── run init ── */
 initStore();

@@ -11,6 +11,7 @@
 #include "kwcc_base.h"
 #include "kwcc_js.h"
 #include "kwcc_ui_bus.h"
+#include "kwcc_edit.h"
 
 #include "nanosvg/nanosvg.h"
 
@@ -94,6 +95,42 @@ static int kwcc_ui_in_intercepted_window(void) {
     return g_kwcc_ui_win_top > 0 && g_kwcc_ui_win_intercepted[g_kwcc_ui_win_top - 1];
 }
 
+/* multiline 展示态滚动（per-label）：内容超出字段高时 wheel 查看。
+ * 无原生滚动条视觉（thumb 绘制属后续增强）；offset 语义 = 已下移查看量 */
+#define KWCC_UI_EDIT_SCROLL_MAX 16   /* 同屏多行字段个位数；满时 warn 不静默 */
+typedef struct {
+    char label[64];
+    int  offset;
+} kwcc_ui_edit_scroll_t;
+static kwcc_ui_edit_scroll_t g_kwcc_ui_edit_scroll[KWCC_UI_EDIT_SCROLL_MAX];
+static int g_kwcc_ui_edit_scroll_count = 0;
+
+static int kwcc_ui_edit_scroll_get(const char *label) {
+    for (int i = 0; i < g_kwcc_ui_edit_scroll_count; i++) {
+        if (strcmp(g_kwcc_ui_edit_scroll[i].label, label) == 0) {
+            return g_kwcc_ui_edit_scroll[i].offset;
+        }
+    }
+    return 0;
+}
+
+static void kwcc_ui_edit_scroll_set(const char *label, int offset) {
+    for (int i = 0; i < g_kwcc_ui_edit_scroll_count; i++) {
+        if (strcmp(g_kwcc_ui_edit_scroll[i].label, label) == 0) {
+            g_kwcc_ui_edit_scroll[i].offset = offset;
+            return;
+        }
+    }
+    if (g_kwcc_ui_edit_scroll_count < KWCC_UI_EDIT_SCROLL_MAX) {
+        kwcc_ui_edit_scroll_t *e = &g_kwcc_ui_edit_scroll[g_kwcc_ui_edit_scroll_count++];
+        snprintf(e->label, sizeof(e->label), "%s", label);
+        e->offset = offset;
+    } else {
+        log_warn("ui: edit scroll map full (%d), scroll for '%s' ignored",
+                 KWCC_UI_EDIT_SCROLL_MAX, label);
+    }
+}
+
 /* ── Per-frame begin (UI state only; bus reset handled by kwcc_bus) ── */
 
 void kwcc_begin_frame(void) {
@@ -101,6 +138,7 @@ void kwcc_begin_frame(void) {
     g_kwcc_ui_sync_count = 0;
     g_kwcc_ui_win_top = 0;
     g_kwcc_ui_win_topic_count = 0;
+    kwcc_edit_begin_frame();   /* 编辑中字段缺报 → 自动 commit（窗口关闭/模块隐藏） */
 }
 
 static void kwcc_on_window_close(mu_Context *ctx, const char *title) {
@@ -544,6 +582,89 @@ static JSValue js_ui_dispatch(JSContext *ctx, const char *method,
         kwcc_queue_svg(data, is_inline, (float)ix, (float)iy, (float)iw, (float)ih);
         return JS_UNDEFINED;
     }
+    if (strcmp(method, "textbox") == 0) {
+        if (kwcc_ui_in_intercepted_window()) { return JS_UNDEFINED; }
+        JSCStringBuf lbuf, vbuf, tbuf;
+        const char *label = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &lbuf);
+        const char *value = JS_ToCString(ctx, argc > 1 ? argv[1] : JS_UNDEFINED, &vbuf);
+        const char *topic = JS_ToCString(ctx, argc > 2 ? argv[2] : JS_UNDEFINED, &tbuf);
+        int multiline = 0;
+        if (argc > 3) JS_ToInt32(ctx, &multiline, argv[3]);
+        if (!label) return JS_UNDEFINED;
+
+        mu_Rect r = mu_layout_next(&g_kwcc_mu);
+        mu_Id id = mu_get_id(&g_kwcc_mu, label, strlen(label));
+        mu_update_control(&g_kwcc_mu, id, r, 0);
+
+        int editing_here = kwcc_edit_is_editing() && kwcc_edit_editing_label() &&
+                           strcmp(kwcc_edit_editing_label(), label) == 0;
+
+        /* 绘制：字段背景 + 值文本（编辑态原生控件覆盖在上层，GL 不重复画文本） */
+        mu_Color bg = editing_here ? (mu_Color){40, 60, 95, 255}
+                                   : (mu_Color){52, 52, 58, 255};
+        mu_draw_rect(&g_kwcc_mu, r, bg);
+        if (!editing_here) {
+            if (multiline && g_kwcc_vg) {
+                /* 多行展示：nvgText 是单行绘制（\n 不分行——nvgText→fonsTextIterNext
+                 * 无换行处理，fontstash.h:1432-1458 取证；行分解 API 需应用自调）。
+                 * 按字段宽自行分行（rows 上限 64：栈 ~2.5KB 可忽略，更长内容需
+                 * 滚动容器重构属远期），逐行 push 文本命令，顶对齐；
+                 * 内容超高时 wheel 滚动查看（无原生滚动条视觉，边界已注明）。
+                 * vg NULL（无渲染环境）→ 跳过文本绘制（字体度量不可用） */
+                nvgFontFace(g_kwcc_vg, kwcc_get_font());
+                nvgFontSize(g_kwcc_vg, 14);   /* 与渲染端 MU_COMMAND_TEXT 一致 */
+                float asc, desc, lh;
+                nvgTextMetrics(g_kwcc_vg, &asc, &desc, &lh);
+                NVGtextRow rows[64];
+                int nrows = nvgTextBreakLines(g_kwcc_vg, value ? value : "", NULL,
+                                              (float)(r.w - 10), rows, 64);
+                int content_h = (int)(asc - desc + lh * (float)nrows) + 8;
+                int max_off = content_h > r.h ? content_h - r.h : 0;
+                int off = kwcc_ui_edit_scroll_get(label);
+                if (mu_mouse_over(&g_kwcc_mu, r) && g_kwcc_mu.scroll_delta.y != 0) {
+                    off -= g_kwcc_mu.scroll_delta.y;   /* scroll_delta 是 mu_Vec2 */
+                    if (off < 0) off = 0;
+                    if (off > max_off) off = max_off;
+                    kwcc_ui_edit_scroll_set(label, off);
+                }
+                mu_push_clip_rect(&g_kwcc_mu, r);
+                for (int i = 0; i < nrows; i++) {
+                    float y = r.y + asc + 3 + lh * (float)i - (float)off;
+                    if (y + lh < (float)r.y || y > (float)(r.y + r.h)) continue;
+                    mu_draw_text(&g_kwcc_mu, NULL, rows[i].start,
+                                 (int)(rows[i].end - rows[i].start),
+                                 (mu_Vec2){r.x + 5, y},
+                                 g_kwcc_mu.style->colors[MU_COLOR_TEXT]);
+                }
+                mu_pop_clip_rect(&g_kwcc_mu);
+            } else {
+                mu_draw_control_text(&g_kwcc_mu, value ? value : "", r,
+                                     MU_COLOR_TEXT, 0);
+            }
+        }
+
+        /* 命中 + 可见性（与 clip 相交） */
+        int clicked = mu_mouse_over(&g_kwcc_mu, r) &&
+                      (g_kwcc_mu.mouse_pressed == MU_MOUSE_LEFT);
+        mu_Rect clip = mu_get_clip_rect(&g_kwcc_mu);
+        int visible = (r.x < clip.x + clip.w && r.x + r.w > clip.x &&
+                       r.y < clip.y + clip.h && r.y + r.h > clip.y);
+
+        kwcc_edit_report_field(label, value ? value : "", topic ? topic : "",
+                               multiline, (float)r.x, (float)r.y,
+                               (float)r.w, (float)r.h, clicked, visible);
+        return JS_UNDEFINED;
+    }
+    if (strcmp(method, "textboxValue") == 0) {
+        JSCStringBuf lbuf;
+        const char *label = JS_ToCString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED, &lbuf);
+        if (!label) return JS_UNDEFINED;
+        const char *cl = kwcc_edit_committed_label();
+        if (cl && strcmp(cl, label) == 0 && kwcc_edit_committed_value()) {
+            return JS_NewString(ctx, kwcc_edit_committed_value());
+        }
+        return JS_UNDEFINED;
+    }
     return JS_UNDEFINED;
 }
 
@@ -633,7 +754,9 @@ void kwcc_register_ui(JSContext *ctx) {
         "ui.loadFont = function(n,p) { kwcc_ui('loadFont',n,p); };\n"
         "ui.setFont = function(n) { kwcc_ui('setFont',n); };\n"
         "ui.loadFontDir = function(d) { kwcc_ui('loadFontDir',d); };\n"
-        "ui.svg = function(p,x,y,w,h) { kwcc_ui('svg',p,x||0,y||0,w||100,h||100); };\n";
+        "ui.svg = function(p,x,y,w,h) { kwcc_ui('svg',p,x||0,y||0,w||100,h||100); };\n"
+        "ui.textbox = function(l,v,t,multi) { kwcc_ui('textbox', l, v, t||'', multi?1:0); };\n"
+        "ui.textboxValue = function(l) { return kwcc_ui('textboxValue', l); };\n";
     JSValue meth_result = JS_Eval(ctx, methods_js, strlen(methods_js), "<kwcc>", 0);
     if (JS_IsException(meth_result)) {
         JSValue exc = JS_GetException(ctx);
