@@ -28,6 +28,8 @@
 | `kwcc_bus.h` | 事件总线声明 + `KWCC_BUS_WILDCARD` 常量 |
 | `kwcc_js.c` | **Facade**：封装 mquickjs，提供 `kwcc_js_ops_t` 操作接口 + 模块注册 + `$notify` 通道 + bus consumer |
 | `kwcc_js.h` | JS Facade 类型：`kwcc_js_ops_t` + `kwcc_js_module_t` + `kwcc_js_val_t` + `kwcc_js_cstr_buf_t` + 生命周期 API |
+| `kwcc_edit.c/h` | 编辑控件宿主：状态机（closed→editing）+ title→field 注册表 + 焦点唯一权威 + 缺报自动 commit + 一次性交付注册表（committed/cancelled）|
+| `kwcc_edit_appkit.m/h` | AppKit 编辑后端（`kwcc_edit_backend_ops_t` 实现）：NSTextField 单行 / NSTextView(plain, in NSScrollView) 多行，句柄=容器；**对 sokol 零依赖**（window 经宿主注入）|
 | `kwcc_io.c` | I/O Reactor：select() 非阻塞 FD 管理器 |
 | `kwcc_io.h` | I/O 管理器声明 |
 | `kwcc_http.c` | HTTP 模块：fork+pipe+curl+picohttpparser，bus 事件分发，`--http1.1` 强制协议 |
@@ -318,6 +320,8 @@ ui.endPanel()
 // 交互控件
 ui.button(text, topic)        // 返回 bool(点击), topic 非空时 dispatch "click"
 ui.slider(text, value, min, max, topic)  // 返回 value, 变化时 dispatch "change"
+ui.textbox(label, value, topic, multiline)  // 编辑控件：展示 GL / 编辑原生 AppKit 委托；commit dispatch "change"，Esc dispatch "cancel"
+ui.textboxValue(label)        // 取回最后一次 commit 的值（在 change handler 内同步调用）
 
 // 布局
 ui.layoutRow(height, w1, w2, w3, w4)

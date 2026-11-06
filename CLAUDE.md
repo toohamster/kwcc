@@ -46,12 +46,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Download all dependencies
 ./setup.sh
 
-# Build (two-stage)
+# Build (two-stage) — Release（默认，诊断插桩编译剔除）
 make
+
+# Debug build（KWCC_DEBUG：诊断插桩 kwcc_diag 编译生效，切换需 clean 重建）
+make debug
 
 # Run
 make run
 # or: ./kwcc
+
+# Test binaries（链接命令唯一来源 = Makefile）
+make test-l1
 ```
 
 **Two-stage build:**
@@ -115,6 +121,8 @@ The `ui` object is injected via `kwcc_ui()` global function + JS wrapper in `kwc
 - `ui.sync(key, visible)` — sync module state to C layer (visibility barrier)
 - `ui.button(text, topic)` → returns bool (clicked), auto-dispatches when topic provided
 - `ui.slider(text, value, min, max, topic)` → returns current value, auto-dispatches on change
+- `ui.textbox(label, value, topic, multiline)` → text field (display: GL; edit: native AppKit control overlay); commit dispatches "change", Esc dispatches "cancel"
+- `ui.textboxValue(label)` → fetch last committed value (call inside the change handler)
 - `ui.label(text)`
 - `ui.layoutRow(height)`
 - `ui.svg(path_or_svg, x, y, w, h)` — render SVG from file path or inline string (`data[0] == '<'`)

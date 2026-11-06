@@ -120,7 +120,7 @@
 - **和 requirements/ memory/ 的区别**：requirements 写"做什么"，design 写"为什么"，memory 记事实
 - **演进规则**：决策变化时追加不覆盖，用 `> **演进（日期）**` 格式
 - **模块开发完成后**：用户发"沉淀 design"指令时，回顾讨论→判断归属→检查过时→去重
-- 现有文件：`bus-split-rationale.md`、`facade-plugin-architecture-rationale.md`、`http-implementation-rationale.md`
+- 现有文件：`bus-split-rationale.md`、`facade-plugin-architecture-rationale.md`、`http-implementation-rationale.md`、`architecture-boundary-rationale.md`（服务化=模块边界；bus 唯一耦合点纪律；插件生态使宿主进程隔离为架构必备——四条件 checklist 逐服务判定）、`x-close-fix-postmortem.md`（X 关闭事故复盘）
 - 功能分支 → main 的完整发布流程（PR、合并、打标签、Release）
 - 版本号自动递增规则（vX.Y.Z）
 - 保留远程分支、留在当前分支等注意事项

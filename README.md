@@ -165,6 +165,7 @@ $config.coreSetTlv("http", { bin_path: "/usr/local/bin/curl", timeout: "60" });
 | 22 | [lifecycle-shutdown-service-spec.md](requirements/lifecycle-shutdown-service-spec.md) | ⏳ 设计完成（v2 窄边界），待实施 | v2：仅 force_all，runtime 回收模块自治 |
 | 22b | [http-shutdown-implementation-plan.md](requirements/http-shutdown-implementation-plan.md) | ⏳ 设计完成（v2），待实施 | HTTP 接入 v2：cancel 逻辑放弃 + check_progress 自治回收 |
 | 22c | [lifecycle-shutdown-v2-discussion.md](requirements/lifecycle-shutdown-v2-discussion.md) | ✅ 讨论闭环 | v1→v2 演进讨论（7 项），决策沉淀到 #22/#22b |
+| 25 | [edit-control-implementation-plan.md](requirements/edit-control-implementation-plan.md) | ✅ 完成 | 编辑控件：GL 展示 + 原生编辑委托（AppKit 后端）+ ops 接口隔离，60/60 |
 | — | [spec.md](spec.md) | — | 完整项目规范 |
 
 ## 许可证

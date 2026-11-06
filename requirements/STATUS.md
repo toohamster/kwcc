@@ -31,6 +31,7 @@
 | 22 | `lifecycle-shutdown-service-spec.md` | ⏸ 服务暂缓（泛化蓝图） | 方案一降级：单客户世界不建服务，校验规则应用于服务自身 | — |
 | 22b | `http-shutdown-implementation-plan.md` | ✅ 方案一完成 | cancel 逻辑放弃 + 自治 reap + shutdown 直调（服务壳移除），L1 11/11 + 实机 kill 冒烟 | 11/11 |
 | 22c | `lifecycle-shutdown-v2-discussion.md` | ✅ 讨论闭环 | v1→v2 演进讨论（7 项），决策沉淀到 #22/#22b | — |
+| 25 | `edit-control-implementation-plan.md` | ✅ 完成 | 编辑控件：GL 展示 + 原生编辑委托（AppKit 后端）+ ops 接口隔离；L1 60/60 + L2 用户验收（中文 IME ✓）；实施期事故立法见章程 | 60/60 |
 
 ## 方案依赖关系
 
@@ -75,13 +76,15 @@ v2 讨论闭环（2026-11-04）：#22/#22b 设计收敛，见 #22c；v2 讨论�
 > 方向已确认但未出正式方案。细化后拆出独立文件，编号分配到时间线表。
 >
 > **立项校验规则（2026-11-04 规划评审确定）**：每个新方案立项前先回答——"这个功能让'用 JS 构建 UI'变强了吗，还是只有系统层受益？"系统能力只有在阻塞真实 UI 应用时才做。背景：v0.0.3 后工作集中在系统层（bus/mempool/HTTP/dispatch），UI 主业（控件/布局/交互）自 SVG 后未再前进，存在偏差。
+>
+> **演进（2026-11-04）**：规则适用范围修正——**能力增类**功能（给引擎加能力）仍按本规则执行；**结构预留类**决策（耦合点、消息边界、契约标定等"装不回去"的属性）不受"当前无证据"否决，以成熟期目标应用形态为架构基准（目标形态与判定标准见 [design/architecture-boundary-rationale.md](../design/architecture-boundary-rationale.md)）。
 
 ### P1：UI 主业回归（Phase 2，Phase 1 收尾后开始）
 
 **背景**：kwcc 定位是桌面 UI 引擎，但 UI 核心层控件停在 SVG（9 个控件），最大短板是 UI 本身。检验标准：能否用 kwcc 写出"应用级"界面（表单/设置面板）——目前卡在没有文本输入框。
 
 **方向概要**（编号预分配）：
-- **#25 `ui.textbox` 文本输入**（生死级缺失）：mu_textbox 桥接 + 键盘事件链路（SAPP_EVENTTYPE_CHAR 已接，需 KEY_DOWN/焦点处理）+ JS API。出正式方案后拆独立文件
+- **#25 `ui.textbox` 文本输入**：✅ 已出正式方案（[edit-control-implementation-plan.md](edit-control-implementation-plan.md)）——编辑委托 OS 原生控件（AppKit 后端），mu_textbox 桥接/自研核心两方向已否决，待审定后实施
 - **#26 控件补齐**：checkbox → icon / header / treenode（microui 已有实现，主要是桥接成本，按 ui.* 标准四步流程推进）
 - **#27 布局增强**：自动宽度 / 比例列 / 超 4 列——由 #24 示例需求倒逼，按需做
 
