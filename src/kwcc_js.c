@@ -515,7 +515,9 @@ kwcc_js_val_t kwcc_js_dispatch_call(const char *module, const char *func,
                                      int argc, kwcc_js_val_t *argv) {
     int mi = kwcc_js_dispatch_find_module(module);
     if (mi < 0) {
-        log_error("js: dispatch: unknown module '%s'", module);
+        /* 容错路径（返回 undefined，调用方负责处理）：启动自检 A15 每次触发，
+         * ERROR 级污染日志（2026-11-06 用户决策）→ 诊断级，仅 KWCC_DEBUG 构建可见 */
+        kwcc_diag("js: dispatch: unknown module '%s'", module);
         return g_kwcc_js_ops.undefined;
     }
 
